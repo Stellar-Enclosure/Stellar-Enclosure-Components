@@ -1,0 +1,61 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+stages:
+  - test
+
+default:
+  image: eclipse-temurin:21-jdk-jammy
+  interruptible: true
+
+variables:
+  STELLAR_USE_SOURCE_BOOTSTRAP: "true"
+  MAVEN_USER_HOME: "$CI_PROJECT_DIR/.cache/maven"
+  MAVEN_REPO_LOCAL: "$CI_PROJECT_DIR/.cache/maven/repository"
+
+build-and-unit-tests:
+  stage: test
+  timeout: 45 minutes
+  cache:
+    key:
+      prefix: maven-jdk21
+      files:
+        - pom.xml
+        - .mvn/wrapper/maven-wrapper.properties
+    paths:
+      - .cache/maven/
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends ca-certificates curl git python3 unzip
+  script:
+    - |
+      set -eu
+      workspace="$CI_PROJECT_DIR/.ci/workspace"
+      mkdir -p "$workspace"
+      git clone --quiet --no-hardlinks "$CI_PROJECT_DIR" "$workspace/Stellar-Enclosure-Components"
+      if [ "$STELLAR_USE_SOURCE_BOOTSTRAP" != "false" ]; then
+        # Sibling projects must allow this project's CI_JOB_TOKEN to read their repositories.
+        # Override STELLAR_SOURCE_BASE_URL to build against another group or source mirror.
+        source_base="${STELLAR_SOURCE_BASE_URL:-${CI_REPOSITORY_URL%/*}}"
+        for repository in Stellar-Enclosure-Parent Stellar-Enclosure-Components Stellar-Enclosure-COLA tianshu-service yuheng-service yaoguang-service tianquan-jianshen-service tianquan-shoubing-service; do
+          if [ "$repository" != "Stellar-Enclosure-Components" ]; then
+            git clone --quiet --depth 1 "$source_base/$repository.git" "$workspace/$repository"
+          fi
+        done
+        bash "$workspace/Stellar-Enclosure-Parent/scripts/bootstrap-migration.sh" \
+          --workspace "$workspace" --local-repository "$MAVEN_REPO_LOCAL"
+      fi
+      cd "$workspace/Stellar-Enclosure-Components"
+      ./mvnw -B -ntp "-Dmaven.repo.local=$MAVEN_REPO_LOCAL" -DskipTests=false -DskipITs -Dinvoker.skip=true -Darchetype.test.skip=true test
+  artifacts:
+    when: always
+    expire_in: 7 days
+    reports:
+      junit: .ci/workspace/Stellar-Enclosure-Components/**/target/surefire-reports/TEST-*.xml
+    paths:
+      - .ci/workspace/Stellar-Enclosure-Components/**/target/surefire-reports/

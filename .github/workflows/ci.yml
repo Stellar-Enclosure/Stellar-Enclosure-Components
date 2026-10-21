@@ -1,4 +1,4 @@
-name: Validate
+name: Build and unit tests
 on:
   push:
   pull_request:
@@ -73,13 +73,13 @@ jobs:
           path: workspace/tianquan-shoubing-service
           token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
           persist-credentials: false
-      - name: Validate initial artifact graph
+      - name: Prepare source dependencies
         if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
         run: |
           bash workspace/Stellar-Enclosure-Parent/scripts/bootstrap-migration.sh \
             --workspace "$GITHUB_WORKSPACE/workspace" \
-            --local-repository "$RUNNER_TEMP/stellar-maven"
-      - name: Compile using published artifacts
-        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP == 'false'
+            --local-repository "$HOME/.m2/repository"
+      - name: Compile and run unit tests
         working-directory: workspace/Stellar-Enclosure-Components
-        run: ./mvnw -B -ntp test-compile
+        run: |
+          ./mvnw -B -ntp -DskipTests=false -DskipITs -Dinvoker.skip=true -Darchetype.test.skip=true test
