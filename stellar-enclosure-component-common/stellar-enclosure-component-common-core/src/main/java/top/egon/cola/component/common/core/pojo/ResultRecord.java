@@ -1,0 +1,84 @@
+package top.egon.cola.component.common.core.pojo;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import io.swagger.v3.oas.annotations.media.Schema;
+import top.egon.cola.component.common.core.enums.ErrorStatus;
+import top.egon.cola.component.common.core.enums.ResultCode;
+import top.egon.cola.component.common.core.exception.CommonException;
+import top.egon.cola.component.common.trace.TraceContext;
+
+import java.io.Serial;
+import java.time.Instant;
+
+/**
+ * External single-object response record.
+ *
+ * @param success whether the operation succeeded
+ * @param code stable business result code
+ * @param status stable business result status text
+ * @param message response message safe for client display
+ * @param data response payload, nullable
+ * @param traceId trace id from MDC, nullable
+ * @param timestamp response created timestamp in milliseconds
+ * @param <T> payload type
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+@JsonInclude(JsonInclude.Include.ALWAYS)
+@JsonPropertyOrder({"success", "code", "status", "message", "data", "traceId", "timestamp"})
+public record ResultRecord<T>(
+        @JsonProperty("success") @Schema(description = "本次操作是否成功") boolean success,
+        @JsonProperty("code") @Schema(description = "稳定的业务结果码") int code,
+        @JsonProperty("status") @Schema(description = "业务结果状态标识") String status,
+        @JsonProperty("message") @Schema(description = "可向调用方展示的结果说明") String message,
+        @JsonProperty("data") @Schema(description = "业务返回数据；失败或无返回值时可为空") T data,
+        @JsonProperty("traceId") @Schema(description = "请求链路追踪 ID，可用于关联服务日志") String traceId,
+        @JsonProperty("timestamp") @Schema(description = "响应生成时间，Unix 毫秒时间戳") Long timestamp
+) implements BasePojo {
+
+    @Serial
+    @JsonIgnore
+    private static final long serialVersionUID = 1L;
+
+    public static <T> ResultRecord<T> success(T data) {
+        return result(ResultCode.SUCCESS, true, data);
+    }
+
+    public static <T> ResultRecord<T> failure(ErrorStatus status) {
+        return result(status, false, null);
+    }
+
+    public static <T> ResultRecord<T> failure(Throwable throwable) {
+        if (throwable instanceof CommonException exception) {
+            return failure(exception.getCode(), exception.getStatus(), exception.getMessage());
+        }
+        return failure(ResultCode.SYSTEM_ERROR);
+    }
+
+    public static <T> ResultRecord<T> failure(int code, String message) {
+        return failure(code, null, message);
+    }
+
+    public static <T> ResultRecord<T> failure(int code, String status, String message) {
+        return result(code, status, message, false, null);
+    }
+
+    public static <T> ResultRecord<T> result(ErrorStatus status, boolean success, T data) {
+        return result(status.getCode(), status.getStatus(), status.getMessage(), success, data);
+    }
+
+    public static <T> ResultRecord<T> result(int code, String message, boolean success, T data) {
+        return result(code, null, message, success, data);
+    }
+
+    public static <T> ResultRecord<T> result(int code, String status, String message, boolean success, T data) {
+        return new ResultRecord<>(success, code, status, message, data, TraceContext.getTraceId(), now());
+    }
+
+    private static long now() {
+        return Instant.now().toEpochMilli();
+    }
+}

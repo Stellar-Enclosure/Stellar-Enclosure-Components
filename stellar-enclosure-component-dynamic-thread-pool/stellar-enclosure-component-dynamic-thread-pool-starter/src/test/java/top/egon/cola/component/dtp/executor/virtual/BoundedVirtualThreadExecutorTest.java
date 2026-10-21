@@ -1,0 +1,521 @@
+package top.egon.cola.component.dtp.executor.virtual;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
+import top.egon.cola.component.common.trace.TraceContext;
+import top.egon.cola.component.dtp.domain.model.entity.ExecutorSnapshot;
+import top.egon.cola.component.dtp.domain.model.entity.ExecutorUpdateCommand;
+import top.egon.cola.component.dtp.domain.model.entity.UpdateResult;
+import top.egon.cola.component.dtp.domain.model.valobj.ExecutorKind;
+import top.egon.cola.component.dtp.executor.ManagedExecutor;
+import top.egon.cola.component.dtp.executor.adapter.BoundedVirtualThreadManagedExecutor;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * @ClassName: BoundedVirtualThreadExecutorTest
+ * @description: 有界虚拟线程执行器测试
+ * @author: 有罗敷的马同学
+ * @datetime: 2026Year-06Month-29Day
+ * @Version: 1.0
+ */
+public class BoundedVirtualThreadExecutorTest {
+
+    private static final String EXTERNAL_MDC_KEY = "businessId";
+
+    @AfterEach
+    public void clearMdc() {
+        TraceContext.clearOwnedKeys();
+        MDC.clear();
+    }
+
+    @Test
+    public void test_executeShouldRunVirtualTaskWithCapturedTraceAndExternalMdc() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            CountDownLatch done = new CountDownLatch(1);
+            AtomicReference<TaskContext> taskContext = new AtomicReference<>();
+            TraceContext state = TraceContext.root("request-execute");
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "execute");
+                executor.execute(() -> {
+                    taskContext.set(currentTaskContext());
+                    done.countDown();
+                });
+            }
+
+            assertThat(done.await(3, TimeUnit.SECONDS)).isTrue();
+            executor.shutdown();
+            assertThat(executor.awaitTermination(3, TimeUnit.SECONDS)).isTrue();
+            assertCapturedContext(taskContext.get(), state, "execute");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_submitRunnableShouldRunVirtualTaskWithCapturedTraceAndExternalMdc() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            AtomicReference<TaskContext> taskContext = new AtomicReference<>();
+            TraceContext state = TraceContext.root("request-submit-runnable");
+            Future<?> future;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "submit-runnable");
+                future = executor.submit(() -> taskContext.set(currentTaskContext()));
+            }
+
+            future.get();
+
+            assertCapturedContext(taskContext.get(), state, "submit-runnable");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_submitRunnableWithResultShouldRunWithCapturedTrace() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            AtomicReference<TaskContext> taskContext = new AtomicReference<>();
+            TraceContext state = TraceContext.root("request-submit-result");
+            Future<String> future;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "submit-result");
+                future = executor.submit(() -> taskContext.set(currentTaskContext()), "completed");
+            }
+
+            assertThat(future.get()).isEqualTo("completed");
+            assertCapturedContext(taskContext.get(), state, "submit-result");
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_submitCallableShouldRunVirtualTaskWithCapturedTraceAndExternalMdc() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            TraceContext state = TraceContext.root("request-submit-callable");
+            Future<TaskContext> future;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "submit-callable");
+                future = executor.submit(BoundedVirtualThreadExecutorTest::currentTaskContext);
+            }
+
+            assertCapturedContext(future.get(), state, "submit-callable");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_invokeAllShouldRunVirtualTaskWithCapturedTraceAndExternalMdc() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            TraceContext state = TraceContext.root("request-invoke-all");
+            List<Future<TaskContext>> futures;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "invoke-all");
+                futures = executor.invokeAll(List.of(BoundedVirtualThreadExecutorTest::currentTaskContext));
+            }
+
+            assertCapturedContext(futures.getFirst().get(), state, "invoke-all");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_invokeAnyShouldRunVirtualTaskWithCapturedTraceAndExternalMdc() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            TraceContext state = TraceContext.root("request-invoke-any");
+            TaskContext taskContext;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "invoke-any");
+                taskContext = executor.invokeAny(List.of(BoundedVirtualThreadExecutorTest::currentTaskContext));
+            }
+
+            assertCapturedContext(taskContext, state, "invoke-any");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_executeShouldRejectWhenConcurrencyLimitExceeded() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            executor.execute(() -> {
+                started.countDown();
+                await(release);
+            });
+            assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+
+            assertThatThrownBy(() -> executor.execute(() -> {
+            }))
+                    .isInstanceOf(RejectedExecutionException.class)
+                    .hasMessage("Virtual executor concurrency limit exceeded");
+
+            assertThat(executor.submittedTasks()).isEqualTo(2L);
+            assertThat(executor.rejectedTasks()).isEqualTo(1L);
+            assertThat(executor.runningTasks()).isEqualTo(1L);
+            assertThat(executor.availablePermits()).isEqualTo(0);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_submitCallableFailureShouldIncrementFailedOnly() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            AtomicReference<TaskContext> taskContext = new AtomicReference<>();
+            TraceContext state = TraceContext.root("request-submit-failure");
+            Future<String> future;
+            try (TraceContext.Scope ignored = TraceContext.open(state)) {
+                MDC.put(EXTERNAL_MDC_KEY, "submit-failure");
+                future = executor.submit(() -> {
+                    taskContext.set(currentTaskContext());
+                    throw new IllegalStateException("submit failure");
+                });
+            }
+
+            assertThatThrownBy(future::get)
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCauseInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("submit failure");
+            assertCapturedContext(taskContext.get(), state, "submit-failure");
+            assertThat(TraceContext.current()).isEmpty();
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(0L);
+            assertThat(executor.failedTasks()).isEqualTo(1L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_submitRunnableFailureShouldIncrementFailedOnly() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            Future<?> future = executor.submit(() -> {
+                throw new IllegalStateException("submit runnable failure");
+            });
+
+            assertThatThrownBy(future::get)
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCauseInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("submit runnable failure");
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(0L);
+            assertThat(executor.failedTasks()).isEqualTo(1L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_invokeAllFailureShouldIncrementFailedOnly() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            Future<String> future = executor.invokeAll(Collections.<Callable<String>>singletonList(() -> {
+                throw new IllegalStateException("invoke failure");
+            })).getFirst();
+
+            assertThatThrownBy(future::get)
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCauseInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invoke failure");
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(0L);
+            assertThat(executor.failedTasks()).isEqualTo(1L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_invokeAnyFailureShouldIncrementFailedOnly() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            assertThatThrownBy(() -> executor.invokeAny(Collections.<Callable<String>>singletonList(() -> {
+                throw new IllegalStateException("invoke any failure");
+            })))
+                    .isInstanceOf(ExecutionException.class)
+                    .hasCauseInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invoke any failure");
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(0L);
+            assertThat(executor.failedTasks()).isEqualTo(1L);
+            assertThat(executor.runningTasks()).isEqualTo(0L);
+            assertThat(executor.availablePermits()).isEqualTo(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_updateConcurrencyLimit() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            executor.updateConcurrencyLimit(3);
+
+            assertThat(executor.concurrencyLimit()).isEqualTo(3);
+            assertThat(executor.availablePermits()).isEqualTo(3);
+
+            executor.updateConcurrencyLimit(2);
+
+            assertThat(executor.concurrencyLimit()).isEqualTo(2);
+            assertThat(executor.availablePermits()).isEqualTo(2);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_constructorShouldRejectInvalidLimit() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new BoundedVirtualThreadExecutor("dtp-virtual", 0))
+                .withMessage("concurrencyLimit must be positive");
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new BoundedVirtualThreadExecutor("dtp-virtual", -1))
+                .withMessage("concurrencyLimit must be positive");
+    }
+
+    @Test
+    public void test_executeShouldRejectNullSynchronously() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        try {
+            assertThatNullPointerException().isThrownBy(() -> executor.execute(null));
+            assertThat(executor.submittedTasks()).isEqualTo(0L);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_adapterSnapshotAndUpdate() {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 2);
+        ManagedExecutor managedExecutor = new BoundedVirtualThreadManagedExecutor(
+                "test-app", "instance-01", "virtualExecutor", executor
+        );
+        try {
+            ExecutorSnapshot snapshot = managedExecutor.snapshot();
+
+            assertThat(snapshot.getAppName()).isEqualTo("test-app");
+            assertThat(snapshot.getInstanceId()).isEqualTo("instance-01");
+            assertThat(snapshot.getExecutorName()).isEqualTo("virtualExecutor");
+            assertThat(snapshot.getExecutorKind()).isEqualTo(ExecutorKind.VIRTUAL_THREAD_PER_TASK);
+            assertThat(snapshot.isVirtual()).isTrue();
+            assertThat(snapshot.isResizable()).isFalse();
+            assertThat(snapshot.getConcurrencyLimit()).isEqualTo(2);
+            assertThat(snapshot.getRunningTasks()).isEqualTo(0L);
+            assertThat(snapshot.getSubmittedTasks()).isEqualTo(0L);
+            assertThat(snapshot.getCompletedTaskCount()).isEqualTo(0L);
+            assertThat(snapshot.getFailedTasks()).isEqualTo(0L);
+            assertThat(snapshot.getRejectedTasks()).isEqualTo(0L);
+            assertThat(snapshot.getAvailablePermits()).isEqualTo(2);
+            assertThat(snapshot.getCorePoolSize()).isNull();
+            assertThat(snapshot.getQueueSize()).isNull();
+            assertThat(snapshot.getReportTime()).isNotNull();
+            assertThat(managedExecutor.supportsResize()).isFalse();
+            assertThat(managedExecutor.supportsVirtualThread()).isTrue();
+            assertThat(managedExecutor.supportsQueueMetrics()).isFalse();
+
+            ExecutorUpdateCommand command = new ExecutorUpdateCommand();
+            command.setConcurrencyLimit(4);
+            UpdateResult result = managedExecutor.update(command);
+
+            assertThat(result.isSuccess()).isTrue();
+            assertThat(result.getMessage()).isEqualTo("success");
+            assertThat(result.getBefore().getConcurrencyLimit()).isEqualTo(2);
+            assertThat(result.getAfter().getConcurrencyLimit()).isEqualTo(4);
+            assertThat(executor.concurrencyLimit()).isEqualTo(4);
+
+            ExecutorUpdateCommand invalidCommand = new ExecutorUpdateCommand();
+            UpdateResult failedResult = managedExecutor.update(invalidCommand);
+
+            assertThat(failedResult.isSuccess()).isFalse();
+            assertThat(failedResult.getMessage()).isEqualTo("concurrencyLimit must not be null");
+            assertThat(failedResult.getAfter().getConcurrencyLimit()).isEqualTo(4);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    public void test_adapterSubmitShouldPropagateContextOnVirtualThread() throws Exception {
+        BoundedVirtualThreadExecutor executor = new BoundedVirtualThreadExecutor("dtp-virtual", 1);
+        ManagedExecutor managedExecutor = new BoundedVirtualThreadManagedExecutor(
+                "test-app", "instance-01", "virtualExecutor", executor
+        );
+        try {
+            TraceContext expected = TraceContext.root("adapter-request");
+            Future<TaskContext> future;
+            try (TraceContext.Scope ignored = expected.open()) {
+                MDC.put(EXTERNAL_MDC_KEY, "adapter");
+                future = managedExecutor.submit(BoundedVirtualThreadExecutorTest::currentTaskContext);
+            }
+
+            assertCapturedContext(future.get(3, TimeUnit.SECONDS), expected, "adapter");
+            assertThat(executor.submittedTasks()).isEqualTo(1L);
+            assertThat(executor.completedTasks()).isEqualTo(1L);
+            assertThat(executor.failedTasks()).isEqualTo(0L);
+        } finally {
+            managedExecutor.shutdownNow();
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static TaskContext currentTaskContext() {
+        return new TaskContext(
+                TraceContext.current().orElse(null),
+                MDC.get(EXTERNAL_MDC_KEY),
+                Thread.currentThread().isVirtual()
+        );
+    }
+
+    private static void assertCapturedContext(TaskContext actual, TraceContext expected, String externalMdc) {
+        assertThat(actual).isNotNull();
+        assertThat(actual.traceContext().traceId()).isEqualTo(expected.traceId());
+        assertThat(actual.traceContext().spanId()).isEqualTo(expected.spanId());
+        assertThat(actual.traceContext().parentSpanId()).isEqualTo(expected.parentSpanId());
+        assertThat(actual.traceContext().requestId()).isEqualTo(expected.requestId());
+        assertThat(actual.traceContext().traceFlags()).isEqualTo(expected.traceFlags());
+        assertThat(actual.traceContext().tracestate()).isEqualTo(expected.tracestate());
+        assertThat(actual.externalMdc()).isEqualTo(externalMdc);
+        assertThat(actual.virtualThread()).isTrue();
+    }
+
+    @Test
+    void observedRawSubmitCompletesAndReleasesPermitWhenContextInstallFails() throws Exception {
+        ThreadLocal<String> user = new ThreadLocal<>();
+        var contexts = new top.egon.cola.component.dtp.context.DtpTaskContextManager(List.of(
+                new io.micrometer.context.ThreadLocalAccessor<String>() {
+                    public Object key() { return "virtual.user"; }
+                    public String getValue() { return user.get(); }
+                    public void setValue(String value) { throw new IllegalStateException("install"); }
+                    public void setValue() { user.remove(); }
+                }));
+        var observer = new top.egon.cola.component.dtp.context.DtpTaskObserver("app", "one", "virtual",
+                new top.egon.cola.component.dtp.config.DynamicThreadPoolAutoProperties.Observation(), false, contexts);
+        var executor = new BoundedVirtualThreadExecutor("install-failure", 1);
+        executor.setTaskObserver(observer);
+        var invoked = new java.util.concurrent.atomic.AtomicBoolean();
+        user.set("request");
+        try {
+            Future<String> future = executor.submit(() -> { invoked.set(true); return "wrong"; });
+            assertThatThrownBy(() -> future.get(2, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(top.egon.cola.component.dtp.exception.DtpContextPropagationException.class);
+            org.awaitility.Awaitility.await().untilAsserted(() -> {
+                assertThat(executor.availablePermits()).isEqualTo(1);
+                assertThat(executor.runningTasks()).isZero();
+                assertThat(observer.failedTasks()).isEqualTo(1);
+            });
+            assertThat(invoked).isFalse();
+            assertThat(user.get()).isEqualTo("request");
+        } finally { executor.shutdown(); user.remove(); }
+    }
+
+    @Test
+    void cancellingRawFutureDuringContextInstallKeepsCancellationAndReleasesPermit() throws Exception {
+        ThreadLocal<String> user = new ThreadLocal<>();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        var contexts = new top.egon.cola.component.dtp.context.DtpTaskContextManager(List.of(
+                new io.micrometer.context.ThreadLocalAccessor<String>() {
+                    public Object key() { return "virtual.cancel"; }
+                    public String getValue() { return user.get(); }
+                    public void setValue(String value) {
+                        entered.countDown();
+                        try { release.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                        throw new IllegalStateException("install failed after cancellation");
+                    }
+                    public void setValue() { user.remove(); }
+                }));
+        var observer = new top.egon.cola.component.dtp.context.DtpTaskObserver("app", "one", "cancel",
+                new top.egon.cola.component.dtp.config.DynamicThreadPoolAutoProperties.Observation(), false, contexts);
+        var executor = new BoundedVirtualThreadExecutor("cancel-install", 1);
+        executor.setTaskObserver(observer);
+        user.set("caller");
+        try {
+            Future<String> future = executor.submit(() -> "never");
+            assertThat(entered.await(2, TimeUnit.SECONDS)).isTrue();
+            assertThat(future.cancel(true)).isTrue();
+            assertThat(user.get()).isEqualTo("caller");
+            release.countDown();
+            org.awaitility.Awaitility.await().untilAsserted(() -> {
+                assertThat(executor.availablePermits()).isEqualTo(1);
+                assertThat(observer.cancelledTasks()).isEqualTo(1);
+                assertThat(observer.failedTasks()).isZero();
+            });
+        } finally { release.countDown(); executor.shutdown(); user.remove(); }
+    }
+
+    private record TaskContext(TraceContext traceContext, String externalMdc, boolean virtualThread) {
+    }
+
+}

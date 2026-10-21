@@ -1,0 +1,531 @@
+package top.egon.cola.component.codegen.validation;
+
+import lombok.extern.slf4j.Slf4j;
+import top.egon.cola.component.codegen.model.CodegenConfigBO;
+import top.egon.cola.component.codegen.model.CodegenPlanBO;
+import top.egon.cola.component.codegen.model.CodegenSchemaBO;
+import top.egon.cola.component.codegen.profile.ProjectLayoutStrategy;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Preflight for persistence generation. A failure returns diagnostics and does not create directories.
+ */
+@Slf4j
+public class GenerationScopeValidator {
+
+    public static final String BASE_FIELD_TYPE = "BASE_FIELD_TYPE";
+
+    public static final String LEGACY_UNIQUE_KEY = "LEGACY_UNIQUE_KEY";
+
+    public static final String UNSUPPORTED_ID = "UNSUPPORTED_ID";
+
+    public static final String UNKNOWN_SQL_TYPE = "UNKNOWN_SQL_TYPE";
+
+    public static final String MISSING_TYPE = "MISSING_TYPE";
+
+    public static final String BROADCAST_WRITE = "BROADCAST_WRITE";
+
+    public static final String UNSUPPORTED_ARTIFACT = "UNSUPPORTED_ARTIFACT";
+
+    private static final Set<String> BASE_COLUMNS = Set.of(
+            "id", "tenant_id", "create_user_id", "create_time", "update_user_id", "update_time", "deleted_at", "version");
+
+    private static final List<String> XML_COLUMNS = List.of(
+            "id", "tenant_id", "create_user_id", "create_time", "update_user_id", "update_time", "deleted_at", "version");
+
+    private static final String PROPERTIES_BEAN =
+            "egon.cola.component.mybatis-plus-top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties";
+
+    public List<CodegenPlanBO.DiagnosticBO> validate(CodegenConfigBO config, CodegenSchemaBO schema) {
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        if (config == null || config.getProfile() == null || config.getArtifacts() == null || config.getArtifacts().isEmpty()) {
+            diagnostics.add(diagnostic("CONFIG_REQUIRED", "/artifacts", "generation scope is incomplete"));
+            return diagnostics;
+        }
+        ProjectLayoutStrategy layout = ProjectLayoutStrategy.resolve(config.getProfile());
+        for (String artifact : config.getArtifacts()) {
+            if (!layout.allows(artifact)) {
+                diagnostics.add(diagnostic(UNSUPPORTED_ARTIFACT, "/artifacts", "artifact is not allowed for " + config.getProfile().code()));
+            }
+        }
+        if (schema == null || schema.getTables() == null || schema.getTables().isEmpty()) {
+            diagnostics.add(diagnostic("CONFIG_REQUIRED", "/logicalTables", "schema has no tables"));
+            return diagnostics;
+        }
+        for (CodegenSchemaBO.TableBO table : schema.getTables()) {
+            diagnostics.addAll(validateTable(config, table));
+        }
+        diagnostics.addAll(existingTypes(config));
+        if (!diagnostics.isEmpty()) {
+            log.warn("generation scope rejected: {}", diagnostics.stream().map(CodegenPlanBO.DiagnosticBO::getCode).distinct().toList());
+        }
+        return List.copyOf(diagnostics);
+    }
+
+    public Map<String, Object> renderModel(CodegenConfigBO config, CodegenSchemaBO.TableBO table, String artifact) {
+        ProjectLayoutStrategy layout = ProjectLayoutStrategy.resolve(config.getProfile());
+        for (CodegenSchemaBO.ColumnBO column : table.getColumns()) {
+            TemporalDefaultValidator.requireUtc(column);
+        }
+        String poType = simpleType(config, "po", typeName(table.getLogicalName(), "PO"));
+        String daoType = simpleType(config, "dao", typeName(table.getLogicalName(), "DAO"));
+        String repoType = typeName(table.getLogicalName(), "Repository");
+        String poFqn = qualified(config, "po", layout.packageName(config, "po"), poType);
+        String daoFqn = qualified(config, "dao", layout.packageName(config, "dao"), daoType);
+        Map<String, Object> model = new LinkedHashMap<>();
+        model.put("artifact", artifact);
+        model.put("poPackage", packageOf(poFqn));
+        model.put("daoPackage", packageOf(daoFqn));
+        model.put("repoPackage", layout.packageName(config, "repo"));
+        model.put("poType", poType);
+        model.put("daoType", daoType);
+        model.put("repoType", repoType);
+        model.put("poFqn", poFqn);
+        model.put("daoFqn", daoFqn);
+        model.put("tableName", table.getLogicalName());
+        model.put("businessFields", businessFields(table));
+        model.put("xmlColumns", xmlColumns(table));
+        String stem = typeName(table.getLogicalName(), "");
+        String domainType = stem + "BO";
+        String domainPackage = layout.packageName(config, "domain-model");
+        CodegenConfigBO.FieldPoliciesBO policies = config.getFieldPolicies();
+        model.put("daoBean", decapitalize(daoType));
+        model.put("repoBean", decapitalize(repoType));
+        model.put("propertiesBean", PROPERTIES_BEAN);
+        model.put("stem", stem);
+        model.put("domainType", domainType);
+        model.put("domainPackage", domainPackage);
+        model.put("domainFqn", domainPackage + "." + domainType);
+        model.put("domainQueryType", stem + "DomainQuery");
+        model.put("domainQueryFqn", domainPackage + "." + stem + "DomainQuery");
+        model.put("domainServiceType", stem + "DomainService");
+        model.put("domainServiceFqn", layout.packageName(config, "domain-service") + "." + stem + "DomainService");
+        model.put("domainImplType", stem + "DomainServiceImpl");
+        model.put("domainImplPackage", layout.packageName(config, "domain-impl"));
+        model.put("applicationPackage", layout.packageName(config, "command"));
+        model.put("createCommandType", "Create" + stem + "Command");
+        model.put("updateCommandType", "Update" + stem + "Command");
+        model.put("deleteCommandType", "Delete" + stem + "Command");
+        model.put("detailQueryType", stem + "DetailQuery");
+        model.put("pageQueryType", stem + "PageQuery");
+        model.put("resultType", stem + "Result");
+        model.put("manageType", stem + "Manage");
+        model.put("manageImplType", stem + "ManageImpl");
+        model.put("manageBean", decapitalize(stem + "Manage"));
+        model.put("domainServiceBean", decapitalize(stem + "DomainService"));
+        model.put("controllerType", stem + "Controller");
+        model.put("controllerBean", decapitalize(stem + "Controller"));
+        model.put("controllerPackage", layout.packageName(config, "controller"));
+        model.put("persistenceConverterType", stem + "PersistenceConverter");
+        model.put("persistenceConverterPackage", layout.packageName(config, "persistence-converter"));
+        model.put("persistenceConverterFqn", layout.packageName(config, "persistence-converter") + "." + stem + "PersistenceConverter");
+        model.put("persistenceConverterBean", decapitalize(stem + "PersistenceConverterImpl"));
+        model.put("createConverterType", "Create" + stem + "CommandConverter");
+        model.put("updateConverterType", "Update" + stem + "CommandConverter");
+        model.put("deleteConverterType", "Delete" + stem + "CommandConverter");
+        model.put("resultConverterType", stem + "ResultConverter");
+        model.put("applicationConverterPackage", layout.packageName(config, "application-converter"));
+        model.put("domainFields", policyFields(table, unionPolicies(policies)));
+        model.put("createFields", policyFields(table, list(policies, "create")));
+        model.put("updateFields", policyFields(table, list(policies, "update")));
+        model.put("resultFields", policyFields(table, list(policies, "result")));
+        model.put("filterFields", policyFields(table, list(policies, "filter")));
+        model.put("sortFields", policyFields(table, list(policies, "sort")));
+        model.put("includeQuery", config.getArtifacts() != null && config.getArtifacts().contains("domain-query"));
+        model.put("errorMapper", config.getApiContract() == null ? "" : config.getApiContract().getExistingErrorMapper());
+        model.put("apiBasePath", config.getApiContract() == null || config.getApiContract().getBasePath() == null
+                ? "" : config.getApiContract().getBasePath());
+        model.put("ignoredPoFields", List.of(
+                "tenantId", "createUserId", "createTime", "updateUserId", "updateTime", "deletedAt"));
+        return Map.copyOf(model);
+    }
+
+    private static List<String> unionPolicies(CodegenConfigBO.FieldPoliciesBO policies) {
+        java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+        names.addAll(list(policies, "create"));
+        names.addAll(list(policies, "update"));
+        names.addAll(list(policies, "result"));
+        names.addAll(list(policies, "filter"));
+        names.addAll(list(policies, "sort"));
+        return new ArrayList<>(names);
+    }
+
+    private static List<String> list(CodegenConfigBO.FieldPoliciesBO policies, String kind) {
+        if (policies == null) {
+            return List.of();
+        }
+        List<String> values = switch (kind) {
+            case "create" -> policies.getCreate();
+            case "update" -> policies.getUpdate();
+            case "result" -> policies.getResult();
+            case "filter" -> policies.getFilter();
+            case "sort" -> policies.getSort();
+            default -> List.of();
+        };
+        return values == null ? List.of() : values;
+    }
+
+    private static List<Map<String, String>> policyFields(CodegenSchemaBO.TableBO table, List<String> names) {
+        List<Map<String, String>> fields = new ArrayList<>();
+        for (String name : names) {
+            if (BASE_COLUMNS.contains(name)) {
+                continue;
+            }
+            CodegenSchemaBO.ColumnBO column = column(table, name);
+            if (column == null) {
+                continue;
+            }
+            String javaType = javaType(column);
+            fields.add(Map.of(
+                    "column", column.getName(),
+                    "javaName", javaName(column.getName()),
+                    "javaType", javaType == null ? "String" : javaType.startsWith("java.time.") ? javaType : simple(javaType),
+                    "nullable", String.valueOf(!Boolean.FALSE.equals(column.getNullable())),
+                    "length", column.getLength() == null ? "" : column.getLength().toString()));
+        }
+        return List.copyOf(fields);
+    }
+
+    private static String simple(String javaType) {
+        int dot = javaType.lastIndexOf('.');
+        return dot < 0 ? javaType : javaType.substring(dot + 1);
+    }
+
+    private List<CodegenPlanBO.DiagnosticBO> validateTable(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        if (table.getLogicalName() == null || !isIdentifier(table.getLogicalName())) {
+            diagnostics.add(diagnostic("CONFIG_REQUIRED", "/logicalTables", "logical table name is not a Java identifier"));
+            return diagnostics;
+        }
+        if ("BROADCAST".equals(table.getRole()) && containsWrite(config.getArtifacts())) {
+            diagnostics.add(diagnostic(BROADCAST_WRITE, "/artifacts", "broadcast tables do not generate writes"));
+        }
+        List<String> primaryColumns = primaryColumns(table);
+        CodegenSchemaBO.ColumnBO id = column(table, "id");
+        if (primaryColumns.size() != 1 || !"id".equals(primaryColumns.get(0)) || id == null
+                || !isBigint(id.getSqlType()) || Boolean.TRUE.equals(id.getNullable())) {
+            diagnostics.add(diagnostic(UNSUPPORTED_ID, "/" + table.getLogicalName() + "/id",
+                    "CRUD requires one non-null BIGINT id primary key"));
+        }
+        requireBase(diagnostics, table, "tenant_id", "bigint", false);
+        requireBase(diagnostics, table, "create_user_id", "varchar", false);
+        requireBase(diagnostics, table, "create_time", "timestamp", false);
+        requireBase(diagnostics, table, "update_user_id", "varchar", false);
+        requireBase(diagnostics, table, "update_time", "timestamp", false);
+        requireBase(diagnostics, table, "deleted_at", "timestamp", true);
+        requireBase(diagnostics, table, "version", "bigint", false);
+        requireTimeZone(diagnostics, table, "create_time", true);
+        requireTimeZone(diagnostics, table, "update_time", true);
+        requireTimeZone(diagnostics, table, "deleted_at", false);
+        if (hasLegacyBusinessKey(table)) {
+            diagnostics.add(diagnostic(LEGACY_UNIQUE_KEY, "/" + table.getLogicalName(),
+                    "a business-only unique key still blocks recreate after delete"));
+        }
+        for (CodegenSchemaBO.ColumnBO column : table.getColumns()) {
+            if (column.getName() == null || !isIdentifier(column.getName())) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/" + table.getLogicalName(), "column name is not an identifier"));
+                continue;
+            }
+            if (!TemporalDefaultValidator.supports(column)) {
+                diagnostics.add(diagnostic(TemporalDefaultValidator.TIME_DEFAULT_UNSUPPORTED,
+                        "/" + table.getLogicalName() + "/" + column.getName(),
+                        "temporal default must have explicit UTC semantics or a supported literal"));
+            }
+            if (!BASE_COLUMNS.contains(column.getName()) && javaType(column) == null) {
+                diagnostics.add(diagnostic(UNKNOWN_SQL_TYPE, "/" + table.getLogicalName() + "/" + column.getName(),
+                        "SQL type is not mapped"));
+            }
+        }
+        return diagnostics;
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> existingTypes(CodegenConfigBO config) {
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        Set<String> artifacts = Set.copyOf(config.getArtifacts());
+        if (artifacts.contains("repo") && !artifacts.contains("po") && blank(mapping(config, "po"))) {
+            diagnostics.add(missing("po"));
+        }
+        if ((artifacts.contains("repo") || artifacts.contains("mapper-xml")) && !artifacts.contains("dao")
+                && blank(mapping(config, "dao"))) {
+            diagnostics.add(missing("dao"));
+        }
+        return diagnostics;
+    }
+
+    private static void requireBase(
+            List<CodegenPlanBO.DiagnosticBO> diagnostics, CodegenSchemaBO.TableBO table, String name, String typePrefix, boolean nullable) {
+        CodegenSchemaBO.ColumnBO column = column(table, name);
+        if (column == null || column.getSqlType() == null || !column.getSqlType().toLowerCase(Locale.ROOT).startsWith(typePrefix)
+                || (nullable && Boolean.FALSE.equals(column.getNullable()))
+                || (!nullable && Boolean.TRUE.equals(column.getNullable()))) {
+            diagnostics.add(diagnostic(BASE_FIELD_TYPE, "/" + table.getLogicalName() + "/" + name,
+                    "base column does not match EgonModel"));
+        }
+    }
+
+    private static void requireTimeZone(List<CodegenPlanBO.DiagnosticBO> diagnostics,
+                                        CodegenSchemaBO.TableBO table, String name, boolean withTimeZone) {
+        CodegenSchemaBO.ColumnBO column = column(table, name);
+        if (column == null || column.getSqlType() == null) {
+            return;
+        }
+        String mappedType = javaType(column);
+        boolean validTimestamp = "java.time.Instant".equals(mappedType) || "java.time.LocalDateTime".equals(mappedType);
+        boolean zoned = "java.time.Instant".equals(mappedType);
+        if (!validTimestamp || zoned != withTimeZone) {
+            diagnostics.add(diagnostic(BASE_FIELD_TYPE, "/" + table.getLogicalName() + "/" + name,
+                    "timestamp timezone does not match EgonModel"));
+        }
+    }
+
+    private static boolean hasLegacyBusinessKey(CodegenSchemaBO.TableBO table) {
+        for (CodegenSchemaBO.ConstraintBO constraint : table.getConstraints()) {
+            if (!"UNIQUE".equals(constraint.getKind()) || constraint.getColumns() == null) {
+                continue;
+            }
+            boolean onlyBusiness = !constraint.getColumns().contains("deleted_at")
+                    && !constraint.getColumns().contains("id")
+                    && containsBusiness(table, constraint.getColumns());
+            if (onlyBusiness) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsBusiness(CodegenSchemaBO.TableBO table, List<String> columns) {
+        if (columns == null) {
+            return false;
+        }
+        for (String column : columns) {
+            if (!BASE_COLUMNS.contains(column) && column(table, column) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsWrite(List<String> artifacts) {
+        for (String artifact : artifacts) {
+            if (ProjectLayoutStrategy.PERSISTENCE.contains(artifact)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<String> primaryColumns(CodegenSchemaBO.TableBO table) {
+        java.util.LinkedHashSet<String> columns = new java.util.LinkedHashSet<>();
+        if (table.getConstraints() != null) {
+            for (CodegenSchemaBO.ConstraintBO constraint : table.getConstraints()) {
+                if ("PRIMARY_KEY".equals(constraint.getKind()) && constraint.getColumns() != null) {
+                    columns.addAll(constraint.getColumns());
+                }
+            }
+        }
+        return new ArrayList<>(columns);
+    }
+
+    private static List<Map<String, Object>> businessFields(CodegenSchemaBO.TableBO table) {
+        List<Map<String, Object>> fields = new ArrayList<>();
+        for (CodegenSchemaBO.ColumnBO column : table.getColumns()) {
+            if (column.getName() == null || BASE_COLUMNS.contains(column.getName())) {
+                continue;
+            }
+            String javaType = javaType(column);
+            Map<String, Object> field = new LinkedHashMap<>();
+            field.put("column", column.getName());
+            field.put("javaName", javaName(column.getName()));
+            field.put("javaType", javaType == null ? "String" : javaType);
+            field.put("required", Boolean.FALSE.equals(column.getNullable()));
+            field.put("hasDefault", column.getDefaultExpression() != null);
+            field.put("length", column.getLength() == null ? "" : column.getLength().toString());
+            field.put("enumPattern", enumPattern(table, column.getName()));
+            fields.add(Map.copyOf(field));
+        }
+        return List.copyOf(fields);
+    }
+
+    private static String enumPattern(CodegenSchemaBO.TableBO table, String column) {
+        if (table.getConstraints() == null) {
+            return "";
+        }
+        java.util.regex.Pattern check = java.util.regex.Pattern.compile(
+                "(?i)(?:^|\\()\\s*\\\"?" + java.util.regex.Pattern.quote(column)
+                        + "\\\"?\\s+IN\\s*\\(([^)]*)\\)");
+        for (CodegenSchemaBO.ConstraintBO constraint : table.getConstraints()) {
+            if (!"CHECK".equals(constraint.getKind()) || constraint.getPredicate() == null) {
+                continue;
+            }
+            java.util.regex.Matcher match = check.matcher(constraint.getPredicate());
+            if (!match.find()) {
+                continue;
+            }
+            List<String> values = new ArrayList<>();
+            for (String value : match.group(1).split(",")) {
+                String trimmed = value.trim();
+                if (!trimmed.matches("'[A-Za-z0-9_]+'")) {
+                    return "";
+                }
+                values.add(trimmed.substring(1, trimmed.length() - 1));
+            }
+            if (!values.isEmpty()) {
+                return "^(?:" + String.join("|", values) + ")$";
+            }
+        }
+        return "";
+    }
+
+    private static List<String> xmlColumns(CodegenSchemaBO.TableBO table) {
+        List<String> columns = new ArrayList<>(XML_COLUMNS);
+        for (CodegenSchemaBO.ColumnBO column : table.getColumns()) {
+            if (column.getName() != null && !columns.contains(column.getName())) {
+                columns.add(column.getName());
+            }
+        }
+        return List.copyOf(columns);
+    }
+
+    static String javaType(CodegenSchemaBO.ColumnBO column) {
+        String type = column.getSqlType() == null ? "" : column.getSqlType().trim()
+                .toLowerCase(Locale.ROOT).replaceAll("\\s+", " ").replaceAll("\\s+\\(", "(");
+        if (type.startsWith("timestamp") || type.startsWith("date")
+                || type.startsWith("time") || type.startsWith("interval")) {
+            if (column.getPrecision() == null || (column.getPrecision() >= 0 && column.getPrecision() <= 6)) {
+                if (type.matches("(?:timestamp(?:\\([0-6]\\))? with time zone|timestamptz(?:\\([0-6]\\))?)")) {
+                    return "java.time.Instant";
+                }
+                if (type.matches("timestamp(?:\\([0-6]\\))?(?: without time zone)?")) {
+                    return "java.time.LocalDateTime";
+                }
+                if ("date".equals(type)) {
+                    return "java.time.LocalDate";
+                }
+                if (type.matches("time(?:\\([0-6]\\))?(?: without time zone)?")) {
+                    return "java.time.LocalTime";
+                }
+            }
+            return null;
+        }
+        if (type.startsWith("bigint") || "int8".equals(type)) {
+            return "Long";
+        }
+        if (type.startsWith("int") || type.startsWith("integer") || "int4".equals(type)) {
+            return "Integer";
+        }
+        if (type.startsWith("bool")) {
+            return "Boolean";
+        }
+        if (type.startsWith("numeric") || type.startsWith("decimal")) {
+            return "java.math.BigDecimal";
+        }
+        if (type.startsWith("varchar") || type.startsWith("char") || type.startsWith("text") || "bpchar".equals(type)) {
+            return "String";
+        }
+        return null;
+    }
+
+    private static String javaName(String column) {
+        StringBuilder name = new StringBuilder();
+        boolean upper = false;
+        for (int index = 0; index < column.length(); index++) {
+            char current = column.charAt(index);
+            if (current == '_') {
+                upper = true;
+                continue;
+            }
+            name.append(upper ? Character.toUpperCase(current) : Character.toLowerCase(current));
+            upper = false;
+        }
+        return name.toString();
+    }
+
+    static String typeName(String logicalTable, String suffix) {
+        StringBuilder name = new StringBuilder();
+        boolean upper = true;
+        for (int index = 0; index < logicalTable.length(); index++) {
+            char current = logicalTable.charAt(index);
+            if (current == '_') {
+                upper = true;
+                continue;
+            }
+            name.append(upper ? Character.toUpperCase(current) : Character.toLowerCase(current));
+            upper = false;
+        }
+        return name + suffix;
+    }
+
+    private static String simpleType(CodegenConfigBO config, String artifact, String generated) {
+        if (config.getArtifacts().contains(artifact)) {
+            return generated;
+        }
+        String existing = mapping(config, artifact);
+        if (existing == null) {
+            return generated;
+        }
+        int dot = existing.lastIndexOf('.');
+        return dot < 0 ? existing : existing.substring(dot + 1);
+    }
+
+    private static String qualified(CodegenConfigBO config, String artifact, String generatedPackage, String simple) {
+        if (config.getArtifacts().contains(artifact)) {
+            return generatedPackage + "." + simple;
+        }
+        String existing = mapping(config, artifact);
+        return existing == null ? generatedPackage + "." + simple : existing;
+    }
+
+    private static String packageOf(String qualified) {
+        int dot = qualified.lastIndexOf('.');
+        return dot < 0 ? "" : qualified.substring(0, dot);
+    }
+
+    private static String decapitalize(String typeName) {
+        if (typeName == null || typeName.isEmpty()) {
+            return typeName;
+        }
+        return Character.toLowerCase(typeName.charAt(0)) + typeName.substring(1);
+    }
+
+    private static String mapping(CodegenConfigBO config, String key) {
+        return config.getExistingTypes() == null ? null : config.getExistingTypes().get(key);
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private static boolean isBigint(String sqlType) {
+        return sqlType != null && sqlType.toLowerCase(Locale.ROOT).startsWith("bigint");
+    }
+
+    private static boolean isIdentifier(String value) {
+        return value.matches("[A-Za-z_][A-Za-z0-9_]*");
+    }
+
+    private static CodegenSchemaBO.ColumnBO column(CodegenSchemaBO.TableBO table, String name) {
+        for (CodegenSchemaBO.ColumnBO column : table.getColumns()) {
+            if (name.equals(column.getName())) {
+                return column;
+            }
+        }
+        return null;
+    }
+
+    private static CodegenPlanBO.DiagnosticBO missing(String typeName) {
+        CodegenPlanBO.DiagnosticBO diagnostic = diagnostic(MISSING_TYPE, "/existingTypeMappings/" + typeName,
+                "missing existing type " + typeName);
+        diagnostic.setArtifact(typeName);
+        return diagnostic;
+    }
+
+    private static CodegenPlanBO.DiagnosticBO diagnostic(String code, String pointer, String message) {
+        return CodegenPlanBO.DiagnosticBO.of(code, pointer, message);
+    }
+}

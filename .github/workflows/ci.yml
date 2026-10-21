@@ -1,0 +1,85 @@
+name: Validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: Stellar-Enclosure/Stellar-Enclosure-Components
+          path: workspace/Stellar-Enclosure-Components
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '21'
+          cache: maven
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/Stellar-Enclosure-Parent
+          path: workspace/Stellar-Enclosure-Parent
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/Stellar-Enclosure-COLA
+          path: workspace/Stellar-Enclosure-COLA
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/tianshu-service
+          path: workspace/tianshu-service
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/yuheng-service
+          path: workspace/yuheng-service
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/yaoguang-service
+          path: workspace/yaoguang-service
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/tianquan-jianshen-service
+          path: workspace/tianquan-jianshen-service
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        with:
+          repository: Stellar-Enclosure/tianquan-shoubing-service
+          path: workspace/tianquan-shoubing-service
+          token: ${{ secrets.STELLAR_ENCLOSURE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Validate initial artifact graph
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
+        run: |
+          bash workspace/Stellar-Enclosure-Parent/scripts/bootstrap-migration.sh \
+            --workspace "$GITHUB_WORKSPACE/workspace" \
+            --local-repository "$RUNNER_TEMP/stellar-maven"
+      - name: Compile using published artifacts
+        if: vars.STELLAR_USE_SOURCE_BOOTSTRAP == 'false'
+        working-directory: workspace/Stellar-Enclosure-Components
+        run: ./mvnw -B -ntp test-compile

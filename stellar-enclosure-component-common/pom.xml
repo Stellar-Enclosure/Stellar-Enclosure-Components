@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project child.project.url.inherit.append.path="false" xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-components-parent</artifactId>
+        <version>0.0.1</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>stellar-enclosure-component-common</artifactId>
+    <packaging>pom</packaging>
+    <name>stellar-enclosure-component-common</name>
+    <description>Enterprise common component aggregator for Stellar Enclosure.</description>
+
+    <modules>
+        <module>stellar-enclosure-component-common-core</module>
+        <module>stellar-enclosure-component-common-trace</module>
+        <module>stellar-enclosure-component-common-trace-spring-boot-starter</module>
+        <module>stellar-enclosure-component-common-id-starter</module>
+        <module>stellar-enclosure-component-common-crypto</module>
+        <module>stellar-enclosure-component-common-data-desensitize-spring-boot-starter</module>
+        <module>stellar-enclosure-component-common-test</module>
+        <module>stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter</module>
+        <module>stellar-enclosure-component-common-cache-spring-boot-starter</module>
+    </modules>
+</project>

@@ -1,0 +1,174 @@
+package top.egon.cola.component.rpc.tianshu.autoconfigure;
+
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
+import top.egon.cola.component.tianshu.api.client.DdcConfigClient;
+import top.egon.cola.component.tianshu.api.client.DdcServiceRegistryClient;
+import top.egon.cola.component.tianshu.autoconfigure.DdcAutoConfiguration;
+import top.egon.cola.component.tianshu.autoconfigure.DdcRedisAutoConfiguration;
+import top.egon.cola.component.tianshu.autoconfigure.DdcRegistryAutoConfiguration;
+import top.egon.cola.component.tianshu.listener.registry.DdcRegistrySubscriptionCoordinator;
+import top.egon.cola.component.tianshu.service.registry.DdcRegistrySnapshotLoader;
+import top.egon.cola.component.rpc.consumer.gateway.RpcGatewayDirectory;
+import top.egon.cola.component.rpc.consumer.provider.RpcProviderDirectory;
+import top.egon.cola.component.rpc.context.identity.RpcProcessIdentityProvider;
+import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientFactory;
+import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientHandle;
+import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistry;
+import top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterAutoConfiguration;
+import top.egon.cola.platform.tianquan.shoubing.starter.client.IdpServiceOAuth2Client;
+import java.time.Duration;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+
+class DdcRpcAutoConfigurationTest {
+
+    @BeforeAll
+    static void bindTheProcessWideEngine() {
+        SnowflakeIdGenerator.initialize(0L, Duration.ofMillis(5));
+    }
+
+    private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(
+                    JacksonAutoConfiguration.class,
+                    DdcRpcAutoConfiguration.class))
+            .withPropertyValues(
+                    "egon.cola.component.tianshu.registration-resource-uri=https://api.example/tianshu"
+            )
+            .withBean(IdpServiceOAuth2Client.class, () -> mock(
+                    IdpServiceOAuth2Client.class
+            ));
+
+    @Test
+    void runsAfterIdpServiceClientAutoConfiguration() {
+        AutoConfiguration configuration = DdcRpcAutoConfiguration.class
+                .getAnnotation(AutoConfiguration.class);
+        assertThat(configuration).isNotNull();
+        assertThat(configuration.after())
+                .contains(IdpStarterAutoConfiguration.class);
+    }
+
+    @Test
+    void disabledRuntimeAndRegistryCreateNoDirectClientAndRequireNoTarget() {
+        runner.run(context -> {
+            assertThat(context).hasSingleBean(DdcRpcClientFactory.class);
+            assertThat(context).doesNotHaveBean(DdcConfigClient.class);
+            assertThat(context).doesNotHaveBean(DdcRpcClientHandle.class);
+            assertThat(context.getStartupFailure()).isNull();
+        });
+    }
+
+    @Test
+    void enabledRuntimeFailsFastWhenDirectTargetIsMissing() {
+        runner.withPropertyValues(
+                "egon.cola.component.tianshu.enabled=true",
+                "egon.cola.component.tianshu.tenant-id=101",
+                "egon.cola.component.tianshu.rpc.auth.runtime.access-key=runtime-ak",
+                "egon.cola.component.tianshu.rpc.auth.runtime.secret-key=runtime-sk"
+        ).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure())
+                    .hasRootCauseMessage(
+                            "egon.cola.component.tianshu.rpc.target is required");
+        });
+    }
+
+    @Test
+    void applicationProvidedPortPreventsDirectHandleCreation() {
+        runner.withUserConfiguration(PortOverride.class)
+                .withPropertyValues(
+                        "egon.cola.component.tianshu.enabled=true",
+                        "egon.cola.component.tianshu.tenant-id=101")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(DdcConfigClient.class);
+                    assertThat(context).doesNotHaveBean(DdcRpcClientHandle.class);
+                });
+    }
+
+    @Test
+    void registrySwitchCreatesRegistryPortsWithOnlyRegistryCredential() {
+        runner.withUserConfiguration(RedisOverride.class)
+                .withPropertyValues(
+                        "egon.cola.component.tianshu.registry.enabled=true",
+                        "egon.cola.component.tianshu.tenant-id=101",
+                        "egon.cola.component.tianshu.rpc.target=localhost:65535",
+                        "egon.cola.component.tianshu.rpc.auth.registry.access-key=registry-ak",
+                        "egon.cola.component.tianshu.rpc.auth.registry.secret-key=registry-sk"
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context)
+                            .hasSingleBean(DdcServiceRegistryClient.class)
+                            .hasSingleBean(DdcRegistrySnapshotLoader.class)
+                            .hasSingleBean(RpcProviderRegistry.class)
+                            .hasSingleBean(RpcGatewayDirectory.class)
+                            .hasSingleBean(RpcProviderDirectory.class)
+                            .hasSingleBean(RpcProcessIdentityProvider.class);
+                    assertThat(context).doesNotHaveBean(DdcConfigClient.class);
+                });
+    }
+
+    @Test
+    void adapterPortsSatisfyStarterFailFastRequirements() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        JacksonAutoConfiguration.class,
+                        DdcRedisAutoConfiguration.class,
+                        DdcRpcAutoConfiguration.class,
+                        DdcAutoConfiguration.class,
+                        DdcRegistryAutoConfiguration.class
+                ))
+                .withUserConfiguration(RedisOverride.class)
+                .withBean(
+                        IdpServiceOAuth2Client.class,
+                        () -> mock(IdpServiceOAuth2Client.class)
+                )
+                .withPropertyValues(
+                        "egon.cola.component.tianshu.enabled=true",
+                        "egon.cola.component.tianshu.tenant-id=101",
+                        "egon.cola.component.tianshu.redis.enabled=false",
+                        "egon.cola.component.tianshu.registry.enabled=true",
+                        "egon.cola.component.tianshu.registration-resource-uri=https://api.example/tianshu",
+                        "egon.cola.component.tianshu.rpc.target=localhost:65535",
+                        "egon.cola.component.tianshu.rpc.auth.runtime.access-key=runtime-ak",
+                        "egon.cola.component.tianshu.rpc.auth.runtime.secret-key=runtime-sk",
+                        "egon.cola.component.tianshu.rpc.auth.registry.access-key=registry-ak",
+                        "egon.cola.component.tianshu.rpc.auth.registry.secret-key=registry-sk"
+                )
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context)
+                            .hasSingleBean(DdcConfigClient.class)
+                            .hasSingleBean(DdcServiceRegistryClient.class)
+                            .hasSingleBean(DdcRegistrySubscriptionCoordinator.class);
+                    assertThat(context).hasBean("ddcConfigClient");
+                    assertThat(context).hasBean("ddcRpcConfigClient");
+                });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class PortOverride {
+        @Bean
+        DdcConfigClient ddcConfigClient() {
+            return mock(DdcConfigClient.class);
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class RedisOverride {
+        @Bean("ddcRedissonClient")
+        RedissonClient ddcRedissonClient() {
+            return mock(RedissonClient.class);
+        }
+    }
+}

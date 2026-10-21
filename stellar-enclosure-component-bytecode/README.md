@@ -1,0 +1,359 @@
+# Stellar Enclosure Bytecode Component
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+The bytecode component covers two boundaries. At build time it checks compiled classes against the standard Stellar Enclosure architecture rules without loading or initializing application classes. At runtime its `premain` Agent instruments executor hand-off, method observation, and Method Extension decisions. Its public API is JDK-only; ASM, Maven, and JSON serialization remain implementation details.
+
+## Modules
+
+| Module | Responsibility | Published in the BOM |
+|---|---|---|
+| `stellar-enclosure-component-bytecode-api` | JDK-only contracts for architecture rules and findings, executor and observation events, their sinks, context carriers, and `@EgonObserved` | Yes |
+| `stellar-enclosure-component-bytecode-bridge` | Small bridge between transformed application bytecode and the runtime | Yes |
+| `stellar-enclosure-component-bytecode-core` | ASM-based class transformation and architecture rule engine | No |
+| `stellar-enclosure-component-bytecode-runtime` | Runtime dispatcher, enhancement wrappers, event fan-out, and bounded failure isolation | Yes |
+| `stellar-enclosure-component-bytecode-agent` | Shaded `premain` Java Agent artifact | Yes |
+| `stellar-enclosure-component-bytecode-starter` | Spring Boot configuration, Micrometer metric binding, Actuator exposure, and optional Method Extension integration | Yes |
+| `stellar-enclosure-component-bytecode-architecture-maven-plugin` | Build-time architecture verification goal | No |
+| `stellar-enclosure-component-bytecode-test` | Generated-project and runtime verification | No |
+| `stellar-enclosure-component-bytecode-benchmark` | JMH benchmarks for architecture scanning, executor enhancement, and method observation | No |
+
+The Maven plugin, test, and benchmark modules are repository tooling. Business
+applications consume the BOM-managed API/runtime/Agent/starter artifacts and use the
+plugin only in their build when architecture checks are required.
+
+## Contract Conventions
+
+Every handwritten enum in this component implements the common-core `EgonEnum` contract with
+fixed integer codes assigned in declaration order (`DISABLED=0` … `FAILED=4`, `EXTENDS=0` …
+`CONSTANT_POOL=20`), never derived from `ordinal()`, while the bridge protocol, Agent
+configuration, Maven rule configuration and JSON typing keep matching on the constant names.
+Because the public API is JDK-only, `stellar-enclosure-component-bytecode-api` and
+`stellar-enclosure-component-bytecode-bridge` declare `stellar-enclosure-component-common-core` with all of its
+transitive dependencies excluded, and the shaded Agent JAR whitelists the single
+`top/egon/cola/component/common/core/enums/EgonEnum.class` entry instead of relocating a copy.
+
+The starter publishes the canonical `egonColaValidationUtils` facade once.
+`BytecodeStartupValidator` and `ObservationMetadataValidator` extend the common `BaseValidator`
+and run the native Jakarta constraints through it before their own protocol and tag relation
+checks, so a rejected observation payload never reaches the `MeterRegistry`.
+
+## Runtime Agent Installation
+
+The runtime enhancement has two independently installed parts. Add the Spring starter to the application and pass the separately published shaded Agent JAR to the JVM before the application main class:
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-bytecode-starter</artifactId>
+    <version>${stellar-enclosure.version}</version>
+</dependency>
+```
+
+```bash
+java -Xverify:all \
+  "-javaagent:/opt/egon/stellar-enclosure-component-bytecode-agent-5.4.1.jar=enabled=true,features=executor;observation;method-extension,include=com.example.*,observation-include=com.example.*" \
+  -jar application.jar
+```
+
+The published Agent JAR is the main `stellar-enclosure-component-bytecode-agent-${version}.jar`; it already contains relocated ASM and SnakeYAML classes. Shade attachment is disabled, so no second Agent classifier is published; the `original-stellar-enclosure-component-bytecode-agent-*.jar` that Maven leaves in `target/` is a build intermediate and must never appear on the command line. The Agent supports `premain` only.
+
+The Agent is disabled by default and an enabled Agent requires at least one explicit `include` pattern. Supported keys are `enabled`, `features`, `include`, `exclude`, `observation-include`, `observation-method`, `observation-exclude`, `observe-constructors`, `observation-slow-threshold-millis`, `failure-policy`, `failure-capacity`, and `config`. Configuration precedence from lowest to highest is defaults, environment, JVM system properties, YAML, and `-javaagent` arguments. The `config` path itself resolves in the opposite direction: the first non-blank value among the Agent argument, the system property, and the environment variable wins.
+
+```yaml
+enabled: true
+features:
+  - executor
+  - observation
+include:
+  - com.example.*
+exclude:
+  - com.example.generated.*
+observation-include:
+  - com.example.application.*
+observation-method:
+  - handle*
+observation-exclude:
+  - com.example.application.internal.*
+observe-constructors: false
+observation-slow-threshold-millis: 500
+failure-policy: skip-class
+failure-capacity: 32
+```
+
+Environment keys use `EGON_COLA_BYTECODE_`, such as `EGON_COLA_BYTECODE_INCLUDE`; system properties use `egon.cola.bytecode.`, such as `-Degon.cola.bytecode.config=/opt/egon/bytecode.yaml`. List values accept commas or semicolons. Failure policies are `skip-class`, `disable-feature`, and `mark-fatal`.
+
+Includes can never override the immutable exclusions for bootstrap classes and the `java`, `javax`, `jakarta`, `jdk`, `sun`, `com.sun`, ASM, Spring, logging, Micrometer, and `top.egon.cola.component.bytecode` packages. Only class-file versions 65 through 69 (Java 21 through Java 25) are eligible.
+
+Generated JDK proxy classes (`$ProxyN`) and Spring CGLIB/FastClass classes are also excluded. The Agent enhances the concrete target class instead, so a proxied invocation evaluates a policy once rather than once at the proxy and again at the target.
+
+## Executor Enhancement Semantics
+
+The Agent rewrites exactly these interface call sites in included application classes:
+
+- `Executor.execute(Runnable)`
+- `ExecutorService.submit(Runnable)`
+- `ExecutorService.submit(Runnable, Object)`
+- `ExecutorService.submit(Callable)`
+
+Calls to scheduler APIs, concrete executor-owner methods, JDK classes, and other overloads are left unchanged. Each rewritten site has a stable ID derived, through SHA-256, from its owner, enclosing method name and descriptor, invocation opcode, target owner, name and descriptor, and instruction ordinal. A conflicting ID is a hard registration failure rather than an ambiguous metric.
+
+The underlying executor API is invoked exactly once. `submit` returns the exact `Future` created by that executor, while business exceptions, `RejectedExecutionException`, interruption, and cancellation behavior retain their original identities and timing. The wrapper restores captured context around task execution and cleans worker-thread state in `finally`; cancellation cannot prevent a carrier that already performed capture from doing that capture work.
+
+MDC propagation is enabled when SLF4J is present, and `MdcContextCarrier` captures and restores one complete `TraceContext` from `common-trace`. Additional carriers implement the JDK-only `ContextCarrier` API. Tasks marked with `EgonInstrumentedTask` are not wrapped again; the dynamic-thread-pool registry is neither modified nor used for discovery.
+
+Spring runtime settings use the `egon.cola.component.bytecode` prefix:
+
+```yaml
+egon:
+  cola:
+    component:
+      bytecode:
+        enabled: true
+        executor:
+          enabled: true
+          propagate-mdc: true
+          metrics: true
+          sampling-rate: 1.0
+          names:
+            applicationTaskExecutor: application
+        runtime:
+          failure-capacity: 32
+        endpoint:
+          enabled: true
+```
+
+Agent inclusion is decided before Spring starts. Runtime `executor.include` and `executor.exclude` values are reserved requested settings and cannot widen the Agent's effective transformation scope.
+
+## Method Observation Semantics
+
+Method Observation matches in this order: immutable/hard package exclusions and explicit `observation-exclude` patterns win first; `@EgonObserved` then enables an otherwise eligible method; finally `observation-include` plus `observation-method` enables configured methods. The annotation accepts at most eight static `key=value` tags and an optional slow threshold. Static tags are validated and bounded; dynamic `${...}` and `#{...}` values are rejected.
+
+Supported targets are concrete instance methods of every visibility, static, final, and synchronized methods, same-class calls, recursive calls, and non-Spring objects. Abstract, native, synthetic, bridge, generated lambda-body methods, and `<clinit>` are excluded. Constructors are observed only when annotated or when `observe-constructors=true`; timing starts after the first successful `this(...)` or direct `super(...)` call. A failure from that initialization call is not attributed to the child constructor, while each observed constructor in a successful `this(...)` chain records its own remaining body.
+
+The observation wrapper preserves the exact return value and rethrows the exact original `Throwable`. It records method identity metadata, inferred layer, duration, result, exception class group, virtual-thread state, trace ID for event sinks when available, and validated static tags. It never captures arguments, return payloads, exception messages, arbitrary object text, credentials, cookies, authorization headers, or other request payloads. Timing covers synchronous method execution only: returning a `Future`, `CompletionStage`, reactive publisher, or other asynchronous value ends observation at the return and does not track later completion.
+
+Spring runtime controls are independent from transform-time matching:
+
+```yaml
+egon:
+  cola:
+    component:
+      bytecode:
+        observation:
+          enabled: true
+          sampling-rate: 1.0
+          slow-threshold-millis: 500
+          metrics-enabled: true
+```
+
+Sampling and runtime disablement become no-ops without retransformation. Runtime Sink failures are isolated into bounded diagnostics, and a depth guard suppresses observations recursively triggered by event publication. The Agent also hard-excludes the bridge, runtime, logging, and metrics packages.
+
+## Method Extension Agent Semantics
+
+Method Extension Agent mode reuses the existing Method Extension annotation, Handler, response conversion, events, and exceptions. Applications must add both starters explicitly because the Method Extension integration is optional and is not exported transitively by the bytecode starter:
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-method-extension-starter</artifactId>
+    <version>${stellar-enclosure.version}</version>
+</dependency>
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-bytecode-starter</artifactId>
+    <version>${stellar-enclosure.version}</version>
+</dependency>
+```
+
+Select Agent mode in Spring and enable the matching Agent feature at JVM startup:
+
+```yaml
+egon:
+  cola:
+    component:
+      method-extension:
+        engine: "AGENT"
+        not-ready-policy: PROCEED
+```
+
+```bash
+java "-javaagent:/opt/egon/stellar-enclosure-component-bytecode-agent-5.4.1.jar=enabled=true,features=method-extension,include=com.example.*" \
+  -jar application.jar
+```
+
+Agent mode supports concrete instance methods of every visibility, including private same-class calls, final and synchronized methods, interface-declared annotations, and non-Spring objects. Static methods, constructors, abstract, native, synthetic, and bridge methods are excluded. `AOP` and `AGENT` are mutually exclusive engines; Agent mode does not register the Method Extension AOP advisor.
+
+The Handler runs before Method Observation. A rejected invocation therefore produces a Method Extension event but does not enter the observed business method. Allowed synchronous invocations preserve return identity. Rejections support direct values and `returnJson`, and adapt `Future`, `CompletionStage`, and `CompletableFuture` payloads using the existing response rules. Arbitrary concrete `Future` implementations and reactive types are intentionally unsupported.
+
+Spring marks the runtime ready only after singleton initialization. Before that point, `not-ready-policy` controls `PROCEED`, `REJECT`, or `FAIL`; the default is `PROCEED`. Method metadata is cached in a `ClassValue` keyed by the declaring class, and the bridge keeps its per-`ClassLoader` registry entries in a weak map, so no application class loader is retained globally. Events include bounded method and Handler identities and outcomes, but never arguments, return payloads, credentials, or exception messages.
+
+## Access Guard Boundary
+
+Access Guard is not a Bytecode capability. The Access Guard starter provides Spring AOP method governance and an explicit
+`AccessGuardClient`; it is not exported by this starter and must not be added to the Agent feature list.
+
+The legacy `access-guard` feature value is rejected by the Agent parser. Remove it from deployment configuration and
+configure the Guard starter with `engine: AOP` or `engine: DISABLED`. Methods outside the Spring proxy boundary, including
+private/static methods, constructors, self-invocation, and non-Spring objects, require an explicit application migration.
+
+The retained Agent capabilities are exactly `executor`, `observation`, and `method-extension`. When Method Extension and
+Observation both apply, the stable order is Method Extension, Method Observation, then the business body. A rejection from
+Method Extension therefore prevents the observed business method from being entered.
+
+Bridge protocol major `2` is the coherent runtime contract for the retained artifacts. Upgrade the Agent, bridge, runtime,
+core, and starter artifacts together and restart the JVM. A mixed protocol-major-1/2 classpath fails startup; rollback must
+restore the complete previous artifact set and restart the JVM.
+
+## Metrics, Status, And Privacy
+
+When a `MeterRegistry` is present, the starter emits only these bounded metrics:
+
+- `egon.cola.bytecode.executor.tasks.submitted`
+- `egon.cola.bytecode.executor.tasks.started`
+- `egon.cola.bytecode.executor.tasks.finished`
+- `egon.cola.bytecode.executor.queue.wait`
+- `egon.cola.bytecode.executor.execution`
+- `egon.bytecode.method.duration`
+- `egon.bytecode.method.errors`
+- `egon.bytecode.method.slow`
+
+Executor tags are `executor`, `executor_type`, `result`, `exception_group`, and `virtual_thread`. Observation tags are bounded class, method, layer, virtual-thread, exception-group where applicable, and validated static annotation tags. Trace IDs, request IDs, thread names, raw descriptors, arguments, and return values are never metric tags. Unknown or identity-derived executor names collapse to `unmanaged`, values are sanitized and length-bounded, and each `sampling-rate` must be between `0.0` and `1.0`.
+
+Actuator is optional and is not pulled transitively by the starter. If Actuator is already installed and the endpoint is exposed, `GET /actuator/egonbytecode` reports Agent/runtime versions, protocol, state, requested/effective features, bounded counts and recent failures, dispatcher registration, metadata counts, and aggregate observation counts. It never reports raw include/exclude patterns, Agent arguments, method descriptors, class owners, arguments, returns, exception messages, tasks, `Future` objects, request IDs, trace IDs, or captured context. Agent startup output likewise prints only pattern counts and SHA-256 digests.
+
+States are `DISABLED`, `STARTING`, `ACTIVE`, `DEGRADED`, and `FAILED`; a missing Agent is reported by the starter as `AGENT_UNAVAILABLE`. A running Agent with a protocol major other than `2` fails Spring startup. The Agent does not support Attach, `agentmain`, redefinition, retransformation, bootstrap/JDK transformation, or transformed-class dumps.
+
+## Maven Plugin
+
+Always declare the plugin version explicitly and bind the goal to `verify`. Use `check` in a single-module project, as the light archetype does, and `check-reactor` in the terminal `*-starter` module of a generated project, as the web, service, and agent archetypes do:
+
+```xml
+<plugin>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-bytecode-architecture-maven-plugin</artifactId>
+    <version>${stellar-enclosure.version}</version>
+    <configuration>
+        <packageMappings>
+            <com.example.domain..>DOMAIN</com.example.domain..>
+            <com.example.application..>APPLICATION</com.example.application..>
+            <com.example.infrastructure..>INFRASTRUCTURE</com.example.infrastructure..>
+            <com.example.adapter..>ADAPTER</com.example.adapter..>
+            <com.example.facade..>FACADE</com.example.facade..>
+            <com.example.starter..>STARTER</com.example.starter..>
+            <com.example.common..>COMMON</com.example.common..>
+        </packageMappings>
+    </configuration>
+    <executions>
+        <execution>
+            <id>cola-architecture-check</id>
+            <phase>verify</phase>
+            <goals>
+                <goal>check-reactor</goal>
+            </goals>
+        </execution>
+    </executions>
+</plugin>
+```
+
+The goals are:
+
+- `bytecode-architecture:check`: scan the current module.
+- `bytecode-architecture:check-reactor`: an aggregator goal that scans compiled classes in every session module beneath the nearest ancestor directory of the current project.
+- `bytecode-architecture:generate-baseline`: explicitly write the current finding fingerprints to the baseline.
+
+Normal checks only write beneath `target` and never add findings to the baseline.
+
+## Configuration
+
+Maven user properties override matching XML configuration, XML overrides plugin defaults, and rule-specific lists replace their defaults when supplied. Layer resolution then uses this independent precedence:
+
+```text
+explicit module mapping > package mapping > module-name suffix > UNKNOWN
+```
+
+Supported layers are `DOMAIN`, `APPLICATION`, `INFRASTRUCTURE`, `ADAPTER`, `FACADE`, `STARTER`, `COMMON`, and `UNKNOWN`. Important options are:
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `moduleMappings` | empty | Map an exact Maven artifact ID to a layer. |
+| `packageMappings` | empty | Map package patterns such as `com.example.domain..` to a layer. |
+| `scanTests` / `egonArchitecture.scanTests` | `false` | Include `target/test-classes`. |
+| `scanDependencies` / `egonArchitecture.scanDependencies` | `false` | Include dependency JARs. |
+| `additionalClassDirectories` | empty | Include additional compiled-class directories. |
+| `frameworkDenylist` | seven built-in prefixes: Spring, `jakarta.persistence`, `javax.persistence`, `org.apache.ibatis`, `org.mybatis`, `org.hibernate`, `com.baomidou` | Replace the Domain technical-framework denylist. |
+| `frameworkAllowlist` | empty | Allow specific technical prefixes before applying the denylist. |
+| `facadeImplementationPackages` | `..adapter..` | Define allowed packages for Facade implementations. |
+| `failurePolicy` / `egonArchitecture.failurePolicy` | `FAIL` | Choose `FAIL`, `WARN`, or `REPORT_ONLY`. |
+| `unknownLayerPolicy` / `egonArchitecture.unknownLayerPolicy` | `WARN` | Choose `FAIL`, `WARN`, or `IGNORE`. `package-info` and `module-info` are exempt: they declare no dependencies and so cannot violate a layer rule. |
+| `cacheEnabled` / `egonArchitecture.cache.enabled` | `true` | Enable parsed-class metadata caching. |
+
+## Standard Rules
+
+The built-in registry contains exactly these ten Specifications:
+
+1. `ARCH-001`: Domain must not depend on Application, Infrastructure, Adapter, Facade, or Starter.
+2. `ARCH-002`: Domain must remain free from configured technical frameworks.
+3. `ARCH-003`: Application must not depend on Infrastructure or Adapter.
+4. `ARCH-004`: Application must not directly access persistence frameworks or infrastructure mapper/repository implementations.
+5. `ARCH-005`: Facade must remain a self-contained contract module.
+6. `ARCH-006`: Starter must not depend directly on a Domain or Application class that is an implementation type.
+7. `ARCH-007`: Common must not depend on business modules.
+8. `ARCH-008`: Adapter must not directly call Infrastructure implementations.
+9. `ARCH-009`: Domain must not depend on a configured persistence prefix (`jakarta.persistence`, `javax.persistence`, MyBatis, Hibernate, MyBatis-Plus, `java.sql`) or on a concrete `*MapperImpl`/`*RepositoryImpl` class. Interfaces stay exempt, so Domain may define its own repository ports.
+10. `ARCH-010`: Facade implementations must reside in configured Adapter packages.
+
+The scanner covers inheritance, fields, parameters, return and exception types, generic signatures, annotations and values, local types, allocations, arrays, casts, `instanceof`, field access, method and constructor calls, method handles, `invokedynamic`, Lambda targets, `ConstantDynamic`, and constant-pool class references.
+
+## Reports And Failure Policies
+
+Every check writes deterministically ordered Text, JSON, and HTML reports from the same immutable result model and prints the same totals to the console. The default directory is:
+
+```text
+${project.build.directory}/egon-cola-architecture
+```
+
+Files are `architecture-report.txt`, `architecture-report.json`, and `architecture-report.html`.
+
+`FAIL` fails the build for new error findings, `WARN` logs them without failing, and `REPORT_ONLY` only emits reports. Existing baseline findings do not count as new. `unknownLayerPolicy` is evaluated separately so unmapped classes are never silently accepted.
+
+## Baseline Workflow
+
+The default baseline is `${maven.multiModuleProjectDirectory}/.egon-cola/architecture-baseline.json`.
+
+1. Review the current findings.
+2. Run `./mvnw compile bytecode-architecture:generate-baseline` to create a baseline. `generate-baseline` declares no default phase, so it must follow a compile goal in the same invocation or it would hash an absent `target/classes`.
+3. Commit the reviewed baseline if it represents accepted debt.
+4. Keep running `check` or `check-reactor`; only new findings are subject to the failure policy and fixed entries are reported as stale.
+5. Pass `-DegonArchitecture.overwrite=true` only when intentionally replacing an existing baseline.
+
+The stable fingerprint includes rule ID, severity, module, source and target layer, source class/member/descriptor, target class/member/descriptor, dependency kind, and location kind. It excludes line numbers and presentation text.
+
+## Content-Hash Cache
+
+Parsed metadata is cached below `target/egon-cola-architecture/cache`. Each key is one SHA-256 over the parser schema version, the ASM baseline version, the scan-configuration digest, and the raw class bytes. The scan-configuration digest covers only the module and package mappings plus the three framework lists, not the scan, policy, or reporting options. Every run still rebuilds the complete graph and evaluates every rule. CI disables the cache with:
+
+```bash
+./mvnw -DegonArchitecture.cache.enabled=false verify
+```
+
+## ArchUnit Migration Boundary
+
+The four native light, web, service, and agent archetypes replace their generated ArchUnit test with this plugin; the three `-open` archetypes still use ArchUnit. The approved standard-rule scope intentionally does not preserve five bespoke checks: light domain-first/reversed outbound-port package naming, web external evaluation-facade isolation, service forbidden inbound package segments, service project-wide native gRPC prohibition, and service provider-facade isolation.
+
+## Compatibility And Benchmark
+
+Production artifacts compile with `--release 21`. Maven Invoker verifies real Java 21 classes locally, and the `architecture-java25` fixture compiles a real `--release 25` record (class-file major `69`) before the plugin scans it. Forked Surefire and Failsafe fixtures start real processes with `-Xverify:all` and the built `-javaagent` JAR. Both Java 25 paths are conditional: the Invoker suite declares `invoker.java.version = 25+`, and `AgentJava25CompatibilityTest` only runs when `JAVA25_HOME` points at an executable JDK, so a Java 21 build skips them.
+
+Build and list the JMH benchmark with:
+
+```bash
+./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-bytecode/stellar-enclosure-component-bytecode-benchmark -am -DskipTests package
+java -jar stellar-enclosure-components/stellar-enclosure-component-bytecode/stellar-enclosure-component-bytecode-benchmark/target/stellar-enclosure-component-bytecode-benchmark-benchmarks.jar -l
+```
+
+`ArchitectureScanBenchmark.scanOneThousandClasses` generates its 1,000 deterministic class byte arrays before measurement, then measures parsing, graph construction, all ten rules, and result creation. The controlled target is at or below two seconds.
+
+`ExecutorEnhancementBenchmark` separately records unmatched filtering, 1,000 transformations, direct submission, context-only submission, and context-plus-Micrometer submission. The controlled targets are at most one second for 1,000 transformations and less than five microseconds of submission overhead.
+
+`MethodObservationBenchmark` records the direct baseline, disabled bridge, enabled success, enabled exception, and slow-event paths without argument capture. The controlled enabled-success target is below two microseconds. These targets are project conventions rather than CI gates: the `CI Backend` workflow runs one `./mvnw -B -ntp clean verify` job on Java 21 and never builds, lists, or executes the benchmark JAR.

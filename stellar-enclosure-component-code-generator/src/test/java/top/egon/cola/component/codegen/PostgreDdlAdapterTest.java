@@ -1,0 +1,209 @@
+package top.egon.cola.component.codegen;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import top.egon.cola.component.codegen.ddl.DdlSchemaService;
+import top.egon.cola.component.codegen.ddl.PostgreDdlAdapter;
+import top.egon.cola.component.codegen.ddl.PostgreDdlAdapter.DdlParseException;
+import top.egon.cola.component.codegen.model.CodegenConfigBO;
+import top.egon.cola.component.codegen.model.CodegenSchemaBO;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class PostgreDdlAdapterTest {
+
+    private final DdlSchemaService service = new DdlSchemaService(new PostgreDdlAdapter());
+
+    @Test
+    void nativeScriptsKeepMasterAndShardRoles() throws Exception {
+        Path root = Path.of("src/test/resources/ddl/archetypes");
+        CodegenSchemaBO light = read(root.resolve(
+                "light.sql"));
+        assertEquals("MASTER_DATA", table(light, "users").getRole());
+        assertEquals("SHARD", table(light, "school_classes_0").getRole());
+        assertFalse(table(light, "users").getIndexes().stream()
+                .anyMatch(index -> "uk_users_tenant_external_active".equals(index.getName())),
+                "standalone CREATE INDEX statements are outside the code generator");
+        assertFalse(light.getTables().stream().anyMatch(table -> "ddl_history".equals(table.getLogicalName())));
+
+        CodegenSchemaBO web = read(root.resolve(
+                "web.sql"));
+        assertEquals("MASTER_DATA", table(web, "users").getRole());
+        assertEquals("SHARD", table(web, "school_classes_0").getRole());
+
+        CodegenSchemaBO serviceSchema = read(root.resolve(
+                "service.sql"));
+        assertEquals("MASTER_DATA", table(serviceSchema, "evaluation_course").getRole());
+        assertEquals("SHARD", table(serviceSchema, "evaluation_exam_0").getRole());
+
+        CodegenSchemaBO merged = service.read(config(root.resolve(
+                "light.sql")),
+                Map.of("school_classes", List.of("school_classes_0", "school_classes_1")), List.of());
+        assertEquals(List.of("school_classes_0", "school_classes_1"), table(merged, "school_classes").getPhysicalNames());
+        assertFalse(merged.getTables().stream().anyMatch(table -> "school_classes_0".equals(table.getLogicalName())));
+    }
+
+    @Test
+    void alterAndCommentRequireAgentOwnedGeneration() {
+        Path schema = Path.of("src/test/resources/ddl/schema.sql");
+        Path changes = Path.of("src/test/resources/ddl/changes.sql");
+        DdlParseException alter = assertThrows(DdlParseException.class,
+                () -> service.read(config(schema, changes), Map.of(), List.of()));
+        assertEquals(PostgreDdlAdapter.UNSUPPORTED_DDL, alter.getCode());
+        DdlParseException comment = assertThrows(DdlParseException.class,
+                () -> new PostgreDdlAdapter().parseStatements("COMMENT ON TABLE orders IS 'changed';", "comment.sql"));
+        assertEquals(PostgreDdlAdapter.UNSUPPORTED_DDL, comment.getCode());
+    }
+
+    @Test
+    void typeChangeIsRejected(@TempDir Path temp) throws Exception {
+        Path baseline = temp.resolve("schema.sql");
+        Path alter = temp.resolve("type.sql");
+        Files.copy(Path.of("src/test/resources/ddl/schema.sql"), baseline);
+        Files.writeString(alter, "ALTER TABLE orders ALTER COLUMN code TYPE VARCHAR(80);\n");
+        DdlParseException failure = assertThrows(DdlParseException.class,
+                () -> service.read(config(baseline, alter), Map.of(), List.of()));
+        assertEquals(PostgreDdlAdapter.UNSUPPORTED_DDL, failure.getCode());
+    }
+
+    @Test
+    void unknownDynamicExecuteFailsWithSourcePosition() {
+        String sql = """
+                DO $egon$
+                BEGIN
+                    EXECUTE 'CREATE TABLE generated(id int)';
+                END
+                $egon$;
+                """;
+        DdlParseException exception = assertThrows(DdlParseException.class,
+                () -> new PostgreDdlAdapter().parseStatements(sql, "dynamic.sql"));
+        assertEquals(PostgreDdlAdapter.UNSUPPORTED_DDL, exception.getCode());
+        assertEquals("dynamic.sql", exception.getFile());
+        assertTrue(exception.getLine() >= 1);
+    }
+
+    @Test
+    void historyChecksumDriftFailsBeforeRendering(@TempDir Path temp) throws Exception {
+        Path script = temp.resolve("db/egon-mp/V20260922_001__orders.sql");
+        Files.createDirectories(script.getParent());
+        Files.writeString(script, "EXECUTE 'not parsed';\n");
+        String hash = sha256(Files.readAllBytes(script));
+        Path manifest = temp.resolve("db/egon-mp/repository-manifest.json");
+        Files.writeString(manifest, manifestJson(hash));
+        CodegenConfigBO config = CodegenConfigBO.builder()
+                .input(CodegenConfigBO.InputBO.builder()
+                        .mode("manifest")
+                        .resourceRoot(temp.toString())
+                        .manifest("db/egon-mp/repository-manifest.json")
+                        .build())
+                .build();
+        Files.writeString(script, "CREATE TABLE drifted(id INT);\n");
+        DdlParseException drifted = assertThrows(DdlParseException.class,
+                () -> service.read(config, Map.of(), List.of()));
+        assertEquals(DdlSchemaService.CHECKSUM_DRIFT, drifted.getCode());
+
+        Files.writeString(script, "EXECUTE 'not parsed';\n");
+        DdlParseException prefix = assertThrows(DdlParseException.class,
+                () -> service.read(config, Map.of(), List.of("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        assertEquals(DdlSchemaService.CHECKSUM_DRIFT, prefix.getCode());
+    }
+
+    @Test
+    void cannotMergeDifferentPhysicalSchemas() throws Exception {
+        String sql = """
+                CREATE TABLE orders_0 (id BIGINT PRIMARY KEY, code VARCHAR(64));
+                CREATE TABLE orders_1 (id BIGINT PRIMARY KEY, code VARCHAR(32));
+                """;
+        DdlParseException exception = assertThrows(DdlParseException.class, () -> service.read(
+                configSql(sql), Map.of("orders", List.of("orders_0", "orders_1")), List.of()));
+        assertEquals(DdlSchemaService.PHYSICAL_SCHEMA_MISMATCH, exception.getCode());
+    }
+
+    @Test
+    void alterWithoutBaselineFailsAndNoRunnerIsInvoked() throws Exception {
+        DdlParseException exception = assertThrows(DdlParseException.class,
+                () -> service.read(configSql("ALTER TABLE orders ADD COLUMN note VARCHAR(10);"), Map.of(), List.of()));
+        assertEquals(PostgreDdlAdapter.UNSUPPORTED_DDL, exception.getCode());
+        String adapter = Files.readString(Path.of(
+                "src/main/java/top/egon/cola/component/codegen/ddl/PostgreDdlAdapter.java"));
+        String schemaService = Files.readString(Path.of(
+                "src/main/java/top/egon/cola/component/codegen/ddl/DdlSchemaService.java"));
+        assertFalse(adapter.contains("EgonColaPostgreDdlRunner"));
+        assertFalse(adapter.contains("DriverManager"));
+        assertFalse(schemaService.contains("EgonColaPostgreDdlRunner"));
+        assertFalse(schemaService.contains("getConnection"));
+    }
+
+    @Test
+    void temporalAliasesAndPrecisionSurviveTheCreateParser() throws Exception {
+        CodegenSchemaBO schema = TimeTypeMappingTest.temporalSchema();
+        CodegenSchemaBO.TableBO orders = table(schema, "orders");
+        assertEquals("timestamptz", column(orders, "alias_at").getSqlType());
+        assertEquals(6, column(orders, "alias_at").getPrecision());
+        assertTrue(column(orders, "aware_at").getSqlType().matches("timestamp(?:\\(6\\))? with time zone"));
+        assertFalse(column(orders, "local_at").getSqlType().contains("with time zone"));
+        assertEquals("date", column(orders, "on_date").getSqlType());
+        assertTrue(column(orders, "at_time").getSqlType().startsWith("time"));
+    }
+
+    private CodegenSchemaBO read(Path path) {
+        return service.read(config(path), Map.of(), List.of());
+    }
+
+    private static CodegenConfigBO config(Path... files) {
+        return CodegenConfigBO.builder()
+                .input(CodegenConfigBO.InputBO.builder()
+                        .mode("schema")
+                        .schemaFiles(java.util.Arrays.stream(files).map(Path::toString).toList())
+                        .build())
+                .build();
+    }
+
+    private static CodegenConfigBO configSql(String sql) throws Exception {
+        Path path = Files.createTempFile("egon-ddl", ".sql");
+        Files.writeString(path, sql);
+        return config(path);
+    }
+
+    private static CodegenSchemaBO.TableBO table(CodegenSchemaBO schema, String name) {
+        return schema.getTables().stream()
+                .filter(table -> name.equals(table.getLogicalName()))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static CodegenSchemaBO.ColumnBO column(CodegenSchemaBO.TableBO table, String name) {
+        return table.getColumns().stream().filter(column -> name.equals(column.getName())).findFirst().orElseThrow();
+    }
+
+
+    private static String manifestJson(String hash) {
+        return """
+                {
+                  "family": "web",
+                  "scripts": [
+                    {
+                      "version": "20260922_001",
+                      "path": "db/egon-mp/V20260922_001__orders.sql",
+                      "sha256": "%s"
+                    }
+                  ]
+                }
+                """.formatted(hash);
+    }
+
+    private static String sha256(byte[] bytes) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    }
+}

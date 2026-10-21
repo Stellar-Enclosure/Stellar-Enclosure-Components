@@ -1,0 +1,302 @@
+# stellar-enclosure-component-common
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+## Overview
+
+`stellar-enclosure-component-common` is the common-capability aggregator for the Stellar Enclosure component ecosystem. It provides stable contracts for result records, page metadata, request/query POJOs, enum codes, exceptions, tree construction, converters, trace core and Spring integration, IDs, crypto, response/log desensitization, and source boundary assertions.
+
+This directory is a `pom` aggregator, not a runtime JAR that business applications should depend on directly. Business applications should manage versions through `stellar-enclosure-components-bom` and include only the runtime modules they need. `common-core` owns stable contracts, `common-trace` owns the framework-neutral `TraceContext` and local-thread task templates, and the Trace Spring Boot Starter owns web and client auto-configuration.
+
+## Module Layout
+
+| Module | Description |
+|---|---|
+| `stellar-enclosure-component-common-core` | `ResultCode`, common exceptions, converter contracts, POJO records, and tree construction |
+| `stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter` | Opt-in MyBatis-Plus 3.5.16 support: technical-field base model `EgonModel` without ActiveRecord, `EgonColaMapper` narrowing the model self-type plus three added statements, enhanced 57-method service, TenantID isolation, audit fill, and repository validation |
+| `stellar-enclosure-component-common-cache-spring-boot-starter` | Spring Cache annotations over an L1 Guava and L2 Redisson `RMapCache` two-level cache with one-channel L1 invalidation broadcast |
+| `stellar-enclosure-component-common-trace` | Pure JDK + SLF4J trace core, W3C `traceparent` propagation, complete MDC capture, and local-thread task templates |
+| `stellar-enclosure-component-common-trace-spring-boot-starter` | Spring Boot 3 auto-configuration for Servlet, WebFlux, RestClient, WebClient, and Reactor context projection |
+| `stellar-enclosure-component-common-id-starter` | Snowflake interfaces, pure-JDK algorithm, and Spring Boot auto-configuration; all tests live in this module |
+| `stellar-enclosure-component-common-crypto` | SHA-256, HMAC-SHA256, Base64, and Hex utilities |
+| `stellar-enclosure-component-common-data-desensitize-spring-boot-starter` | `@Sensitive` metadata, shared masking strategies, Jackson response masking, Logback message conversion, and Spring Boot auto-configuration |
+| `stellar-enclosure-component-common-test` | Source dependency boundary test utilities used internally by components |
+
+## Features
+
+### Result Codes and Exceptions
+
+`common-core` uses `ResultCode` as its default result code set. Every code is an `int` and implements `ErrorStatus`, making it suitable for API responses, log searches, and cross-system transport. Applications use `BusinessException` for business failures and `CommonException` for general failures. `BusinessExceptionEnum` supplies reusable business codes and default messages, while applications can also implement `ErrorStatus` for their own statuses.
+
+Exception classes in common-core intentionally do not use an `Egon` prefix.
+
+### POJO Records
+
+The main contracts in `common-core` use Java records with stable Jackson field names and field ordering:
+
+| Contract | Purpose |
+|---|---|
+| `ResultRecord<T>` | Unified single-object response, including `success`, `code`, `status`, `message`, `data`, `traceId`, and `timestamp` |
+| `PageResultRecord<T>` | Unified page response, including `records` plus a composed `PageMetaRecord` |
+| `PageMetaRecord` | Page metadata: `total`, `pageNo`, `pageSize`, `pages`, `hasNext`, and `hasPrevious` |
+| `PageQuery` | Normalizes page number and page size; page numbers start at 1, default page size is 10, and maximum page size is 500 |
+| `SortQuery` | Optional sort field and `ASC` / `DESC` direction |
+| `BaseRequest` | Request metadata container |
+| `OperatorContext` | Operator identity context |
+| `PageSlice<T>` | Slice pagination without a total count |
+| `TreeBuilder`, `TreeNode`, `TreeOptions` | Flat node to parent-child tree construction |
+
+`TreeNode` and `TreeOptions` are mutable helper classes rather than records, and
+`TreeBuilder` is their static entry point.
+
+`ResultRecord` and `PageResultRecord` expose static factory methods directly. There is no separate result factory class.
+
+### Converter Contract
+
+`BaseConverter<S, T>` defines `toTarget`, `toSource`, list conversion, and simple `Date` / `String` mapping defaults. MapStruct and MapStruct Plus examples live in the `common-core` test package so production code exposes only the lightweight contract.
+
+### HTTP Response and Log Desensitization
+
+The data desensitization Starter auto-registers `SensitiveJacksonModule`. Annotated String
+fields and accessor methods are masked during JSON serialization without changing the source
+object. `RESPONSE` and `LOG` are enabled by default and can be selected independently through
+`Sensitive.scenes`.
+
+A business-defined `SensitiveStrategy` Spring Bean overrides the built-in strategy with the same
+`SensitiveType`. The resulting registry is shared with Jackson and the active Logback context.
+
+For Logback, register `SensitiveLogConverter` and replace `%msg` with `%sensitiveMsg`; keeping
+both conversion words in one pattern would still emit the raw formatted message.
+
+```xml
+<conversionRule conversionWord="sensitiveMsg"
+                converterClass="top.egon.cola.component.common.desensitize.logback.SensitiveLogConverter"/>
+<property name="CONSOLE_LOG_PATTERN"
+          value="%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger - %sensitiveMsg%n"/>
+```
+
+An object argument such as `log.info("user={}", user)` is inspected for `@Sensitive` fields and
+accessors. A scalar String no longer carries field metadata, so mask it explicitly:
+
+```java
+log.info("mobile={}", SensitiveLogs.of(mobile, SensitiveType.MOBILE));
+```
+
+### Async Trace Propagation
+
+`common-trace` provides `TraceRouteRunnable`, `TraceRouteCallable<T>`, and
+`TraceRouteSupplier<T>`. Each template stores one `TraceContext` captured when
+it is created, restores its complete MDC before execution, and restores the
+worker thread's previous MDC after completion or failure.
+
+```java
+executor.execute(new TraceRouteRunnable() {
+    @Override
+    protected void doRun() {
+        orderService.refresh();
+    }
+});
+```
+
+Executor-specific adapters remain in their owning components. For example, the
+dynamic-thread-pool starter provides `DtpRunnable`, `DtpCallable`,
+`DtpSupplier`, `DtpContextAwareExecutorService`, `DtpTaskDecorator`, and
+`DtpThreads` on top of these three templates.
+
+## Dependency Setup
+
+First import the component BOM:
+
+```xml
+<dependencyManagement>
+    <dependencies>
+        <dependency>
+            <groupId>top.egon</groupId>
+            <artifactId>stellar-enclosure-components-bom</artifactId>
+            <version>${stellar-enclosure.version}</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
+</dependencyManagement>
+```
+
+Then include the specific modules you need:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-core</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-trace</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-trace-spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-id-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-crypto</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-data-desensitize-spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common-cache-spring-boot-starter</artifactId>
+    </dependency>
+</dependencies>
+```
+
+## Usage Example
+
+The following example shows a Controller that queries a list of orders. It uses `PageQuery` to normalize pagination, `PageResultRecord` and `ResultRecord` for responses, an injected `LongIdGenerator` for database IDs, `@Sensitive` for serialization-time response masking, and `Hmacs` for signing:
+
+```java
+package demo.order;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import top.egon.cola.component.common.crypto.hmac.Hmacs;
+import top.egon.cola.component.common.desensitize.annotation.Sensitive;
+import top.egon.cola.component.common.desensitize.annotation.SensitiveType;
+import top.egon.cola.component.common.id.generator.LongIdGenerator;
+import top.egon.cola.component.common.core.pojo.PageQuery;
+import top.egon.cola.component.common.core.pojo.PageResultRecord;
+import top.egon.cola.component.common.core.pojo.ResultRecord;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/orders")
+public class OrderController {
+
+    private final OrderQueryService queryService;
+    private final LongIdGenerator idGenerator;
+
+    public OrderController(OrderQueryService queryService, LongIdGenerator idGenerator) {
+        this.queryService = queryService;
+        this.idGenerator = idGenerator;
+    }
+
+    @GetMapping
+    public PageResultRecord<OrderView> list(OrderListQuery query) {
+        PageQuery page = new PageQuery(query.pageNo(), query.pageSize());
+
+        List<OrderView> records = queryService.list(page.offset(), page.pageSize())
+                .stream()
+                .map(OrderView::from)
+                .toList();
+
+        return PageResultRecord.success(records, queryService.count(), page.pageNo(), page.pageSize());
+    }
+
+    @GetMapping("/new-id")
+    public ResultRecord<NewOrderIdView> newOrderId() {
+        long orderId = idGenerator.nextLongId();
+        String signature = Hmacs.sha256Hex(Long.toString(orderId), "demo-secret");
+        return ResultRecord.success(new NewOrderIdView(orderId, signature));
+    }
+
+    public record OrderListQuery(int pageNo, int pageSize) {
+    }
+
+    public record OrderView(String orderId, String buyerMobile) {
+        @Sensitive(type = SensitiveType.MOBILE)
+        public String buyerMobile() {
+            return buyerMobile;
+        }
+
+        static OrderView from(OrderRecord record) {
+            return new OrderView(record.orderId(), record.buyerMobile());
+        }
+    }
+
+    public record NewOrderIdView(long orderId, String signature) {
+    }
+}
+```
+
+Tree construction example:
+
+```java
+import top.egon.cola.component.common.core.pojo.TreeBuilder;
+import top.egon.cola.component.common.core.pojo.TreeNode;
+
+import java.util.List;
+
+List<TreeNode<Long, String>> nodes = List.of(
+        new TreeNode<>(1L, null, "Headquarters"),
+        new TreeNode<>(2L, 1L, "East China"),
+        new TreeNode<>(3L, 2L, "Shanghai")
+);
+
+List<TreeNode<Long, String>> roots = TreeBuilder.build(nodes);
+```
+
+## Design Principles
+
+1. Keep stable common contracts in `common-core` so consumers do not compose several tiny semantic JARs for basic result/page/query/tree usage.
+2. Prefer Java records for common PO contracts to preserve immutability, serializability, and stable JSON field ordering.
+3. Use direct record factory methods instead of separate `ResultDtos` or `ResultModels` classes.
+4. Keep `common-core` free of Spring runtime dependencies; Jackson annotations are explicit lightweight dependencies because core owns JSON contracts.
+5. Keep `common-trace` limited to the JDK and `slf4j-api`; Trace propagation does not depend on Spring, Servlet, WebFlux, Reactor, gRPC, Yuheng, Jackson, or a Logback implementation.
+6. Keep executor-specific adapters in their owning components; `common-trace` exposes only `TraceContext` and three local-thread task templates.
+7. Keep the Trace Spring Boot Starter in the same common aggregator without leaking Spring dependencies into `common-trace`.
+8. Expose converter contracts, not generated converter implementations. MapStruct and MapStruct Plus implementations belong in consumers or tests.
+
+## Implementation Details
+
+- `ResultRecord.success` and `PageResultRecord.success` read `TraceContext` and include the current `traceId`; trace context is provided by `common-trace`.
+- `ResultRecord` and `PageResultRecord` retain the stable `status` field while using `ResultCode` as the default source of `code`, `status`, and `message`.
+- `PageResultRecord` composes `PageMetaRecord`; page metadata is not flattened into the result record.
+- `PageResultRecord` and `PageSlice` defensively copy supplied records and expose immutable lists.
+- `PageQuery` normalizes page number and page size during construction, and `offset()` calculates a database offset from the normalized values.
+- `TreeBuilder` uses `LinkedHashMap` to preserve input order and, by default, retains orphan nodes as roots.
+- `SourceBoundaryAssert` is located in `common-test`. It is intended for component-internal source boundary tests and should not be used as a business runtime dependency.
+
+## Migration Notes
+
+| Old API | New API |
+|---|---|
+| `CommonStatus` | `ResultCode` |
+| Old prefixed common exceptions | `BusinessException`, `CommonException` |
+| `ResultDto`, `ResultModel` | `ResultRecord` |
+| `PageResultDto`, `PageResultModel` | `PageResultRecord` |
+| `ResultDtos`, `ResultModels` | Static factory methods on `ResultRecord` and `PageResultRecord` |
+| `PageMeta` | `PageMetaRecord` |
+| `PageModel` | `PageResultRecord` for response pages, or `PageSlice` for slice-only data |
+| `top.egon.cola.component.common.model.*` | `top.egon.cola.component.common.core.pojo.*` |
+| `top.egon.cola.component.common.result.*` | `top.egon.cola.component.common.core.pojo.*` |
+| `top.egon.cola.component.common.structure.tree.*` | `top.egon.cola.component.common.core.pojo.*` |
+| `top.egon.cola.component.common.util.IdUtils` | `LongIdGenerator` / `SnowflakeIdGenerator` |
+| `top.egon.cola.component.common.util.CryptoUtils` | `Digests`, `Hmacs`, `Base64s`, `Hexes` |
+| `stellar-enclosure-component-common-mask` | `stellar-enclosure-component-common-data-desensitize-spring-boot-starter` |
+| `top.egon.cola.component.common.util.MaskingUtils`, `top.egon.cola.component.common.mask.Masking` | `@Sensitive`, `SensitiveStrategyRegistry`, or `SensitiveLogs.of` for scalar log arguments |
+
+The legacy aggregated `util` package, split `model/result/structure` packages, separate result factories, `BaseEntity`, and `AuditableModel` were intentionally removed.
+
+For Snowflake layout, configuration, rollback behavior, and Kubernetes machine-ID allocation, see the [common ID Starter README](stellar-enclosure-component-common-id-starter/README.md).
+
+## MyBatis-Plus Starter
+
+The MyBatis-Plus capability is opt-in by dependency and enabled by default once the concrete Starter is present. It is documented in the [module guide](stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter/README.md). The aggregate does not own consumer tables or migrations.
+
+## Validation Command
+
+```bash
+./mvnw -B -ntp -f stellar-enclosure-components/stellar-enclosure-component-common/pom.xml test
+```

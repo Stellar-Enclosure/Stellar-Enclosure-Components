@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project child.project.url.inherit.append.path="false" xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>top.egon</groupId>
+        <artifactId>stellar-enclosure-component-common</artifactId>
+        <version>0.0.1</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>stellar-enclosure-component-common-test</artifactId>
+    <packaging>jar</packaging>
+    <name>stellar-enclosure-component-common-test</name>
+    <description>Boundary assertion helpers for Stellar Enclosure common modules.</description>
+</project>

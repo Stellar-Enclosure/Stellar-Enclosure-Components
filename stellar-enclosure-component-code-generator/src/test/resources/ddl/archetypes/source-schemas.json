@@ -1,0 +1,20 @@
+{
+  "sourceCommit": "52e407ee3be892200aafadb19ad912189f5ada1c",
+  "schemas": [
+    {
+      "family": "light",
+      "source": "source-projects/stellar-enclosure-source-light/src/main/resources/db/egon-mp/V20260913_001__initialize_repository_schema.sql",
+      "sha256": "0c9f9cef139e3d6e48564e9aa27e652cac6a4991dc5daede615f5d0066ab6e81"
+    },
+    {
+      "family": "web",
+      "source": "source-projects/stellar-enclosure-source-web/stellar-enclosure-source-web-infrastructure/src/main/resources/db/egon-mp/V20260913_001__initialize_repository_schema.sql",
+      "sha256": "39b04ed66a7263e579b2e27b1e664228826dc67b69705141e853ebba20addf78"
+    },
+    {
+      "family": "service",
+      "source": "source-projects/stellar-enclosure-source-service/stellar-enclosure-source-service-infrastructure/src/main/resources/db/egon-mp/V20260913_001__initialize_repository_schema.sql",
+      "sha256": "32f803020edbc886bfe24e277b6c4e551d4749a734f8441deb9d84f08fac53a5"
+    }
+  ]
+}

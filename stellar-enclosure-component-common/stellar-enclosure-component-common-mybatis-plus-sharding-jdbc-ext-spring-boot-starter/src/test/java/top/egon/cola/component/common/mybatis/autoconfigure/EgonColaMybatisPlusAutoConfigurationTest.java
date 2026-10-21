@@ -1,0 +1,552 @@
+package top.egon.cola.component.common.mybatis.autoconfigure;
+
+import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.BlockAttackInnerInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.InnerInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.OptimisticLockerInnerInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.context.annotation.ImportCandidates;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.apache.ibatis.reflection.MetaObject;
+import top.egon.cola.component.common.core.validation.ValidationUtils;
+import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
+import top.egon.cola.component.common.mybatis.business.EgonColaUserIdProvider;
+import top.egon.cola.component.common.mybatis.handler.EgonColaMetaObjectHandler;
+import top.egon.cola.component.common.mybatis.exception.EgonColaMybatisPlusConfigurationException;
+import top.egon.cola.component.common.mybatis.interceptor.EgonColaModelValidationInterceptor;
+import top.egon.cola.component.common.mybatis.interceptor.EgonColaTenantIdGuardInnerInterceptor;
+import top.egon.cola.component.common.mybatis.interceptor.EgonColaLocalWriteGuardInnerInterceptor;
+import top.egon.cola.component.common.mybatis.interceptor.EgonColaOriginalSqlGuardInterceptor;
+import top.egon.cola.component.common.mybatis.model.EgonColaIdentifierGenerator;
+
+import java.time.Clock;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class EgonColaMybatisPlusAutoConfigurationTest {
+
+    private static final ValidatorFactory VALIDATOR_FACTORY =
+            Validation.buildDefaultValidatorFactory();
+
+    @AfterAll
+    static void closeValidatorFactory() {
+        VALIDATOR_FACTORY.close();
+    }
+
+    @Test
+    void bootMetadataRegistersOnlyTheEgonColaAutoConfiguration() {
+        assertThat(ImportCandidates.load(AutoConfiguration.class, getClass().getClassLoader()))
+                .contains(
+                        EgonColaMybatisPlusAutoConfiguration.class.getName(),
+                        EgonColaShardingAutoConfiguration.class.getName());
+    }
+
+    @Test
+    void disabledConfigurationCreatesNoEgonColaBeans() {
+        runner(false).run(context -> assertThat(context)
+                .doesNotHaveBean("egonColaMdcTenantIdProvider")
+                .doesNotHaveBean("egonColaModelValidationUtils")
+                .doesNotHaveBean(EgonColaUserIdProvider.class)
+                .doesNotHaveBean(EgonColaMetaObjectHandler.class)
+                .doesNotHaveBean(EgonColaModelValidationInterceptor.class));
+    }
+
+    @Test
+    void enabledConfigurationBuildsProvidersHandlerValidationAndOrderedInnerChain() {
+        runner(true).run(context -> {
+            assertThat(context).doesNotHaveBean("egonColaMdcTenantIdProvider")
+                    .doesNotHaveBean("egonColaModelValidationUtils")
+                    .hasSingleBean(EgonColaUserIdProvider.class)
+                    .hasSingleBean(EgonColaMetaObjectHandler.class)
+                    .hasSingleBean(EgonColaModelValidationInterceptor.class)
+                    .hasSingleBean(MybatisPlusInterceptor.class);
+            assertThat(context).doesNotHaveBean(com.baomidou.mybatisplus.core.injector.ISqlInjector.class);
+            assertThat(context).hasSingleBean(EgonColaIdentifierGenerator.class)
+                    .hasSingleBean(EgonColaOriginalSqlGuardInterceptor.class)
+                    .hasSingleBean(top.egon.cola.component.common.mybatis.routing.EgonColaWriteTargetResolver.class);
+            assertThat(context).doesNotHaveBean(com.baomidou.mybatisplus.extension.ddl.IDdl.class);
+            MybatisPlusInterceptor outer = context.getBean(MybatisPlusInterceptor.class);
+            assertThat(outer.getInterceptors()).extracting(Object::getClass)
+                    .containsExactly(EgonColaTenantIdGuardInnerInterceptor.class,
+                            BlockAttackInnerInterceptor.class,
+                            TenantLineInnerInterceptor.class,
+                            OptimisticLockerInnerInterceptor.class,
+                            EgonColaLocalWriteGuardInnerInterceptor.class,
+                            PaginationInnerInterceptor.class);
+        });
+    }
+
+    @Test
+    void configuredMdcKeyDrivesTheStaticTenantEntry() {
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.tenant-id.mdc-key=requestTenantId")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    MDC.put("requestTenantId", "11");
+                    try {
+                        assertThat(EgonColaTenantIdProvider.currentTenantId()).isEqualTo(11L);
+                    } finally {
+                        MDC.remove("requestTenantId");
+                        EgonColaTenantIdProvider.initialize(EgonColaTenantIdProvider.DEFAULT_MDC_KEY);
+                    }
+                });
+    }
+
+    @Test
+    void blankMdcKeyFailsTheAssembly() {
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.tenant-id.mdc-key=")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).rootCause()
+                            .isInstanceOf(org.springframework.boot.context.properties.bind.validation.BindValidationException.class)
+                            .hasMessageContaining("mdcKey");
+                });
+    }
+
+    @Test
+    void missingValidatorFailsWithStableConfigurationCode() {
+        runnerWithoutValidator().run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(
+                    EgonColaMybatisPlusConfigurationException.class);
+            assertThat(context.getStartupFailure()).hasRootCauseMessage("VALIDATOR_BEAN_MISSING");
+        });
+    }
+
+    @Test
+    void unsafeOuterChainFailsFast() {
+        runnerWithoutValidator()
+                .withBean(Validator.class, VALIDATOR_FACTORY::getValidator)
+                .withPropertyValues("egon.cola.component.mybatis-plus.enabled=true")
+                .withUserConfiguration(UnsafeOuterConfiguration.class)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure().toString())
+                            .contains("MYBATIS_PLUS_INTERCEPTOR_ORDER_INVALID");
+                });
+    }
+
+    @Test
+    void consumerValidationUtilsBeansDoNotBreakModelValidationWiring() {
+        ValidationUtils foreign = new ValidationUtils(VALIDATOR_FACTORY.getValidator());
+        runner(true)
+                .withBean("agentFlowValidationUtils", ValidationUtils.class, () -> foreign)
+                .withBean("agentValidationUtils", ValidationUtils.class, () -> foreign)
+                .run(context -> assertThat(context).hasNotFailed()
+                        .hasBean("egonColaValidationUtils")
+                        .doesNotHaveBean("egonColaModelValidationUtils"));
+    }
+
+    @Test
+    void consumerClocksDoNotBreakMetaFillWiring() {
+        runner(true)
+                .withBean("agentClock", Clock.class, Clock::systemUTC)
+                .withBean("agentFlowClock", Clock.class, Clock::systemUTC)
+                .run(context -> assertThat(context).hasNotFailed()
+                        .hasBean("egonColaMetaObjectHandler"));
+    }
+
+    @Test
+    void singleConsumerClockBacksOffTheDefaultClock() {
+        runner(true)
+                .withBean("agentClock", Clock.class, Clock::systemUTC)
+                .run(context -> assertThat(context).hasNotFailed()
+                        .doesNotHaveBean("egonColaMybatisPlusClock"));
+    }
+
+    @Test
+    void unrelatedMetaObjectHandlerFailsFast() {
+        runner(true).withBean(com.baomidou.mybatisplus.core.handlers.MetaObjectHandler.class,
+                        () -> new UnrelatedMetaObjectHandler())
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure().toString())
+                            .contains("META_OBJECT_HANDLER_CONTRACT_INVALID");
+                });
+    }
+
+    @Test
+    void safeMetaObjectHandlerSubclassBacksOffDefaultWithoutDroppingContract() {
+        runner(true)
+                .withBean(com.baomidou.mybatisplus.core.handlers.MetaObjectHandler.class,
+                        () -> new SafeMetaObjectHandler())
+                .run(context -> assertThat(context.getBean(
+                        com.baomidou.mybatisplus.core.handlers.MetaObjectHandler.class))
+                        .isInstanceOf(SafeMetaObjectHandler.class));
+    }
+
+    @Test
+    void contradictoryDevAndProdProfilesFailClosed() {
+        runner(true).withPropertyValues("spring.profiles.active=dev,prod").run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasMessage("ENVIRONMENT_PROFILE_CONFLICT");
+        });
+    }
+
+    @Test
+    void nonDevDoesNotInstallDiagnosticPluginsAndCannotEnableThem() {
+        runner(true).withPropertyValues("spring.profiles.active=prod").run(context -> {
+            assertThat(context).doesNotHaveBean(com.baomidou.mybatisplus.extension.plugins.inner.IllegalSQLInnerInterceptor.class);
+        });
+        runner(true).withPropertyValues("spring.profiles.active=prod", "egon.cola.component.mybatis-plus.illegal-sql.enabled=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("DEV_DIAGNOSTIC_PROFILE_REQUIRED");
+                });
+    }
+
+    @Test
+    void identifierGeneratorNeedsNoInjectedIdBeanAndNeverAcceptsAHostDefault() {
+        new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(EgonColaMybatisPlusAutoConfiguration.class))
+                .withUserConfiguration(SafeOuterConfiguration.class)
+                .withBean("egonColaRoutingProfiles", Map.class, Map::of)
+                .withBean("egonColaWriteTargetResolver",
+                        top.egon.cola.component.common.mybatis.routing.EgonColaWriteTargetResolver.class,
+                        () -> query -> {
+                            throw new IllegalStateException("SHARDING_REQUIRED");
+                        })
+                .withBean(Validator.class, VALIDATOR_FACTORY::getValidator).run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(EgonColaIdentifierGenerator.class);
+                    assertThat(context).doesNotHaveBean("snowflakeIdGenerator");
+                });
+        com.baomidou.mybatisplus.core.incrementer.IdentifierGenerator host = entity -> 1L;
+        runner(true).withBean("hostIdentifierGenerator",
+                com.baomidou.mybatisplus.core.incrementer.IdentifierGenerator.class, () -> host)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("IDENTIFIER_GENERATOR_CONTRACT_INVALID");
+                });
+    }
+
+    @Test
+    void requiredCacheRejectsForeignCacheManagerButSkipsDisabledComponent() {
+        runner(true).withBean("foreignCacheManager", org.springframework.cache.CacheManager.class,
+                        EgonColaMybatisPlusAutoConfigurationTest::foreignCacheManager)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).rootCause()
+                            .hasMessageContaining("CACHE_MANAGER_INCOMPATIBLE");
+                });
+        runner(true).withPropertyValues("egon.cola.component.cache.enabled=false")
+                .withBean("foreignCacheManager", org.springframework.cache.CacheManager.class,
+                        EgonColaMybatisPlusAutoConfigurationTest::foreignCacheManager)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.containsBean("egonColaRepositoryKeyGenerator")).isTrue();
+                });
+    }
+
+    private static org.springframework.cache.CacheManager foreignCacheManager() {
+        return new org.springframework.cache.CacheManager() {
+            @Override
+            public org.springframework.cache.Cache getCache(String name) {
+                return null;
+            }
+
+            @Override
+            public java.util.Collection<String> getCacheNames() {
+                return List.of();
+            }
+        };
+    }
+
+    @Test
+    void pageAndBatchLimitsCannotExceedTheApprovedBounds() {
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.pagination.max-page-size=501")
+                .run(context -> assertThat(context).hasFailed());
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.batch.max-chunk-size=1001")
+                .run(context -> assertThat(context).hasFailed());
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.batch.default-size=10", "egon.cola.component.mybatis-plus.batch.max-chunk-size=5")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void everyFactoryIsCheckedIncludingTheNonPrimaryFactory() {
+        runner(true).withUserConfiguration(TwoFactoriesConfiguration.class).run(context -> assertThat(context).hasNotFailed()
+                .hasBean("firstFactory").hasBean("secondFactory"));
+        runner(true).withUserConfiguration(TwoFactoriesConfiguration.class).withPropertyValues("test.bad-second=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("FACTORY_INTERCEPTOR_CONTRACT_INVALID");
+                });
+        runner(true).withUserConfiguration(TwoFactoriesConfiguration.class).withPropertyValues("test.bad-second-id=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("FACTORY_IDENTIFIER_GENERATOR_INVALID");
+                });
+    }
+
+    @Test
+    void illegalSqlIsAvailableOnDev() {
+        runner(true).withPropertyValues("spring.profiles.active=dev", "egon.cola.component.mybatis-plus.illegal-sql.enabled=true")
+                .run(context -> assertThat(context).hasNotFailed()
+                        .hasSingleBean(com.baomidou.mybatisplus.extension.plugins.inner.IllegalSQLInnerInterceptor.class));
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class TwoFactoriesConfiguration {
+        @Bean("firstFactory")
+        @org.springframework.context.annotation.Primary
+        org.apache.ibatis.session.SqlSessionFactory firstFactory(MybatisPlusInterceptor outer,
+                EgonColaOriginalSqlGuardInterceptor original, EgonColaModelValidationInterceptor validation,
+                EgonColaIdentifierGenerator id, com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler) {
+            return factory(outer, original, validation, id, handler, false, false);
+        }
+
+        @Bean("secondFactory")
+        org.apache.ibatis.session.SqlSessionFactory secondFactory(MybatisPlusInterceptor outer,
+                EgonColaOriginalSqlGuardInterceptor original, EgonColaModelValidationInterceptor validation,
+                EgonColaIdentifierGenerator id, com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler,
+                @org.springframework.beans.factory.annotation.Value("${test.bad-second:false}") boolean bad,
+                @org.springframework.beans.factory.annotation.Value("${test.bad-second-id:false}") boolean badId) {
+            return factory(outer, original, validation, id, handler, bad, badId);
+        }
+
+        private static org.apache.ibatis.session.SqlSessionFactory factory(MybatisPlusInterceptor outer,
+                EgonColaOriginalSqlGuardInterceptor original, EgonColaModelValidationInterceptor validation,
+                EgonColaIdentifierGenerator id, com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler, boolean bad, boolean badId) {
+            var configuration = new com.baomidou.mybatisplus.core.MybatisConfiguration();
+            configuration.setEnvironment(new org.apache.ibatis.mapping.Environment("test",
+                    new org.mybatis.spring.transaction.SpringManagedTransactionFactory(), org.mockito.Mockito.mock(javax.sql.DataSource.class)));
+            configuration.addInterceptor(outer);
+            configuration.addInterceptor(validation);
+            if (!bad) { configuration.addInterceptor(original); }
+            var global = new com.baomidou.mybatisplus.core.config.GlobalConfig();
+            global.setMetaObjectHandler(handler);
+            global.setIdentifierGenerator(badId ? entity -> 1L : id);
+            com.baomidou.mybatisplus.core.toolkit.GlobalConfigUtils.setGlobalConfig(configuration, global);
+            return new org.apache.ibatis.session.defaults.DefaultSqlSessionFactory(configuration);
+        }
+    }
+
+    @Test
+    void controlledDdlCannotCoexistWithTheDefaultAfterStartRunner() {
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.ddl.enabled=true")
+                .withBean(com.baomidou.mybatisplus.autoconfigure.DdlApplicationRunner.class,
+                        () -> new com.baomidou.mybatisplus.autoconfigure.DdlApplicationRunner(List.of()))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("DEFAULT_DDL_RUNNER_CONFLICT");
+                });
+    }
+
+    @Test
+    @SuppressWarnings("rawtypes")
+    void dynamicTableMappingsAreExplicitAndCannotOverlapShardingProfiles() {
+        runner(true).withPropertyValues("egon.cola.component.mybatis-plus.dynamic-table-name.enabled=true",
+                        "egon.cola.component.mybatis-plus.dynamic-table-name.tables.users=users_archive")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var dynamic = context.getBean(com.baomidou.mybatisplus.extension.plugins.inner.DynamicTableNameInnerInterceptor.class);
+                    assertThat(dynamic.getTableNameHandler().dynamicTableName("SELECT id FROM users", "users")).isEqualTo("users_archive");
+                    assertThat(dynamic.getTableNameHandler().dynamicTableName("SELECT id FROM other", "other")).isEqualTo("other");
+                });
+        var profile = new top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO("users",
+                top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.TableKindEnum.SINGLE, "static-v1", 1, 1,
+                java.util.Map.of(), null, null, 0x9e3779b97f4a7c15L,
+                java.util.Map.of(new top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.PartitionKeyBO(0, 0),
+                        List.of(new top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO("primary", "public", "users"))), 1, null);
+        runner(true).withBean("egonColaRoutingProfiles", java.util.Map.class, () -> java.util.Map.of("users", profile))
+                .withPropertyValues("egon.cola.component.mybatis-plus.dynamic-table-name.enabled=true",
+                        "egon.cola.component.mybatis-plus.dynamic-table-name.tables.users=users_archive")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessage("DYNAMIC_SHARDING_TABLE_CONFLICT");
+                });
+    }
+
+    @Test
+    void ignoredTableNormalizationPreservesTheExistingCaseInsensitiveContract() {
+        var properties = new EgonColaMybatisPlusProperties();
+        properties.getTenantId().getIgnoredTables().add("PUBLIC.TEST_GLOBAL_RECORD");
+        assertThat(properties.getTenantId().ignores("test_global_record")).isTrue();
+        assertThat(properties.getTenantId().ignores("test_business_record")).isFalse();
+    }
+
+    @Test
+    void onlyExplicitlyScopedInfrastructureMapperMayUseAnIgnoredTable() {
+        runner(true)
+                .withPropertyValues("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[0]=egon_cola_outbox_message")
+                .withUserConfiguration(ExplicitTenantScopeMapperConfiguration.class)
+                .run(context -> assertThat(context).hasNotFailed().hasBean("explicitOutboxMapperFactory"));
+
+        runner(true)
+                .withPropertyValues("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[0]=egon_cola_outbox_message")
+                .withUserConfiguration(UnmarkedTenantScopeMapperConfiguration.class)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure().toString())
+                            .contains("MODEL_TABLE_CANNOT_BE_IGNORED");
+                });
+    }
+
+    private ApplicationContextRunner runner(boolean enabled) {
+        return runnerWithoutValidator()
+                .withUserConfiguration(SafeOuterConfiguration.class)
+                .withBean(Validator.class, VALIDATOR_FACTORY::getValidator)
+                .withPropertyValues("egon.cola.component.mybatis-plus.enabled=" + enabled);
+    }
+
+    private ApplicationContextRunner runnerWithoutValidator() {
+        return new ApplicationContextRunner()
+                .withAllowBeanDefinitionOverriding(true)
+                .withBean("egonColaRoutingProfiles", Map.class, Map::of)
+                .withBean("egonColaWriteTargetResolver",
+                        top.egon.cola.component.common.mybatis.routing.EgonColaWriteTargetResolver.class,
+                        () -> query -> {
+                            throw new IllegalStateException("SHARDING_REQUIRED");
+                        })
+                .withConfiguration(AutoConfigurations.of(EgonColaMybatisPlusAutoConfiguration.class));
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class SafeOuterConfiguration {
+        @Bean
+        MybatisPlusInterceptor mybatisPlusInterceptor(ObjectProvider<InnerInterceptor> interceptors) {
+            MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+            interceptor.setInterceptors(interceptors.orderedStream().toList());
+            return interceptor;
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class UnsafeOuterConfiguration {
+        @Bean
+        MybatisPlusInterceptor mybatisPlusInterceptor() {
+            MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+            interceptor.setInterceptors(List.of(new BlockAttackInnerInterceptor()));
+            return interceptor;
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class ExplicitTenantScopeMapperConfiguration {
+
+        @Bean("explicitOutboxMapperFactory")
+        org.apache.ibatis.session.SqlSessionFactory explicitOutboxMapperFactory(
+                MybatisPlusInterceptor outer,
+                EgonColaModelValidationInterceptor validation,
+                EgonColaOriginalSqlGuardInterceptor original,
+                EgonColaIdentifierGenerator idGenerator,
+                com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler
+        ) {
+            return outboxFixtureFactory(outer, validation, original, idGenerator, handler,
+                    ExplicitOutboxMapper.class);
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class UnmarkedTenantScopeMapperConfiguration {
+
+        @Bean("unmarkedOutboxMapperFactory")
+        org.apache.ibatis.session.SqlSessionFactory unmarkedOutboxMapperFactory(
+                MybatisPlusInterceptor outer,
+                EgonColaModelValidationInterceptor validation,
+                EgonColaOriginalSqlGuardInterceptor original,
+                EgonColaIdentifierGenerator idGenerator,
+                com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler
+        ) {
+            return outboxFixtureFactory(outer, validation, original, idGenerator, handler,
+                    UnmarkedOutboxMapper.class);
+        }
+    }
+
+    private static org.apache.ibatis.session.SqlSessionFactory outboxFixtureFactory(
+            MybatisPlusInterceptor outer,
+            EgonColaModelValidationInterceptor validation,
+            EgonColaOriginalSqlGuardInterceptor original,
+            EgonColaIdentifierGenerator idGenerator,
+            com.baomidou.mybatisplus.core.handlers.MetaObjectHandler handler,
+            Class<?> mapper
+    ) {
+        com.baomidou.mybatisplus.core.MybatisConfiguration configuration =
+                new com.baomidou.mybatisplus.core.MybatisConfiguration();
+        configuration.setEnvironment(new org.apache.ibatis.mapping.Environment("outbox-contract-test",
+                new org.mybatis.spring.transaction.SpringManagedTransactionFactory(),
+                org.mockito.Mockito.mock(javax.sql.DataSource.class)));
+        configuration.addInterceptor(outer);
+        configuration.addInterceptor(validation);
+        configuration.addInterceptor(original);
+        com.baomidou.mybatisplus.core.config.GlobalConfig global =
+                new com.baomidou.mybatisplus.core.config.GlobalConfig();
+        global.setDbConfig(new com.baomidou.mybatisplus.core.config.GlobalConfig.DbConfig());
+        global.setMetaObjectHandler(handler);
+        global.setIdentifierGenerator(idGenerator);
+        com.baomidou.mybatisplus.core.toolkit.GlobalConfigUtils.setGlobalConfig(configuration, global);
+        configuration.addMapper(mapper);
+
+        String mapperXml = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+                        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+                <mapper namespace="%s">
+                    <select id="selectActiveById" resultType="%s">SELECT id FROM egon_outbox.egon_cola_outbox_message WHERE id = #{id} AND tenant_id = 0 AND deleted_at IS NULL</select>
+                    <select id="selectActiveByIds" resultType="%s">SELECT id FROM egon_outbox.egon_cola_outbox_message WHERE tenant_id = 0 AND deleted_at IS NULL</select>
+                </mapper>
+                """.formatted(mapper.getName(), OutboxFixturePO.class.getName(), OutboxFixturePO.class.getName());
+        new org.apache.ibatis.builder.xml.XMLMapperBuilder(
+                new java.io.ByteArrayInputStream(mapperXml.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                configuration, "outbox-contract-test.xml", configuration.getSqlFragments()).parse();
+        return new org.apache.ibatis.session.defaults.DefaultSqlSessionFactory(configuration);
+    }
+
+    interface UnmarkedOutboxMapper extends top.egon.cola.component.common.mybatis.extension.EgonColaMapper<OutboxFixturePO> {
+    }
+
+    @top.egon.cola.component.common.mybatis.extension.EgonColaExplicitTenantScopeMapper
+    interface ExplicitOutboxMapper extends top.egon.cola.component.common.mybatis.extension.EgonColaMapper<OutboxFixturePO> {
+
+        @Override
+        default int deleteVersionedById(@org.apache.ibatis.annotations.Param("et") OutboxFixturePO entity) {
+            throw new UnsupportedOperationException("OUTBOX_SOFT_DELETE_UNSUPPORTED");
+        }
+    }
+
+    @lombok.Data
+    @lombok.NoArgsConstructor
+    @lombok.AllArgsConstructor
+    @lombok.experimental.Accessors(chain = true)
+    @lombok.experimental.SuperBuilder
+    @lombok.EqualsAndHashCode(callSuper = true)
+    @com.baomidou.mybatisplus.annotation.TableName(value = "egon_cola_outbox_message", schema = "egon_outbox")
+    static class OutboxFixturePO extends top.egon.cola.component.common.mybatis.model.EgonModel<OutboxFixturePO> {
+
+        @com.baomidou.mybatisplus.annotation.TableField("fixture_value")
+        private String fixtureValue;
+    }
+
+    private static final class UnrelatedMetaObjectHandler
+            implements com.baomidou.mybatisplus.core.handlers.MetaObjectHandler {
+        @Override
+        public void insertFill(org.apache.ibatis.reflection.MetaObject metaObject) {
+        }
+
+        @Override
+        public void updateFill(org.apache.ibatis.reflection.MetaObject metaObject) {
+        }
+    }
+
+    private static final class SafeMetaObjectHandler extends EgonColaMetaObjectHandler {
+        private SafeMetaObjectHandler() {
+            super(() -> "test-user", java.time.Clock.systemUTC());
+        }
+
+        @Override
+        protected void afterInsertFill(MetaObject metaObject) {
+        }
+    }
+}

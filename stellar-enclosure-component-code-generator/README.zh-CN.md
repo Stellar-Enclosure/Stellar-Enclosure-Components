@@ -1,0 +1,112 @@
+# stellar-enclosure-component-code-generator
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+离线开发工具。它读取 PostgreSQL DDL 或 MP-SDJ manifest，为 native Light、Web、Service 生成后端 CRUD。它不启动 Spring，不连接数据库，也不修改目标项目的 POM。
+
+已批准的模板引擎只有 `org.freemarker:freemarker:2.3.35`，并且只存在于本工具。生成出的业务工程不依赖 FreeMarker。
+
+## 构建与 classpath
+
+在仓库根目录执行：
+
+```bash
+./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator -am install -DskipTests
+./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=/tmp/egon-codegen.cp
+```
+
+第一条命令用 `install` 而不是 `package`，把上游模块写入本地仓库；第二条命令不带 `-am`，
+否则 reactor 中每个模块都会覆写同一个 `/tmp/egon-codegen.cp`，结果只取决于构建顺序。
+
+把本模块 `target/classes` 加到该 classpath 前面，再导出：
+
+```bash
+export EGON_CODEGEN_CLASSPATH="stellar-enclosure-components/stellar-enclosure-component-code-generator/target/classes:$(cat /tmp/egon-codegen.cp)"
+```
+
+`scripts/egon-codegen.sh` 只使用已经给出的 `EGON_CODEGEN_CLASSPATH`，不执行 Maven、curl，也不启动应用。Java 可执行文件按 `JAVA`、`JAVA_HOME/bin/java`、`PATH` 中的 `java` 顺序选取。缺少 Java、`EGON_CODEGEN_CLASSPATH` 为空、或该 classpath 中任一条目在磁盘上不存在，都会向标准错误打印 `{"code":"BLOCKED_TOOLING",...}` 并以退出码 7 结束。
+
+## 命令
+
+```text
+scripts/egon-codegen.sh templates
+scripts/egon-codegen.sh plan --config codegen.json
+scripts/egon-codegen.sh check --config codegen.json
+scripts/egon-codegen.sh apply --plan <plan-id> --config codegen.json
+scripts/egon-codegen.sh recover --config codegen.json
+```
+
+命令成功时，JSON 对象是标准输出的最后一行。本模块不内置日志配置，classpath 上的 Logback 默认控制台 appender 会把日志行（例如 Hibernate Validator 版本行）也写到标准输出，解析前需要丢弃 JSON 之前的内容。错误与诊断以 `{"code":...,"message":...}` 形式只写到标准错误。退出码：0 成功或无变化，2 配置或语法，3 缺类型或不规范，4 人工冲突，5 破坏性变更未确认，6 过期计划，7 恢复或 IO，8 检查发现待同步差异。
+
+`check` 不改项目文件，只逐项比较渲染结果与磁盘内容。`apply` 是全有或全无：预检一旦发现 `CONFLICT`，就在写入任何文件之前中止并返回 4；人工改过的文件保持原样，只有磁盘内容仍等于上次生成内容的文件会被替换。退出码 5 `DESTRUCTIVE_ACTION` 对应需要显式受理的 `DELETE`/`RENAME` 动作，但 `plan` 只产出 `CONFLICT`、`NO_CHANGE`、`ADD`、`UPDATE`，命令行也不传受理集合，因此该分支在当前 CLI 下不可达。
+
+`backend-crud` 会生成完整基础链路：PO、DAO、Mapper XML、Repository、领域模型与
+Domain Service/实现、Command/Query/Result、转换器、Manage/实现；Light 和 Web 还会
+生成 Controller，Service 不生成 HTTP 入口；`persistence-crud` 只展开为前四项。
+`artifacts` 可以逐个选择，别名 `pojo`→`po`、`mapper`→`mapper-xml` 会先归一化。
+省略下层产物时必须用 `existingTypeMappings` 声明已有类型：缺 `po` 或缺 `dao` 返回
+`MISSING_TYPE`（退出码 3）。生成器只强制这两项，catalog 里其余条目的 `requiredTypes`
+当前不参与校验；生成范围也不会自动扩大。查询和写入均由 Repository 持有 Mapper/XML 访问，
+Domain Service 实现不能直接调用 DAO。`logicalTables` 必须明确指定，且逐个匹配 DDL 中的逻辑表，
+不存在的表名直接报错。
+
+配置 JSON 的 `configVersion` 必须是 `1`，`projectType` 取 `light`/`web`/`service`，
+未知键一律拒绝（反序列化开启 `FAIL_ON_UNKNOWN_PROPERTIES`）。`input.mode` 只有两种：
+`schema` 按顺序重放 `schemaFiles`，`manifest` 读取 `resourceRoot` 下的 `manifest` 路径。
+manifest 形如 `{"family":...,"scripts":[{"version":...,"path":...,"sha256":...}]}`；
+脚本字节与记录的 `sha256` 不符，或已记录的版本前缀发生变化，都返回 `CHECKSUM_DRIFT`。
+
+生成器只读取 `CREATE TABLE` 建表定义（包括现有按角色分支的 `DO` 块）。独立的
+`CREATE INDEX` 和种子 `INSERT`/`UPDATE`/`DELETE` 不参与 Schema 建模；索引及软删除
+唯一性由 agent 另行检查，不能从生成计划推断已校验。`ALTER`、`DROP`、`COMMENT` 等结构变更
+返回 `UNSUPPORTED_DDL`；由 agent 检查 DDL 并显式修改受影响代码，不能用生成器刷新旧产物。
+
+DDL 必须定义 `EgonModel` 所需的 id、tenant、审计、deleted_at 和 version 列，
+生成器校验其类型和空值语义。PO 继承 `EgonModel`，只声明业务字段；Mapper XML 仍映射
+继承字段。生成器不会把这些通用字段再声明到 PO 中。
+业务列的 PO 模板按 DDL 空值（`NOT NULL` 对应 `@NotNull`，不擅自增加非空白规则）、
+字符串长度和简单字符串 `CHECK ... IN (...)` 生成 Jakarta
+约束，使用已有 Insert/Update/Delete/Query/Persisted 分组；Insert 对应 CRUD Create。
+Update 允许 MP 部分更新省略字段，Persisted 校验已加载行。复杂 CHECK 表达式由 agent
+核对并实现，生成器不猜测业务规则。
+生成的 DAO 在适用方法上使用 `@Validated`/`@Valid`；继承的 MP 写入由 Starter 的 Mapper
+拦截器在填充后直接调用 Jakarta `Validator` 校验。
+
+计划格式当前为 v2。无生成记录的同名文件、人工编辑的文件，以及计划后新增或改变的文件
+均返回冲突，不自动接管或覆盖。`apply` 重新核对配置、DDL、模板、工具代码和生成状态的
+指纹，并在同一输出目录锁下预检所有目标文件；旧 v1 计划需要重新运行 `plan`。
+
+`plan`、`apply` 与 `recover` 只在输出根目录下维护 `.egon/codegen/`：
+`plans/<plan-id>.json` 由 `plan` 写出，`state.json` 由 `apply` 更新，其中的 journal 记录
+中断阶段并供 `recover` 回滚，`apply.lock` 是写入锁。删除该目录等于让生成器失去所有文件的
+归属记录，此后同名文件都会判为冲突。
+
+当前验收覆盖源码编译和隔离测试：`./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator -am test`。它不代表 PostgreSQL、ShardingSphere 或 MQ 已经在真实环境运行。
+
+
+## UTC 时间默认值
+
+时间 DEFAULT 必须独立于数据库会话时区保持 UTC 语义。`TIMESTAMPTZ(6)` 使用
+`CURRENT_TIMESTAMP(6)` / `now()`；Legacy UTC timestamp 使用
+`(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')`；UTC 今天使用
+`((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date)`；UTC 钟表时间使用
+`((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::time(6))`。
+固定日期/本地时间字面值保留其声明语义；发生时刻字面值要求 Z 或零偏移。
+两个渲染入口对依赖会话时区或不支持的时间默认表达式返回 `TIME_DEFAULT_UNSUPPORTED`。
+`TIMESTAMP 'now'` 会固定为建表时刻；`timezone('UTC', now())` 返回无时区值，不能作为发生时刻列默认值。
+排课起止仍要求调用者显式提供，`deleted_at` 保持 nullable。MP 提案只推导类型，不自动补默认值。
+历史迁移保持不可变；本规则不执行或重写 SQL。
+
+## 生成 Java 契约与模板纠正
+
+计划写出候选文件之前，全部选中 Java 产物必须满足源码路径、声明包和公开类型名一致；
+不一致返回 `JAVA_SOURCE_MISMATCH`，退出码 2。持久化转换器属于
+`infrastructure.<domain>.converter`，Domain Service 实现显式导入它。Archetype 的纯协议
+入参载体使用 `DTO`；`Command`/`Query` 入参与 `Result`/`PageResult` 输出保留语义名称。
+框架类型和生成的协议类型保持不变。
+
+`CLEAN` 只表示选中文件匹配当前模板，不代表架构验收。升级工具/模板后重新生成计划。
+未被人工修改的生成 converter 可以原位更新，基线哈希由 `apply` 维护。Domain Service
+已有业务修改时，整组 apply 必须在写入前停止；只选择未改动的生成文件，将 Service 的
+import 调整单独审阅合并，保留其原始基线和预期差异。不得重置哈希或删除状态来强行
+得到 `CLEAN`。使用干净编译重新生成 MapStruct 实现，确认新包落点并清除旧包残留。

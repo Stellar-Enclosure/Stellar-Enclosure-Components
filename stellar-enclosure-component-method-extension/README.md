@@ -1,0 +1,152 @@
+# Stellar-Enclosure Method Extension
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+`stellar-enclosure-component-method-extension-starter` (aggregator artifact
+`stellar-enclosure-component-method-extension`) is a lightweight Spring Boot Starter for
+running one business-defined decision handler before an annotated method.
+
+## Modules
+
+| Module | Purpose |
+|---|---|
+| `stellar-enclosure-component-method-extension` | `pom` aggregator; not published and not exported by the BOM |
+| `stellar-enclosure-component-method-extension-starter` | Annotation, handler contract, AOP, response conversion, and auto-configuration |
+
+## Dependency
+
+Import `top.egon:stellar-enclosure-components-bom:5.4.1`, then add:
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-method-extension-starter</artifactId>
+</dependency>
+```
+
+## Configuration
+
+```yaml
+egon:
+  cola:
+    component:
+      method-extension:
+        enabled: true
+        engine: AOP
+        not-ready-policy: PROCEED
+        order: -2147483548
+```
+
+`enabled` defaults to `true`, so the starter is active as soon as the dependency is
+present; `enabled=false` always disables both engines. `engine` accepts `AOP`,
+`AGENT`, or `DISABLED` and defaults to `AOP`. Binding uses `ignoreInvalidFields=true`,
+so a missing or misspelled value falls back to `AOP` rather than failing start-up.
+
+| Engine | Supported methods | Runtime boundary |
+|---|---|---|
+| `AOP` | Public methods reachable through Spring AOP proxies | Existing default; no Java Agent required |
+| `AGENT` | Concrete instance methods of every visibility, including private self-calls, final, synchronized, interface-declared annotations, and non-Spring objects | Requires the bytecode starter and a premain Agent with `features=method-extension` |
+| `DISABLED` | None | Registers neither AOP nor Agent integration |
+
+Agent mode excludes static methods, constructors, abstract methods, native methods,
+synthetic methods, and bridge methods. Generated JDK and Spring CGLIB proxy classes
+are excluded so only the concrete target is enhanced and each Handler runs once.
+
+## Handler
+
+Register every handler as a Spring Bean. Return `allow()` to invoke the original
+method, `reject(response)` to return a direct object, or `reject()` to use the
+annotation's `returnJson`.
+
+```java
+@Component
+public class BlacklistHandler implements MethodExtensionHandler {
+
+    @Override
+    public MethodExtensionDecision evaluate(MethodExtensionContext context) {
+        String userId = (String) context.arguments()[0];
+        return Set.of("bbb", "222").contains(userId)
+                ? MethodExtensionDecision.rejectWithReason("blacklist hit")
+                : MethodExtensionDecision.allow();
+    }
+}
+```
+
+```java
+@MethodExtension(
+        handler = BlacklistHandler.class,
+        returnJson = "{\"code\":1111,\"message\":\"access rejected\"}"
+)
+public UserResponse query(String userId) {
+    return new UserResponse(0, "success");
+}
+```
+
+## Response Rules
+
+1. A direct handler response has first priority and must match the method return type.
+2. A non-blank `returnJson` is second priority.
+3. `String` methods receive `returnJson` unchanged.
+4. Object and generic JSON conversion requires exactly one application `ObjectMapper` Bean.
+5. `void` methods reject with `null` and must not configure `returnJson`.
+6. Missing responses and incompatible types produce explicit component exceptions.
+
+## Error Behavior
+
+Missing or ambiguous handlers, null decisions, and invalid response configuration
+raise `MethodExtensionConfigurationException`. JSON and response type failures
+raise `MethodExtensionResponseException`. Exceptions from a handler are logged
+and propagated unchanged; the original method is never executed after a handler
+failure.
+
+**Exception and enum contract:** all three component exceptions live in
+`top.egon.cola.component.methodextension.common.exception`, and `MethodExtensionException`
+is rooted on the common-core `CommonException` with the shared `ResultCode.SYSTEM_ERROR`
+code and status, so messages, causes and constructor shapes stay as documented.
+`engine`, `not-ready-policy`, and the asynchronous return kinds are common-core `EgonEnum`
+values with fixed codes assigned in declaration order (`AOP=0`, `AGENT=1`, `DISABLED=2`;
+`PROCEED=0`, `REJECT=1`, `FAIL=2`), while configuration binding, policy branching and
+JSON typing keep matching on the constant names. The starter publishes the canonical
+`egonColaValidationUtils` facade, and `MethodExtensionAgentEngineValidator` reuses it to run
+the native Jakarta constraints before its own classpath relation check.
+
+## Spring AOP Limits
+
+Only public methods on Spring-managed proxy Beans are intercepted. Self-invocation
+through `this`, private methods, static methods, and non-proxyable final methods
+are not supported. V1 executes one synchronous handler and does not provide a
+handler chain, reactive adapter, Web layer, Redis integration, or database state.
+
+## Agent Installation
+
+The Method Extension starter remains standalone and does not depend on the bytecode
+component. To use `engine: AGENT`, add the bytecode starter separately and pass its
+published Agent JAR before the application main class:
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-bytecode-starter</artifactId>
+</dependency>
+```
+
+```bash
+java "-javaagent:/opt/egon/stellar-enclosure-component-bytecode-agent-5.4.1.jar=enabled=true,features=method-extension,include=com.example.*" \
+  -jar application.jar
+```
+
+The bytecode starter declares Method Extension support as optional, so consumers
+must still declare this Method Extension starter explicitly. Spring start-up fails
+when `engine: AGENT` is selected but the bytecode starter is absent from the
+classpath. The separate capability check that the running Agent advertises
+`METHOD_EXTENSION` is enforced by the bytecode starter. `not-ready-policy` applies only before Spring finishes
+initializing the runtime adapter: `PROCEED` allows the original body, `REJECT` returns
+`null` without invoking a Handler, and `FAIL` throws a startup-readiness error.
+
+For rejections, direct synchronous values preserve the existing response rules.
+`Future`, `CompletionStage`, and `CompletableFuture` return types receive a completed
+rejection value; allowed calls retain the original asynchronous object identity.
+Arbitrary concrete `Future` implementations and reactive return types are not
+adapted. Agent events expose bounded method/Handler identities, outcomes, and a
+bounded handler-supplied reason; arguments, return payloads, credentials, and
+exception messages are never published.

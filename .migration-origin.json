@@ -1,0 +1,8 @@
+{
+  "sourceRepository": "https://github.com/AllenDEricDAlexander/Egon-COLA",
+  "sourceCommit": "52e407ee3be892200aafadb19ad912189f5ada1c",
+  "version": "0.0.1",
+  "mavenNamespace": "top.egon",
+  "npmScope": "@stellar-enclosure",
+  "repository": "Stellar-Enclosure-Components"
+}
