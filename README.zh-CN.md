@@ -12,8 +12,8 @@
 | Agent Flow | 扁平化的 Spring AI + Google ADK 配置驱动 Flow 编译、in-memory Session、同步事件和流式执行 | [Agent Flow Starter](stellar-enclosure-component-agent-flow-starter/README.zh-CN.md) |
 | Bytecode | ASM 架构校验，以及运行时 executor 增强、方法观测和方法扩展增强 | [Bytecode](stellar-enclosure-component-bytecode/README.zh-CN.md) |
 | Code Generator | 离线开发工具，读取 PostgreSQL DDL 或 MyBatis-Plus/Sharding-JDBC manifest 生成后端 CRUD | [Code Generator](stellar-enclosure-component-code-generator/README.zh-CN.md) |
-| Common | 共享契约和基础工具模块 | [Common](stellar-enclosure-component-common/README.zh-CN.md) |
-| Dynamic Thread Pool | 运行时执行器管理 | [Dynamic Thread Pool](stellar-enclosure-component-dynamic-thread-pool/README.zh-CN.md) |
+| Common | 统一响应/异常、MyBatis-Plus/Sharding-JDBC 持久化与租户隔离、两级缓存、Trace、ID、加密和数据脱敏 | [Common](stellar-enclosure-component-common/README.zh-CN.md) |
+| Dynamic Thread Pool | 平台线程/虚拟线程执行器管理、运行时调参、上下文传播与执行监控 | [Dynamic Thread Pool](stellar-enclosure-component-dynamic-thread-pool/README.zh-CN.md) |
 | Method Extension | 在注解方法执行前运行一个业务自定义决策 Handler | [Method Extension](stellar-enclosure-component-method-extension/README.zh-CN.md) |
 | RAG | 文档抽取、切片、向量化和相似度检索机制 | [RAG Starter](stellar-enclosure-component-rag-starter/README.zh-CN.md) |
 | RPC | Protobuf/gRPC 与 Tianshu 集成 | [RPC](stellar-enclosure-component-rpc/README.zh-CN.md) |
@@ -24,13 +24,17 @@
 
 Agent Flow starter 默认关闭，采用扁平组件结构。它负责配置、ADK 图编译、Registry/Session 执行、cancel、timeout 和有界 close；宿主负责 provider `ChatModel`、凭据、工具、MCP、HTTP、认证，以及 database 等持久化边界。
 
+## 仓库协作与边界
+
+本仓库提供技术组件，不承载完整平台的管理业务。各平台 Admin 与 Web 分别在独立仓库中维护；[COLA](https://github.com/Stellar-Enclosure/Stellar-Enclosure-COLA) 复用这些组件生成业务工程，[Parent](https://github.com/Stellar-Enclosure/Stellar-Enclosure-Parent) 提供共享构建与发布约定。RPC Tianshu Adapter 位于本仓库的 `stellar-enclosure-component-rpc/`，依赖 [tianshu-service](https://github.com/Stellar-Enclosure/tianshu-service) 的基础 Starter；不能将它误写成 Tianshu reactor 内的子模块。
+
 ## BOM
 
 导入 [`stellar-enclosure-components-bom`](stellar-enclosure-components-bom/README.zh-CN.md) 后，可以无重复版本地消费 `top.egon:stellar-enclosure-component-agent-flow-starter` 和其他已发布组件入口。BOM 管理 22 个 Egon 运行时 artifact，并固定这些 artifact 暴露给消费者的第三方版本（`org.apache.commons:commons-lang3` 和 Redisson artifact）。provider 库、ADK 内部依赖、admin 应用、test 模块、聚合 POM 和离线的 Code Generator 不进入公共依赖清单。
 
 ## 架构
 
-新增模块前请阅读 [Components 架构规范](stellar-enclosure-components-architecture.md)。文档区分常规 starter/admin/test 结构与获批准的扁平 Agent Flow starter，并记录 Java 21、Spring Boot 3.5.16、Spring AI 1.1.8 和 Google ADK 0.7.0 的兼容线。
+新增模块前请阅读 [Components 架构规范](egon-cola-components-architecture.md)。文档区分常规 starter/admin/test 结构与获批准的扁平 Agent Flow starter，并记录 Java 21、Spring Boot 3.5.16、Spring AI 1.1.8 和 Google ADK 0.7.0 的兼容线。
 
 ## 独立仓库发布
 
