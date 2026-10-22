@@ -433,8 +433,19 @@
                     <extensions>true</extensions>
                     <configuration>
                         <publishingServerId>${central.server.id}</publishingServerId>
+                        <skipPublishing>${maven.deploy.skip}</skipPublishing>
                         <autoPublish>true</autoPublish>
                         <waitUntil>published</waitUntil>
+                        <excludeArtifacts>
+                            <excludeArtifact>stellar-enclosure-component-dynamic-thread-pool-admin</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-dynamic-thread-pool-test</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-bytecode-benchmark</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-bytecode-test</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-rpc-test</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-rpc-test-contract</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-rpc-test-provider</excludeArtifact>
+                            <excludeArtifact>stellar-enclosure-component-rpc-test-consumer</excludeArtifact>
+                        </excludeArtifacts>
                     </configuration>
                 </plugin>
                 <plugin>
@@ -520,7 +531,7 @@
                         <artifactId>maven-deploy-plugin</artifactId>
                         <inherited>false</inherited>
                         <configuration>
-                            <skip>false</skip>
+                            <skip>${maven.deploy.skip}</skip>
                         </configuration>
                     </plugin>
                     <plugin>

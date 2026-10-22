@@ -171,3 +171,7 @@ BOM 当前管理 22 个 `top.egon` 运行时 artifact：common core 与工具模
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-components-bom -am test
 ```
+
+## 独立发布
+
+BOM 没有第一方父 POM，首次发布时先于平台 Parent 发布。校验和发布命令见 [英文文档](README.md#independent-maven-central-publication)。已单独发布的同版本 BOM 需要从后续 reactor 发布中排除。

@@ -176,3 +176,14 @@ Child modules declare only the artifact:
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-components-bom -am test
 ```
+
+## Independent Maven Central publication
+
+This BOM has no first-party parent and can be published before the platform parent. From the Components repository root, with Central/GPG credentials configured:
+
+```bash
+./mvnw -B -ntp -N -f stellar-enclosure-components-bom/pom.xml -Prelease -Dgpg.skip=true clean verify
+./mvnw -B -ntp -N -f stellar-enclosure-components-bom/pom.xml -Prelease clean deploy
+```
+
+Publish each version once. After publishing this BOM separately, exclude it from a subsequent same-version Components reactor deployment with `-pl '!stellar-enclosure-components-bom'`. See the [repository publication guide](../README.md#publish-to-maven-central).

@@ -16,6 +16,10 @@
     <name>stellar-enclosure-component-dynamic-thread-pool-test</name>
     <description>Sample and integration tests for Stellar Enclosure dynamic thread pool.</description>
 
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>top.egon</groupId>

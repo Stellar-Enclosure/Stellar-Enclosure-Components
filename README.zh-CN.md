@@ -31,3 +31,7 @@ Agent Flow starter 默认关闭，采用扁平组件结构。它负责配置、A
 ## 架构
 
 新增模块前请阅读 [Components 架构规范](stellar-enclosure-components-architecture.md)。文档区分常规 starter/admin/test 结构与获批准的扁平 Agent Flow starter，并记录 Java 21、Spring Boot 3.5.16、Spring AI 1.1.8 和 Google ADK 0.7.0 的兼容线。
+
+## 独立仓库发布
+
+发布范围、前置配置、校验与发布命令见 [仓库 README](README.md#publish-to-maven-central)。应用和测试示例不发布到 Maven Central，前端站点保持 `private: true`。

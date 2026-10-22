@@ -16,6 +16,10 @@
     <name>stellar-enclosure-component-dynamic-thread-pool-admin</name>
     <description>Admin service for Stellar Enclosure dynamic thread pool.</description>
 
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.mapstruct</groupId>

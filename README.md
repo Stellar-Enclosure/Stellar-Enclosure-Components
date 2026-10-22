@@ -16,9 +16,28 @@ Before the first Central publication, clone the eight Java repositories next to 
 bash ../Stellar-Enclosure-Parent/scripts/bootstrap-workspace.sh \
   --workspace "$(cd .. && pwd)" \
   --local-repository "$HOME/.m2/repository"
+
+# Resolve subsequent Maven commands and generator subprocesses from this same cache.
+export MAVEN_ARGS="${MAVEN_ARGS:-} -Dmaven.repo.local=$HOME/.m2/repository"
 ```
 
 The bootstrap installs parent/BOM models before building components and business starters in Maven reactor order. It compiles test sources and installs packages with runtime tests disabled. It never runs applications, databases, containers, browsers, or deploy.
+
+## Publish to Maven Central
+
+Publishes the Components parent, standalone BOM, reusable components, Starters, code generator and Maven plugin. The `common-test` artifact contains reusable boundary assertions used by component tests. Dynamic thread pool Admin/sample tests, RPC test applications, bytecode tests and benchmarks are excluded by both module properties and the Central plugin. The RPC Tianshu adapter requires the published Tianshu base Starter.
+
+Run these commands from this repository. Configure a Central Portal token under Maven server ID `central` and a local GPG signing key; credentials stay outside Git. See the [credential setup and initial dependency order](https://github.com/Stellar-Enclosure/Stellar-Enclosure-Parent/blob/main/docs/first-release.md).
+
+```bash
+# Verify release artifacts locally; signing and upload are disabled.
+./mvnw -B -ntp -Prelease -Dgpg.skip=true -DskipITs -Dinvoker.skip=true -Darchetype.test.skip=true clean verify
+
+# Sign and publish this repository's public artifacts.
+./mvnw -B -ntp -Prelease -DskipITs -Dinvoker.skip=true -Darchetype.test.skip=true clean deploy
+```
+
+Unit tests remain enabled. `release` attaches sources, Javadoc and GPG signatures, then publishes through the Central Portal. Ordinary builds and Git pushes do not publish. Each published GAV is immutable: use a new version for changed content, and use `-pl` to select only unpublished modules after a partial release. Before the first release, use the Build section's local bootstrap or publish the prerequisite artifacts first; bootstrap installation alone does not publish dependencies.
 
 ## Compatibility and publication
 
