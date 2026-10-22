@@ -47,7 +47,7 @@ build-and-unit-tests:
             git clone --quiet --depth 1 "$source_base/$repository.git" "$workspace/$repository"
           fi
         done
-        bash "$workspace/Stellar-Enclosure-Parent/scripts/bootstrap-migration.sh" \
+        bash "$workspace/Stellar-Enclosure-Parent/scripts/bootstrap-workspace.sh" \
           --workspace "$workspace" --local-repository "$MAVEN_REPO_LOCAL"
       fi
       cd "$workspace/Stellar-Enclosure-Components"

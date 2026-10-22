@@ -76,7 +76,7 @@ jobs:
       - name: Prepare source dependencies
         if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'
         run: |
-          bash workspace/Stellar-Enclosure-Parent/scripts/bootstrap-migration.sh \
+          bash workspace/Stellar-Enclosure-Parent/scripts/bootstrap-workspace.sh \
             --workspace "$GITHUB_WORKSPACE/workspace" \
             --local-repository "$HOME/.m2/repository"
       - name: Compile and run unit tests
