@@ -27,7 +27,7 @@ import java.util.List;
 @AutoConfiguration(after = {
         EgonColaMybatisPlusAutoConfiguration.class,
         TransactionalOutboxAutoConfiguration.class
-}, afterName = "org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration")
+}, afterName = "org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration")
 @EnableConfigurationProperties(OutboxStateMachineProperties.class)
 @ConditionalOnClass(StateMachine.class)
 @ConditionalOnBean(TransactionalOutboxProperties.class)

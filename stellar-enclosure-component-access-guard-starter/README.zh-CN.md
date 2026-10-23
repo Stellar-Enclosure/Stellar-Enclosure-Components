@@ -15,7 +15,7 @@
 
 适用场景包括抽奖、优惠券领取、登录防刷、支付提交、风险校验、昂贵查询、热点接口保护，以及需要在业务方法边界统一执行准入规则的场景。
 
-> 本文档对应 Stellar Enclosure `5.4.1`、Java 21+、Spring Boot 3.5.x。
+> 本文档对应 Stellar Enclosure `5.4.1`、Java 25+、Spring Boot 4.1.x。
 
 ---
 
@@ -78,8 +78,8 @@ DenyList -> AllowList -> PenaltyBox -> RateLimit
 
 ## 3. 环境要求
 
-- Java 21 或更高版本
-- Spring Boot 3.x
+- Java 25 或更高版本
+- Spring Boot 4.x
 - 默认 `AOP` 引擎需要 Spring AOP
 - 只要配置了规则，就必须提供非空 HMAC Secret
 - 选择 `storage: REDISSON` 时必须提供 `RedissonClient`

@@ -190,7 +190,7 @@ public final class RedissonRateLimitBackend implements RateLimitBackend {
             Object result = client.getScript(StringCodec.INSTANCE).eval(
                     RScript.Mode.READ_WRITE,
                     script,
-                    RScript.ReturnType.MULTI,
+                    RScript.ReturnType.LIST,
                     List.of(keyFactory.rateLimit(
                             request.ruleId(), request.stateVersion(), request.keyHash(),
                             request.algorithm())),

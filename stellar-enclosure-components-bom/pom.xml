@@ -52,7 +52,7 @@
     <properties>
         <maven.deploy.skip>false</maven.deploy.skip>
         <commons.lang3.version>3.20.0</commons.lang3.version>
-        <redisson.version>3.26.0</redisson.version>
+        <redisson.version>4.8.0</redisson.version>
         <spring-statemachine.version>4.0.2</spring-statemachine.version>
         <central.server.id>central</central.server.id>
         <central.publishing.maven.plugin.version>0.11.0</central.publishing.maven.plugin.version>

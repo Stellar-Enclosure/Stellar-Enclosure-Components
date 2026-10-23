@@ -114,7 +114,7 @@ public final class RedissonPenaltyStore implements PenaltyStore {
             Object result = client.getScript(StringCodec.INSTANCE).eval(
                     RScript.Mode.READ_WRITE,
                     script,
-                    RScript.ReturnType.MULTI,
+                    RScript.ReturnType.LIST,
                     List.of(keyFactory.penalty(key.ruleId(), key.stateVersion(), key.keyHash())),
                     arguments);
             if (result instanceof List<?> values) {

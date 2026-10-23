@@ -10,7 +10,7 @@ stages:
   - test
 
 default:
-  image: eclipse-temurin:21-jdk-jammy
+  image: eclipse-temurin:25-jdk-jammy
   interruptible: true
 
 variables:
@@ -23,7 +23,7 @@ build-and-unit-tests:
   timeout: 45 minutes
   cache:
     key:
-      prefix: maven-jdk21
+      prefix: maven-jdk25
       files:
         - pom.xml
         - .mvn/wrapper/maven-wrapper.properties

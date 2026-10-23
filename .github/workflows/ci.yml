@@ -22,7 +22,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: zulu
-          java-version: '21'
+          java-version: '25'
           cache: maven
       - uses: actions/checkout@v5
         if: vars.STELLAR_USE_SOURCE_BOOTSTRAP != 'false'

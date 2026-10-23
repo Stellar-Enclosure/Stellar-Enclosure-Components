@@ -24,7 +24,7 @@ import java.util.Optional;
 import java.util.function.Function;
 
 /**
- * Explicit MyBatis-Plus 3.5.16 IRepository contract for EgonModel persistence.
+ * Explicit MyBatis-Plus 3.5.17 IRepository contract for EgonModel persistence.
  *
  * @param <T> concrete EgonModel type
  */

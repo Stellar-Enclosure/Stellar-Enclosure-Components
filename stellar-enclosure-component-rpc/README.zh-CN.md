@@ -12,7 +12,7 @@ HTTP/RPC 转发由独立的 [Yuheng 平台](../../stellar-enclosure-platform/ste
 
 ## Badges
 
-![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)
+![Java 25](https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white)
 ![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-6DB33F?logo=springboot&logoColor=white)
 ![gRPC 1.75](https://img.shields.io/badge/gRPC-1.75.0-244C5A)
 ![Protobuf 4.32](https://img.shields.io/badge/Protobuf-4.32.0-4285F4)
@@ -68,9 +68,9 @@ Yuheng 业务链路中，Consumer 只发现 `INTERNAL_GATEWAY`，不会查询 `R
 
 ## Requirements
 
-- JDK 21 或更高版本；Components Parent 强制要求 Java 21。
+- JDK 25 或更高版本；Components Parent 强制要求 Java 25。
 - 使用仓库提供的 Maven Wrapper（`./mvnw`），或兼容的 Maven 安装。
-- 使用自动配置时，需要 Spring Boot 3.5.x。
+- 使用自动配置时，需要 Spring Boot 4.1.x。
 - 使用 `protoc` 和 `protoc-gen-grpc-java` 生成兼容的 Java/gRPC 类；仓库当前基线为
   Protobuf 4.32.0 和 gRPC Java 1.75.0。
 - 启用 Provider 租约、Yuheng/Provider 发现或 Tianshu ConfigData 时，需要可访问的 Tianshu
@@ -602,7 +602,7 @@ stellar-enclosure-component-rpc/
 ## Compatibility
 
 - **Java：** 21+。
-- **Spring Boot：** 3.5.x；当前父 POM 管理 3.5.16。
+- **Spring Boot：** 4.1.x；当前父 POM 管理 4.1.2。
 - **gRPC/Protobuf：** components Reactor 管理 gRPC Java 1.75.0、Protobuf
   Java/protoc 4.32.0 和 `protoc-gen-grpc-java` 1.75.0。native archetype 家族生成的
   工程沿用这些版本；open archetype 家族继承 gRPC Java 1.73.0 与 Protobuf 3.25.8。

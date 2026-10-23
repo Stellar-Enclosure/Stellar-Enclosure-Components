@@ -3,7 +3,7 @@ package top.egon.cola.component.common.desensitize.autoconfigure;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
+import org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import top.egon.cola.component.common.desensitize.annotation.Sensitive;
 import top.egon.cola.component.common.desensitize.annotation.SensitiveType;
@@ -22,7 +22,7 @@ class DataDesensitizeAutoConfigurationTest {
             new ApplicationContextRunner().withConfiguration(
                     AutoConfigurations.of(
                             DataDesensitizeAutoConfiguration.class,
-                            JacksonAutoConfiguration.class
+                            Jackson2AutoConfiguration.class
                     )
             );
 

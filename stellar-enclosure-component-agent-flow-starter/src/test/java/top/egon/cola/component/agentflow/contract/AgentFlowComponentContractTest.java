@@ -36,7 +36,7 @@ class AgentFlowComponentContractTest {
         String parent = read(PARENT_POM);
 
         assertEquals(1, count(parent, "<module>stellar-enclosure-component-agent-flow-starter</module>"));
-        assertTrue(parent.contains("<spring-ai.version>1.1.8</spring-ai.version>"));
+        assertTrue(parent.contains("<spring-ai.version>2.0.2</spring-ai.version>"));
         assertTrue(parent.contains("<google-adk.version>0.7.0</google-adk.version>"));
         assertTrue(parent.contains("<artifactId>spring-ai-bom</artifactId>"));
         assertTrue(parent.contains("<artifactId>google-adk-spring-ai</artifactId>"));
@@ -52,7 +52,7 @@ class AgentFlowComponentContractTest {
         assertTrue(module.contains("<artifactId>google-adk-spring-ai</artifactId>"));
         assertTrue(module.contains("<exclusions>"));
         assertTrue(module.contains("<artifactId>google-adk-dev</artifactId>"));
-        assertFalse(module.contains("spring-boot-starter-web"));
+        assertFalse(module.contains("spring-boot-starter-webmvc"));
         assertFalse(module.contains("spring-ai-starter-mcp"));
         assertFalse(module.contains("flyway"));
         assertFalse(module.contains("jdbc"));
@@ -94,7 +94,7 @@ class AgentFlowComponentContractTest {
                 "deleteSession",
                 "execute",
                 "executeStream",
-                "Spring AI 1.1.8",
+                "Spring AI 2.0.2",
                 "Google ADK 0.7.0",
                 "Flowable<Event>",
                 "AgentFlowSessionBusyException",
@@ -133,7 +133,7 @@ class AgentFlowComponentContractTest {
                 "execution-timeout",
                 "shutdown-timeout",
                 "executeStream",
-                "Spring AI 1.1.8",
+                "Spring AI 2.0.2",
                 "Google ADK 0.7.0",
                 "no retry",
                 "in-memory"

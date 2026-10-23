@@ -34,7 +34,7 @@ Agent Flow starter 默认关闭，采用扁平组件结构。它负责配置、A
 
 ## 架构
 
-新增模块前请阅读 [Components 架构规范](egon-cola-components-architecture.md)。文档区分常规 starter/admin/test 结构与获批准的扁平 Agent Flow starter，并记录 Java 21、Spring Boot 3.5.16、Spring AI 1.1.8 和 Google ADK 0.7.0 的兼容线。
+新增模块前请阅读 [Components 架构规范](egon-cola-components-architecture.md)。文档区分常规 starter/admin/test 结构与获批准的扁平 Agent Flow starter，并记录 Java 25、Spring Boot 4.1.2、Spring AI 2.0.2 和 Google ADK 0.7.0 的兼容线。
 
 ## 独立仓库发布
 

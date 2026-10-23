@@ -17,7 +17,7 @@ It provides one unified runtime model for:
 The component is intended for business entry points such as coupon claims, lotteries, login attempts, payment
 operations, risk checks, expensive queries, and hot API protection.
 
-> Current document target: Stellar Enclosure `5.4.1`, Java 21+, Spring Boot 3.5.x.
+> Current document target: Stellar Enclosure `5.4.1`, Java 25+, Spring Boot 4.1.x.
 
 ---
 
@@ -81,8 +81,8 @@ The policy order is fixed and is part of the public contract.
 
 ## 3. Requirements
 
-- Java 21 or later
-- Spring Boot 3.x
+- Java 25 or later
+- Spring Boot 4.x
 - Spring AOP for the default `AOP` engine
 - A non-empty HMAC secret when at least one rule exists
 - A `RedissonClient` when `storage: REDISSON` is selected

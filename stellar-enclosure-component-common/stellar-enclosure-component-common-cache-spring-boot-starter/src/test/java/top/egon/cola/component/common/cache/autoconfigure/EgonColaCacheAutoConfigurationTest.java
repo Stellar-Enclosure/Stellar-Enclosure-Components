@@ -108,7 +108,7 @@ class EgonColaCacheAutoConfigurationTest {
     void winsBeforeBootDefaultCacheManagerWhenCachingIsEnabled() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(EgonColaCacheAutoConfiguration.class,
-                        org.springframework.boot.autoconfigure.cache.CacheAutoConfiguration.class))
+                        org.springframework.boot.cache.autoconfigure.CacheAutoConfiguration.class))
                 .withUserConfiguration(CachingConfiguration.class)
                 .withPropertyValues("egon.cola.component.cache.enabled=true")
                 .withBean("redissonClient", RedissonClient.class, EgonColaCacheAutoConfigurationTest::stubClient)

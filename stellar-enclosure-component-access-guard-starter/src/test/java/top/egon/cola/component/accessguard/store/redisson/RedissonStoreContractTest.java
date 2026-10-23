@@ -61,7 +61,7 @@ class RedissonStoreContractTest {
         RedissonClient client = mock(RedissonClient.class);
         RScript script = mock(RScript.class);
         when(client.getScript(any(Codec.class))).thenReturn(script);
-        when(script.eval(any(), any(), any(), any(), any(Object[].class)))
+        when(script.eval(any(), anyString(), any(), anyList(), any(Object[].class)))
                 .thenThrow(new RedisException("down"));
         RedissonRateLimitBackend backend = new RedissonRateLimitBackend(client, keyFactory(), Duration.ofMinutes(10));
 
@@ -91,7 +91,7 @@ class RedissonStoreContractTest {
         verify(script).eval(
                 eq(RScript.Mode.READ_WRITE),
                 lua.capture(),
-                eq(RScript.ReturnType.MULTI),
+                eq(RScript.ReturnType.LIST),
                 anyList(),
                 any(Object[].class));
         org.assertj.core.api.Assertions.assertThat(state.active()).isTrue();
@@ -116,7 +116,7 @@ class RedissonStoreContractTest {
         verify(script).eval(
                 eq(RScript.Mode.READ_WRITE),
                 lua.capture(),
-                eq(RScript.ReturnType.MULTI),
+                eq(RScript.ReturnType.LIST),
                 anyList(),
                 any(Object[].class));
         org.assertj.core.api.Assertions.assertThat(decision.allowed()).isFalse();
@@ -140,7 +140,7 @@ class RedissonStoreContractTest {
         org.mockito.ArgumentCaptor<String> lua = org.mockito.ArgumentCaptor.forClass(String.class);
         org.mockito.ArgumentCaptor<List> keys = org.mockito.ArgumentCaptor.forClass(List.class);
         verify(script).eval(
-                eq(RScript.Mode.READ_WRITE), lua.capture(), eq(RScript.ReturnType.MULTI),
+                eq(RScript.Mode.READ_WRITE), lua.capture(), eq(RScript.ReturnType.LIST),
                 keys.capture(), any(Object[].class));
         org.assertj.core.api.Assertions.assertThat(keys.getValue().getFirst().toString())
                 .endsWith(":leaky-bucket");
@@ -163,7 +163,7 @@ class RedissonStoreContractTest {
         org.mockito.ArgumentCaptor<String> lua = org.mockito.ArgumentCaptor.forClass(String.class);
         org.mockito.ArgumentCaptor<List> keys = org.mockito.ArgumentCaptor.forClass(List.class);
         verify(script).eval(
-                eq(RScript.Mode.READ_WRITE), lua.capture(), eq(RScript.ReturnType.MULTI),
+                eq(RScript.Mode.READ_WRITE), lua.capture(), eq(RScript.ReturnType.LIST),
                 keys.capture(), any(Object[].class));
         org.assertj.core.api.Assertions.assertThat(keys.getValue().getFirst().toString())
                 .endsWith(":sliding-window");
@@ -247,7 +247,7 @@ class RedissonStoreContractTest {
             RedissonClient client = mock(RedissonClient.class);
             RScript script = mock(RScript.class);
             when(client.getScript(any(Codec.class))).thenReturn(script);
-            when(script.eval(any(), any(), any(), any(), any(Object[].class)))
+            when(script.eval(any(), anyString(), any(), anyList(), any(Object[].class)))
                     .thenAnswer(invocation -> {
                         Object[] raw = invocation.getArguments();
                         return evaluate(

@@ -343,7 +343,7 @@ The four native light, web, service, and agent archetypes replace their generate
 
 ## Compatibility And Benchmark
 
-Production artifacts compile with `--release 21`. Maven Invoker verifies real Java 21 classes locally, and the `architecture-java25` fixture compiles a real `--release 25` record (class-file major `69`) before the plugin scans it. Forked Surefire and Failsafe fixtures start real processes with `-Xverify:all` and the built `-javaagent` JAR. Both Java 25 paths are conditional: the Invoker suite declares `invoker.java.version = 25+`, and `AgentJava25CompatibilityTest` only runs when `JAVA25_HOME` points at an executable JDK, so a Java 21 build skips them.
+Production artifacts compile with `--release 25`. Maven Invoker verifies real Java 25 classes locally, and the `architecture-java25` fixture compiles a real `--release 25` record (class-file major `69`) before the plugin scans it. Forked Surefire and Failsafe fixtures start real processes with `-Xverify:all` and the built `-javaagent` JAR. Both Java 25 paths are conditional: the Invoker suite declares `invoker.java.version = 25+`, and `AgentJava25CompatibilityTest` only runs when `JAVA25_HOME` points at an executable JDK, and CI and local builds now use Java 25.
 
 Build and list the JMH benchmark with:
 
@@ -356,4 +356,4 @@ java -jar stellar-enclosure-components/stellar-enclosure-component-bytecode/stel
 
 `ExecutorEnhancementBenchmark` separately records unmatched filtering, 1,000 transformations, direct submission, context-only submission, and context-plus-Micrometer submission. The controlled targets are at most one second for 1,000 transformations and less than five microseconds of submission overhead.
 
-`MethodObservationBenchmark` records the direct baseline, disabled bridge, enabled success, enabled exception, and slow-event paths without argument capture. The controlled enabled-success target is below two microseconds. These targets are project conventions rather than CI gates: the `CI Backend` workflow runs one `./mvnw -B -ntp clean verify` job on Java 21 and never builds, lists, or executes the benchmark JAR.
+`MethodObservationBenchmark` records the direct baseline, disabled bridge, enabled success, enabled exception, and slow-event paths without argument capture. The controlled enabled-success target is below two microseconds. These targets are project conventions rather than CI gates: the `CI Backend` workflow runs one `./mvnw -B -ntp clean verify` job on Java 25 and never builds, lists, or executes the benchmark JAR.

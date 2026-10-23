@@ -1,8 +1,8 @@
 package top.egon.cola.component.rpc.tianshu.configdata;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.BootstrapRegistry;
-import org.springframework.boot.DefaultBootstrapContext;
+import org.springframework.boot.bootstrap.BootstrapRegistry;
+import org.springframework.boot.bootstrap.DefaultBootstrapContext;
 import org.springframework.boot.context.config.ConfigData;
 import org.springframework.boot.context.config.ConfigDataLoaderContext;
 import org.springframework.boot.context.config.ConfigDataResourceNotFoundException;

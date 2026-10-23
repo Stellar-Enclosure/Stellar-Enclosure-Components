@@ -65,7 +65,7 @@ class RagComponentContractTest {
         String pom = Files.readString(POM, StandardCharsets.UTF_8);
 
         assertThat(pom).doesNotContain("flyway-core", "mybatis", "spring-boot-starter-data-redis",
-                "spring-boot-starter-amqp", "spring-boot-starter-jdbc", "spring-boot-starter-web",
+                "spring-boot-starter-amqp", "spring-boot-starter-jdbc", "spring-boot-starter-webmvc",
                 "spring-boot-starter-data-jpa", "mapstruct-plus");
     }
 

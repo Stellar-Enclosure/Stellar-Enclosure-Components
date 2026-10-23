@@ -57,7 +57,7 @@ Stellar-Enclosure
 ```
 
 `stellar-enclosure-components-parent` 自身还有父 POM `top.egon:stellar-enclosure-parent:5.4.1`，
-也就是仓库根 `pom.xml`；它再继承 `org.springframework.boot:spring-boot-starter-parent:3.5.16`。
+也就是仓库根 `pom.xml`；它再继承 `org.springframework.boot:spring-boot-starter-parent:4.1.2`。
 JDK、Spring Boot 版本、central-publishing 与 GPG 等发布配置都定义在仓库根 POM，组件不要直接继承它。
 
 组件根工程必须继承该父 POM：
@@ -792,7 +792,7 @@ stellar-enclosure-component-agent-flow-starter/
         └── org.springframework.boot.autoconfigure.AutoConfiguration.imports
 ```
 
-该 starter 的输入是宿主具名 `ChatModel` 与组件配置，输出是内部 Java `AgentFlowService` 和 ADK `Event`/`Flowable<Event>`。它只提供本地能力边界：不提供 provider、HTTP、MCP、database、UI、凭据管理、持久化 Session 或远程恢复。宿主负责 provider 连接和认证上下文；Agent Flow 采用 Google ADK 0.7.0、Spring AI 1.1.8，在 Java 21 / Spring Boot 3.5.16 线上验证。
+该 starter 的输入是宿主具名 `ChatModel` 与组件配置，输出是内部 Java `AgentFlowService` 和 ADK `Event`/`Flowable<Event>`。它只提供本地能力边界：不提供 provider、HTTP、MCP、database、UI、凭据管理、持久化 Session 或远程恢复。宿主负责 provider 连接和认证上下文；Agent Flow 采用 Google ADK 0.7.0、Spring AI 2.0.2，兼容基线为 Java 25 / Spring Boot 4.1.2；本次完成编译和离线验证，宿主运行验收仍需独立执行。
 
 
 ---
@@ -831,7 +831,7 @@ stellar-enclosure-component-rag-starter/
 
 该 starter 的输入是宿主的具名 `EmbeddingModel` 与 `VectorStore`，输出是三个内部 Java 服务入口。它只提供
 本地能力边界：不提供 provider、HTTP、schema、database、UI、凭据管理、调度或持久化。宿主负责供应商连接、
-向量表结构与异步编排；RAG 采用 Spring AI 1.1.8，在 Java 21 / Spring Boot 3.5.16 线上验证。
+向量表结构与异步编排；RAG 采用 Spring AI 2.0.2，兼容基线为 Java 25 / Spring Boot 4.1.2；本次完成编译和离线验证，宿主运行验收仍需独立执行。
 
 与 Agent Flow 的关键差异在于**引擎不创建自己的依赖**：Agent Flow 由宿主提供 `ChatModel`，RAG 同样由宿主
 提供嵌入模型与向量库。RAG 的必选 Spring AI 依赖只有 `spring-ai-model` 与 `spring-ai-vector-store`

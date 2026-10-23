@@ -12,9 +12,9 @@
 
 | 要求 | 版本或边界 |
 |---|---|
-| Java | 21 |
-| Spring Boot | 3.5.16 |
-| Spring AI | 1.1.8 |
+| Java | 25 |
+| Spring Boot | 4.1.2 |
+| Spring AI | 2.0.2 |
 | Google ADK | 0.7.0 |
 | Session 存储 | ADK `InMemoryRunner` 自带的 session service，进程内、in-memory |
 
@@ -154,7 +154,7 @@ configuration -> validation -> ADK graph compilation -> registry -> session exec
 
 ## 升级与验证门禁
 
-当前验证的兼容线是 Java 21 + Spring Boot 3.5.16 + Spring AI 1.1.8 + Google ADK 0.7.0。升级 Spring AI 或 ADK 后必须重新执行 focused tests、runtime dependency tree 检查和 Components reactor 测试。没有新的 Spec，不要向 starter 加入 `google-adk-dev`、provider starter、Web、MCP、JDBC 或 Flyway 依赖。
+当前验证的兼容线是 Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 0.7.0。升级 Spring AI 或 ADK 后必须重新执行 focused tests、runtime dependency tree 检查和 Components reactor 测试。没有新的 Spec，不要向 starter 加入 `google-adk-dev`、provider starter、Web、MCP、JDBC 或 Flyway 依赖。
 
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-agent-flow-starter -am test

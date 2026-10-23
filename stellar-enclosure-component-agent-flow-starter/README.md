@@ -12,9 +12,9 @@ The component owns configuration validation, ADK graph compilation, an immutable
 
 | Requirement | Version or boundary |
 |---|---|
-| Java | 21 |
-| Spring Boot | 3.5.16 |
-| Spring AI | 1.1.8 |
+| Java | 25 |
+| Spring Boot | 4.1.2 |
+| Spring AI | 2.0.2 |
 | Google ADK | 0.7.0 |
 | Session storage | Session service of the ADK `InMemoryRunner`, process-local and in-memory |
 
@@ -154,7 +154,7 @@ Component failures are raised from `top.egon.cola.component.agentflow.common.exc
 
 ## Upgrade and validation gate
 
-The tested compatibility line is Java 21 + Spring Boot 3.5.16 + Spring AI 1.1.8 + Google ADK 0.7.0. Any Spring AI or ADK upgrade requires re-running the focused tests, the runtime dependency tree check, and the Components reactor test. Do not add `google-adk-dev`, provider starters, Web, MCP, JDBC, or Flyway dependencies to this starter without a new specification.
+The tested compatibility line is Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 0.7.0. Any Spring AI or ADK upgrade requires re-running the focused tests, the runtime dependency tree check, and the Components reactor test. Do not add `google-adk-dev`, provider starters, Web, MCP, JDBC, or Flyway dependencies to this starter without a new specification.
 
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-agent-flow-starter -am test

@@ -69,18 +69,18 @@ final class RedissonListStoreSupport {
 
     boolean contains(String redisKey, String keyHash) {
         requireHash(keyHash);
-        Object result = eval(CONTAINS_SCRIPT, RScript.ReturnType.INTEGER, redisKey, keyHash);
+        Object result = eval(CONTAINS_SCRIPT, RScript.ReturnType.LONG, redisKey, keyHash);
         return number(result) == 1L;
     }
 
     void add(String redisKey, String keyHash, Duration ttl) {
         requireHash(keyHash);
-        eval(ADD_SCRIPT, RScript.ReturnType.INTEGER, redisKey, keyHash, ttlMillis(ttl));
+        eval(ADD_SCRIPT, RScript.ReturnType.LONG, redisKey, keyHash, ttlMillis(ttl));
     }
 
     void remove(String redisKey, String keyHash) {
         requireHash(keyHash);
-        eval(REMOVE_SCRIPT, RScript.ReturnType.INTEGER, redisKey, keyHash);
+        eval(REMOVE_SCRIPT, RScript.ReturnType.LONG, redisKey, keyHash);
     }
 
     void replace(String redisKey, Set<String> keyHashes, Duration ttl) {
@@ -89,7 +89,7 @@ final class RedissonListStoreSupport {
         List<Object> arguments = new ArrayList<>(values.size() + 1);
         arguments.add(ttlMillis(ttl));
         values.stream().sorted(Comparator.naturalOrder()).forEach(arguments::add);
-        eval(REPLACE_SCRIPT, RScript.ReturnType.INTEGER, redisKey, arguments.toArray());
+        eval(REPLACE_SCRIPT, RScript.ReturnType.LONG, redisKey, arguments.toArray());
     }
 
     private Object eval(String script, RScript.ReturnType returnType, String redisKey, Object... arguments) {

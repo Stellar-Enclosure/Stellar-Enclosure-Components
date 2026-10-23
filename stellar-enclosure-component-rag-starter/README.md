@@ -19,9 +19,9 @@ upload, asynchronous ingestion, permissions — belongs to the consuming applica
 
 | Component | Version |
 | --- | --- |
-| Java | 21 |
-| Spring Boot | 3.5.16 |
-| Spring AI | 1.1.8 |
+| Java | 25 |
+| Spring Boot | 4.1.2 |
+| Spring AI | 2.0.2 |
 
 ## Adding It
 

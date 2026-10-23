@@ -8,7 +8,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
+import org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import top.egon.cola.component.common.desensitize.jackson.SensitiveJacksonModule;
 import top.egon.cola.component.common.desensitize.logback.SensitiveLogbackRegistryBridge;
@@ -18,7 +18,7 @@ import top.egon.cola.component.common.desensitize.strategy.SensitiveStrategyRegi
 
 import java.util.List;
 
-@AutoConfiguration(before = JacksonAutoConfiguration.class)
+@AutoConfiguration(before = Jackson2AutoConfiguration.class)
 public class DataDesensitizeAutoConfiguration {
 
     @Bean

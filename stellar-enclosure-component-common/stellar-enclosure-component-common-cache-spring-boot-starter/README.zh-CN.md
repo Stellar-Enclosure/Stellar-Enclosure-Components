@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 Spring Cache 原生注解 + L1 Guava + L2 Redisson `RMapCache`，通过一个 Redis Pub/Sub 通道失效各节点 L1。
-适用于 Java 21 / Spring Boot 3.5.x。mp-sd-ext 只负责持久化，缓存策略由具体 Repository 的业务方法声明。
+适用于 Java 25 / Spring Boot 4.1.x。mp-sd-ext 只负责持久化，缓存策略由具体 Repository 的业务方法声明。
 沿用 Spring Cache SPI 和现有两级缓存实现，不提供自定义缓存注解、SpEL 解析器或业务切面。
 
 ## 1. 启用

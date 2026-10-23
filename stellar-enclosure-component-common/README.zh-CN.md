@@ -13,7 +13,7 @@
 | Module | 说明 |
 |---|---|
 | `stellar-enclosure-component-common-core` | `ResultCode`、通用异常、转换器契约、POJO record 和树结构构建 |
-| `stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter` | 按需启用的 MyBatis-Plus 3.5.16 支持：无 ActiveRecord 的技术字段基类 `EgonModel`、收窄模型自类型并新增三个语句的 `EgonColaMapper`、增强 57 方法 Service、TenantID 隔离、审计填充和仓储校验 |
+| `stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter` | 按需启用的 MyBatis-Plus 3.5.17 支持：无 ActiveRecord 的技术字段基类 `EgonModel`、收窄模型自类型并新增三个语句的 `EgonColaMapper`、增强 57 方法 Service、TenantID 隔离、审计填充和仓储校验 |
 | `stellar-enclosure-component-common-cache-spring-boot-starter` | 基于 Spring Cache 注解的 L1 Guava + L2 Redisson `RMapCache` 两级缓存，L1 失效通过单一通道广播 |
 | `stellar-enclosure-component-common-trace` | 纯 JDK + SLF4J Trace 核心、W3C `traceparent` 传播、完整 MDC 捕获和本地线程任务模板 |
 | `stellar-enclosure-component-common-trace-spring-boot-starter` | Spring Boot 3 自动配置：Servlet、WebFlux、RestClient、WebClient 和 Reactor Context 投影 |

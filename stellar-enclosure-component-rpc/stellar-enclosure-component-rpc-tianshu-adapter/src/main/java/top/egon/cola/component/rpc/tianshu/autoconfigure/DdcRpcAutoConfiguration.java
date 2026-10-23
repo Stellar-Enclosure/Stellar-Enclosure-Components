@@ -7,12 +7,13 @@ import org.redisson.api.RedissonClient;
 import org.mapstruct.factory.Mappers;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.validation.ValidationAutoConfiguration;
+import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -77,6 +78,16 @@ import java.net.InetAddress;
         IdpStarterProperties.class
 })
 public class DdcRpcAutoConfiguration {
+
+    /** Retains the SDK mapper qualifier with Boot 4's Jackson 2 compatibility module. */
+    @Bean
+    public static BeanFactoryPostProcessor ddcRpcJacksonObjectMapperAlias() {
+        return beanFactory -> {
+            if (beanFactory.containsBean("jackson2ObjectMapper") && !beanFactory.containsBean("jacksonObjectMapper")) {
+                beanFactory.registerAlias("jackson2ObjectMapper", "jacksonObjectMapper");
+            }
+        };
+    }
 
     @Bean(name = "egonColaValidationUtils")
     @ConditionalOnMissingBean(name = "egonColaValidationUtils")

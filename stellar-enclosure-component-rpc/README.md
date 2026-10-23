@@ -13,7 +13,7 @@ forwarding are owned by the separate [Yuheng platform](../../stellar-enclosure-p
 
 ## Badges
 
-![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)
+![Java 25](https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white)
 ![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-6DB33F?logo=springboot&logoColor=white)
 ![gRPC 1.75](https://img.shields.io/badge/gRPC-1.75.0-244C5A)
 ![Protobuf 4.32](https://img.shields.io/badge/Protobuf-4.32.0-4285F4)
@@ -77,9 +77,9 @@ when no mode is written, the reference defaults to direct Provider discovery.
 
 ## Requirements
 
-- JDK 21 or later. The components parent enforces Java 21.
+- JDK 25 or later. The components parent enforces Java 25.
 - Maven Wrapper from the repository (`./mvnw`) or a compatible Maven installation.
-- Spring Boot 3.5.x when using the auto-configuration.
+- Spring Boot 4.1.x when using the auto-configuration.
 - Generated Java and gRPC classes produced by `protoc` and
   `protoc-gen-grpc-java` compatible with the versions managed by the components
   reactor: Protobuf 4.32.0 and gRPC Java 1.75.0.
@@ -663,7 +663,7 @@ stellar-enclosure-component-rpc/
 ## Compatibility
 
 - **Java:** 21+.
-- **Spring Boot:** 3.5.x; the current parent manages 3.5.16.
+- **Spring Boot:** 4.1.x; the current parent manages 4.1.2.
 - **gRPC/Protobuf:** the components reactor manages gRPC Java 1.75.0, Protobuf
   Java/protoc 4.32.0, and `protoc-gen-grpc-java` 1.75.0. Projects generated from the
   native archetype family inherit those versions; the open archetype family inherits

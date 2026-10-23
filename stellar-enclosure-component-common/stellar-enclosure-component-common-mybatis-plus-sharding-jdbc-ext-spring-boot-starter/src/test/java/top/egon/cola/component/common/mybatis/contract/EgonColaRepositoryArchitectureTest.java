@@ -22,7 +22,7 @@ class EgonColaRepositoryArchitectureTest {
 
     @Test
     void officialServiceContractIsPublishedWithExactMethodCount() throws Exception {
-        Class<?> upstream = Class.forName("com.baomidou.mybatisplus.extension.service.IService");
+        Class<?> upstream = Class.forName("com.baomidou.mybatisplus.spring.service.IService");
         Class<?> target = Class.forName(SERVICE);
         Set<MethodKeyBO> expected = Arrays.stream(upstream.getMethods())
                 .filter(method -> Modifier.isPublic(method.getModifiers())
@@ -40,7 +40,7 @@ class EgonColaRepositoryArchitectureTest {
 
     @Test
     void implementationDeclaresEveryOfficialMethodAndNoCustomTenantAliases() throws Exception {
-        Class<?> upstream = Class.forName("com.baomidou.mybatisplus.extension.service.IService");
+        Class<?> upstream = Class.forName("com.baomidou.mybatisplus.spring.service.IService");
         Class<?> implementation = Class.forName(IMPLEMENTATION);
         Set<MethodKeyBO> expected = Arrays.stream(upstream.getMethods())
                 .filter(method -> Modifier.isPublic(method.getModifiers())
@@ -114,7 +114,7 @@ class EgonColaRepositoryArchitectureTest {
     void persistenceModelHasNoActiveRecordAndRepositoryHasNoCrudFieldInjection() throws Exception {
         assertEquals(Object.class, top.egon.cola.component.common.mybatis.model.EgonModel.class.getSuperclass());
         Class<?> implementation = Class.forName(IMPLEMENTATION);
-        assertEquals(com.baomidou.mybatisplus.extension.repository.CrudRepository.class, implementation.getSuperclass());
+        assertEquals(com.baomidou.mybatisplus.spring.repository.CrudRepository.class, implementation.getSuperclass());
         Class<?> target = Class.forName(SERVICE);
         assertTrue(Arrays.asList(target.getInterfaces()).contains(com.baomidou.mybatisplus.extension.repository.IRepository.class));
         assertTrue(Arrays.stream(implementation.getDeclaredFields())

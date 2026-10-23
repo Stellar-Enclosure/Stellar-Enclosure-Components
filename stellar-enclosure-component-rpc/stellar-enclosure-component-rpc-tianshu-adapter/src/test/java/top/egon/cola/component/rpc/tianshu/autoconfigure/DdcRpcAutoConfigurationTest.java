@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.redisson.api.RedissonClient;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
+import org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -39,7 +39,7 @@ class DdcRpcAutoConfigurationTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
-                    JacksonAutoConfiguration.class,
+                    Jackson2AutoConfiguration.class,
                     DdcRpcAutoConfiguration.class))
             .withPropertyValues(
                     "egon.cola.component.tianshu.registration-resource-uri=https://api.example/tianshu"
@@ -60,6 +60,8 @@ class DdcRpcAutoConfigurationTest {
     @Test
     void disabledRuntimeAndRegistryCreateNoDirectClientAndRequireNoTarget() {
         runner.run(context -> {
+            assertThat(context.getBean("jacksonObjectMapper"))
+                    .isSameAs(context.getBean("jackson2ObjectMapper"));
             assertThat(context).hasSingleBean(DdcRpcClientFactory.class);
             assertThat(context).doesNotHaveBean(DdcConfigClient.class);
             assertThat(context).doesNotHaveBean(DdcRpcClientHandle.class);
@@ -122,7 +124,7 @@ class DdcRpcAutoConfigurationTest {
     void adapterPortsSatisfyStarterFailFastRequirements() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        JacksonAutoConfiguration.class,
+                        Jackson2AutoConfiguration.class,
                         DdcRedisAutoConfiguration.class,
                         DdcRpcAutoConfiguration.class,
                         DdcAutoConfiguration.class,

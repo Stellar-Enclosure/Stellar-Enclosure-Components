@@ -181,7 +181,7 @@ Do not use this component when you require:
 - one business transaction spanning a different database from the outbox table;
 - an inbox, Admin UI, replay API, or broker topology declaration.
 
-It targets Java 21, Spring Boot 3.5.x, PostgreSQL, and imperative Spring
+It targets Java 25, Spring Boot 4.1.x, PostgreSQL, and imperative Spring
 transactions with the Egon MP store.
 Redis is not required.
 
@@ -685,7 +685,7 @@ instead of silently skipping it.
 
 ## Explicit Scope
 
-Supported: Java 21, Spring Boot 3.5.x, PostgreSQL, imperative Spring transactions
+Supported: Java 25, Spring Boot 4.1.x, PostgreSQL, imperative Spring transactions
 with the Egon MP store, technical lifecycle and opt-in business Statemachines,
 HTTP delivery, RabbitMQ delivery, and custom synchronous handlers.
 

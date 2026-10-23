@@ -159,7 +159,7 @@ transactionalOutbox.enqueue(OutboxMessage.builder()
 - 业务数据和 outbox 表位于不同数据库；
 - 需要 Inbox、管理后台、重放 API 或自动声明 Broker 拓扑。
 
-兼容边界是 Java 21、Spring Boot 3.5.x、PostgreSQL、Stellar Enclosure MyBatis-Plus 和命令式 Spring 事务。
+兼容边界是 Java 25、Spring Boot 4.1.x、PostgreSQL、Stellar Enclosure MyBatis-Plus 和命令式 Spring 事务。
 组件不依赖 Redis。
 
 ## Maven 依赖
@@ -606,7 +606,7 @@ Docker 或数据库启动失败会使任务失败，不会静默跳过。
 
 ## 明确的支持边界
 
-支持：Java 21、Spring Boot 3.5.x、PostgreSQL、基于 Egon MP Store 的命令式 Spring 事务、技术生命周期及可选业务 Statemachine、
+支持：Java 25、Spring Boot 4.1.x、PostgreSQL、基于 Egon MP Store 的命令式 Spring 事务、技术生命周期及可选业务 Statemachine、
 HTTP 投递、RabbitMQ 投递和自定义同步 handler。
 
 不支持：Reactive/R2DBC 事务、跨数据库事务、分布式事务、exactly-once、自动旧数据搬迁或破坏性回滚、

@@ -336,7 +336,7 @@ ${project.build.directory}/egon-cola-architecture
 
 ## 兼容性与基准测试
 
-生产产物使用 `--release 21` 编译。Maven Invoker 会在本地验证真实 Java 21 类，`architecture-java25` fixture 会先编译真实的 `--release 25` record（class-file major `69`）再交由插件扫描。Fork 的 Surefire 和 Failsafe fixture 使用 `-Xverify:all` 和构建出的 `-javaagent` JAR 启动真实进程。两条 Java 25 路径都是有条件的：Invoker 套件声明 `invoker.java.version = 25+`，`AgentJava25CompatibilityTest` 只在 `JAVA25_HOME` 指向可执行 JDK 时运行，因此 Java 21 构建会跳过它们。
+生产产物使用 `--release 25` 编译。Maven Invoker 会在本地验证真实 Java 25 类，`architecture-java25` fixture 会先编译真实的 `--release 25` record（class-file major `69`）再交由插件扫描。Fork 的 Surefire 和 Failsafe fixture 使用 `-Xverify:all` 和构建出的 `-javaagent` JAR 启动真实进程。两条 Java 25 路径都是有条件的：Invoker 套件声明 `invoker.java.version = 25+`，`AgentJava25CompatibilityTest` 只在 `JAVA25_HOME` 指向可执行 JDK 时运行，CI 与本地构建现在统一使用 Java 25。
 
 使用以下命令构建并列出 JMH benchmark：
 
@@ -349,4 +349,4 @@ java -jar stellar-enclosure-components/stellar-enclosure-component-bytecode/stel
 
 `ExecutorEnhancementBenchmark` 会分别记录未匹配过滤、1,000 次转换、直接提交、仅上下文提交，以及上下文加 Micrometer 提交。受控目标为 1,000 次转换不超过一秒，提交开销低于五微秒。
 
-`MethodObservationBenchmark` 会在不捕获参数的情况下记录直接 baseline、禁用 bridge、启用成功、启用异常和慢事件路径。受控的启用成功目标低于两微秒。这些目标是项目约定而非 CI 门禁：`CI Backend` workflow 只有一个在 Java 21 上执行 `./mvnw -B -ntp clean verify` 的任务，从不构建、列出或运行 benchmark JAR。
+`MethodObservationBenchmark` 会在不捕获参数的情况下记录直接 baseline、禁用 bridge、启用成功、启用异常和慢事件路径。受控的启用成功目标低于两微秒。这些目标是项目约定而非 CI 门禁：`CI Backend` workflow 只有一个在 Java 25 上执行 `./mvnw -B -ntp clean verify` 的任务，从不构建、列出或运行 benchmark JAR。

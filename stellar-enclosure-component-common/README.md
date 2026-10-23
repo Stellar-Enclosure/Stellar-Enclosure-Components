@@ -13,7 +13,7 @@ This directory is a `pom` aggregator, not a runtime JAR that business applicatio
 | Module | Description |
 |---|---|
 | `stellar-enclosure-component-common-core` | `ResultCode`, common exceptions, converter contracts, POJO records, and tree construction |
-| `stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter` | Opt-in MyBatis-Plus 3.5.16 support: technical-field base model `EgonModel` without ActiveRecord, `EgonColaMapper` narrowing the model self-type plus three added statements, enhanced 57-method service, TenantID isolation, audit fill, and repository validation |
+| `stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter` | Opt-in MyBatis-Plus 3.5.17 support: technical-field base model `EgonModel` without ActiveRecord, `EgonColaMapper` narrowing the model self-type plus three added statements, enhanced 57-method service, TenantID isolation, audit fill, and repository validation |
 | `stellar-enclosure-component-common-cache-spring-boot-starter` | Spring Cache annotations over an L1 Guava and L2 Redisson `RMapCache` two-level cache with one-channel L1 invalidation broadcast |
 | `stellar-enclosure-component-common-trace` | Pure JDK + SLF4J trace core, W3C `traceparent` propagation, complete MDC capture, and local-thread task templates |
 | `stellar-enclosure-component-common-trace-spring-boot-starter` | Spring Boot 3 auto-configuration for Servlet, WebFlux, RestClient, WebClient, and Reactor context projection |

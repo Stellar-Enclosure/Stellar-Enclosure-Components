@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 Native Spring Cache annotations + L1 Guava + L2 Redisson `RMapCache`, with the L1 of every node
-invalidated through one Redis Pub/Sub channel. Targets Java 21 / Spring Boot 3.5.x. mp-sd-ext owns
+invalidated through one Redis Pub/Sub channel. Targets Java 25 / Spring Boot 4.1.x. mp-sd-ext owns
 persistence only; the caching policy is declared by the business methods of a concrete Repository.
 The starter reuses the Spring Cache SPI and the existing two-level cache implementation, and adds no
 custom cache annotation, no SpEL resolver and no business aspect.

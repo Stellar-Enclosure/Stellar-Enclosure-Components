@@ -1,6 +1,6 @@
 package top.egon.cola.component.common.trace.autoconfigure;
 
-import org.springframework.boot.web.client.RestClientCustomizer;
+import org.springframework.boot.restclient.RestClientCustomizer;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.web.client.RestClient;
 import top.egon.cola.component.common.trace.TraceContext;
