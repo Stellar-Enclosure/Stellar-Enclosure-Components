@@ -52,6 +52,11 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
         return getBaseMapper().selectExistingByIdentity(messageId, idempotencyKey);
     }
 
+    /** Non-locking status lookup; callers must select the message's shard context. */
+    public List<OutboxMessagePO> selectReplicaByMessageId(@NotBlank @Size(max = 64) String messageId) {
+        return getBaseMapper().selectReplicaByMessageId(messageId);
+    }
+
     public List<OutboxMessagePO> selectDueCandidates(@Min(1) @Max(10_000) int limit) {
         requireBatchLimit(limit);
         return getBaseMapper().selectDueCandidates(limit);

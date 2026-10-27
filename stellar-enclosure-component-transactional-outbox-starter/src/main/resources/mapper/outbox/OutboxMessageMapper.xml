@@ -103,6 +103,14 @@
         FOR UPDATE
     </select>
 
+    <select id="selectReplicaByMessageId" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/>
+        FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot} AND tenant_id = 0 AND deleted_at IS NULL
+          AND message_id = #{messageId}
+    </select>
+
     <select id="selectDueCandidates" resultMap="outboxMessageResultMap">
         <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>

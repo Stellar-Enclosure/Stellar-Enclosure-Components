@@ -36,6 +36,10 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
             @Param("idempotencyKey") @Size(max = 256) String idempotencyKey
     );
 
+    List<OutboxMessagePO> selectReplicaByMessageId(
+            @Param("messageId") @NotBlank @Size(max = 64) String messageId
+    );
+
     List<OutboxMessagePO> selectDueCandidates(@Param("limit") @Min(1) @Max(10_000) int limit);
 
     List<OutboxMessagePO> selectByMessageIdsCandidates(

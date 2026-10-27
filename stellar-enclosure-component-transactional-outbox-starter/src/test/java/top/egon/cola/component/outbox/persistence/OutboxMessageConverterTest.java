@@ -185,6 +185,7 @@ class OutboxMessageConverterTest {
         assertThat(configuration.hasStatement(namespace + "insertMessage", false)).isTrue();
         assertThat(configuration.hasStatement(namespace + "insertMigrationMessage", false)).isTrue();
         assertThat(configuration.hasStatement(namespace + "selectDueCandidates", false)).isTrue();
+        assertThat(configuration.hasStatement(namespace + "selectReplicaByMessageId", false)).isTrue();
         assertThat(configuration.hasStatement(namespace + "selectByMessageIdsCandidates", false)).isTrue();
         assertThat(configuration.hasStatement(namespace + "tryAcquireTransactionLock", false)).isTrue();
         assertThat(configuration.hasStatement(namespace + "updateClaim", false)).isTrue();

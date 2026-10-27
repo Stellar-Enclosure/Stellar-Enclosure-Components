@@ -6,6 +6,7 @@ import org.apache.ibatis.builder.xml.XMLMapperBuilder;
 import org.apache.ibatis.session.Configuration;
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
+import top.egon.cola.component.outbox.persistence.OutboxShardContext;
 
 import java.io.InputStream;
 import java.util.Map;
@@ -46,6 +47,29 @@ class OutboxPrimaryReadPolicyTest {
                 + "AND EXISTS (SELECT 1 FROM orders) FOR UPDATE SKIP LOCKED")).isFalse();
         assertThat(permits("SELECT pg_try_advisory_xact_lock(id) FROM egon_outbox.egon_cola_outbox_message "
                 + "WHERE id = ? AND tenant_id = 0 AND deleted_at IS NULL")).isFalse();
+    }
+
+    @Test
+    void replicaIdentityLookupIsShardBoundAndCannotUseThePrimaryReadException() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.addMapper(OutboxMessageDAO.class);
+        String resource = "mapper/outbox/OutboxMessageMapper.xml";
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(resource)) {
+            new XMLMapperBuilder(input, configuration, resource, configuration.getSqlFragments()).parse();
+        }
+        OutboxShardContext.withSlot(4, () -> {
+            var sql = configuration.getMappedStatement(OutboxMessageDAO.class.getName() + ".selectReplicaByMessageId")
+                    .getBoundSql(Map.of("messageId", "message"));
+            assertThat(sql.getAdditionalParameter("_outboxSlot")).isEqualTo(4);
+            assertThat(sql.getSql().toLowerCase(java.util.Locale.ROOT).replaceAll("\\s+", " "))
+                    .contains("shard_slot = ?", "tenant_id = 0", "message_id = ?", "deleted_at is null")
+                    .doesNotContain("for update", "for share");
+            org.assertj.core.api.Assertions.assertThatCode(() -> OutboxShardSqlGuard.validate(sql.getSql()))
+                    .doesNotThrowAnyException();
+            org.assertj.core.api.Assertions.assertThatCode(() ->
+                    assertThat(permits(sql.getSql())).isFalse()).doesNotThrowAnyException();
+            return null;
+        });
     }
 
     private static boolean permits(String sql) throws Exception {
