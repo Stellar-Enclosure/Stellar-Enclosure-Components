@@ -49,6 +49,7 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
 
     private static final Map<String, ColumnSpecBO> MESSAGE_COLUMNS = Map.ofEntries(
             Map.entry("id", column(BIGINT, 0, 0, false)),
+            Map.entry("shard_slot", column(INTEGER, 0, 0, false)),
             Map.entry("message_id", column(VARCHAR, 64, 0, false)),
             Map.entry("idempotency_key", column(VARCHAR, 256, 0, true)),
             Map.entry("message_fingerprint", column(CHAR, 64, 0, false)),
@@ -127,7 +128,13 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
     }
 
     public void validate() {
-        DataSource primary = ddlInitializer.physicalMetadataDataSource(routeFingerprint);
+        for (DataSource primary : ddlInitializer.physicalMetadataDataSources(routeFingerprint).values()) {
+            validatePrimary(primary);
+        }
+        log.info("outbox schema metadata validated: schema={} routeFingerprint={}", SCHEMA, routeFingerprint);
+    }
+
+    private void validatePrimary(DataSource primary) {
         try (Connection connection = primary.getConnection()) {
             connection.setReadOnly(true);
             DatabaseMetaData metadata = connection.getMetaData();
@@ -144,7 +151,6 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
         } catch (SQLException | IOException failure) {
             throw new OutboxConfigurationException("Transactional outbox schema metadata validation failed", failure);
         }
-        log.info("outbox schema metadata validated: schema={} routeFingerprint={}", SCHEMA, routeFingerprint);
     }
 
     private static void validateColumns(DatabaseMetaData metadata, String table, Map<String, ColumnSpecBO> expected)
@@ -209,6 +215,9 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
         requireConstraint(definitions, "ck_outbox_technical_tenant", "tenant_id", "0");
         requireConstraint(definitions, "ck_outbox_not_soft_deleted", "deleted_at", "null");
         requireConstraint(definitions, "ck_outbox_version", "version", "0");
+        requireConstraint(definitions, "ck_outbox_shard_slot", "shard_slot", "0");
+        requireConstraint(definitions, "ck_outbox_message_shard_identity", "message_id", "shard_slot");
+        requireConstraint(definitions, "ck_outbox_key_shard_identity", "idempotency_key", "shard_slot");
     }
 
     private void validateHistoryConstraints(Connection connection) throws SQLException {
@@ -237,7 +246,10 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
                 EgonColaDdlManifestBO.ScriptBO script = manifest.scripts().get(index);
                 if (!script.path().equals(rows.getString(1)) || !"SQL".equals(rows.getString(2))
                         || !script.version().equals(rows.getString(3)) || !script.sha256().equals(rows.getString(4))
-                        || !routeFingerprint.equals(rows.getString(5)) || rows.getLong(6) != 0) {
+                        || !(routeFingerprint.equals(rows.getString(5))
+                             || storageProperties.getPreviousRouteFingerprints().contains(rows.getString(5)))
+                        || index == manifest.scripts().size() - 1 && !routeFingerprint.equals(rows.getString(5))
+                        || rows.getLong(6) != 0) {
                     throw schemaFailure("DDL_HISTORY_ENTRY_MISMATCH: " + script.version());
                 }
                 index++;

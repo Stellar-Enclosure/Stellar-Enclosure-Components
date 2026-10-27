@@ -4,7 +4,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
@@ -19,6 +18,8 @@ import top.egon.cola.component.outbox.common.exception.OutboxStorageException;
 import top.egon.cola.component.outbox.common.exception.OutboxValidationException;
 import top.egon.cola.component.outbox.persistence.OutboxSchemaMetadataValidator;
 import top.egon.cola.component.outbox.persistence.OutboxTechnicalContextExecutor;
+import top.egon.cola.component.outbox.persistence.OutboxShardContext;
+import top.egon.cola.component.outbox.persistence.OutboxShardRouting;
 import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverter;
 import top.egon.cola.component.outbox.persistence.po.OutboxMessagePO;
 import top.egon.cola.component.outbox.persistence.repository.OutboxMessageRepository;
@@ -31,12 +32,13 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /** MyBatis-Plus implementation of the existing public outbox storage contract. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
 public class MybatisPlusOutboxStore implements OutboxStore {
 
     private static final String TECHNICAL_USER_ID = "system:outbox";
@@ -66,15 +68,54 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     @Qualifier("outboxMpStorageProperties")
     private final OutboxMpStorageProperties storageProperties;
 
+    private final OutboxShardRouting shardRouting;
+    private final AtomicInteger nextShard = new AtomicInteger();
+
+    public MybatisPlusOutboxStore(OutboxMessageRepository repository, OutboxMessageConverter converter,
+                                  OutboxTechnicalContextExecutor technicalContext, OutboxLifecycleService lifecycle,
+                                  TransactionTemplate workerTransaction, OutboxSchemaMetadataValidator metadataValidator,
+                                  Clock clock, OutboxMpStorageProperties storageProperties) {
+        this(repository, converter, technicalContext, lifecycle, workerTransaction, metadataValidator, clock,
+                storageProperties, new OutboxShardRouting());
+    }
+
+    public MybatisPlusOutboxStore(OutboxMessageRepository repository, OutboxMessageConverter converter,
+                                  OutboxTechnicalContextExecutor technicalContext, OutboxLifecycleService lifecycle,
+                                  TransactionTemplate workerTransaction, OutboxSchemaMetadataValidator metadataValidator,
+                                  Clock clock, OutboxMpStorageProperties storageProperties, OutboxShardRouting shardRouting) {
+        this.repository = repository;
+        this.converter = converter;
+        this.technicalContext = technicalContext;
+        this.lifecycle = lifecycle;
+        this.workerTransaction = workerTransaction;
+        this.metadataValidator = metadataValidator;
+        this.clock = clock;
+        this.storageProperties = storageProperties;
+        this.shardRouting = shardRouting;
+    }
+
+    @Override
+    public void selectShard(String group) {
+        shardRouting.selectGroup(group);
+    }
+
+    @Override
+    public String prepareGeneratedMessageId(String generated) {
+        return shardRouting.generatedIdentity(generated);
+    }
+
     @Override
     public OutboxReceipt enqueue(@NotNull @Valid NewOutboxRecord record) {
         Objects.requireNonNull(record, "record");
         if (storageProperties.isMigrationMode()) {
             throw new OutboxConfigurationException("OUTBOX_MIGRATION_MODE");
         }
+        int shardSlot = shardRouting.currentSlot();
+        shardRouting.validateIdentity(shardSlot, record.messageId(), record.idempotencyKey());
         try {
-            return technicalContext.execute(() -> {
+            return OutboxShardContext.withSlot(shardSlot, () -> technicalContext.execute(() -> {
                 OutboxMessagePO message = converter.toInsertPO(record);
+                message.setShardSlot(shardSlot);
                 if (message.getNextAttemptAt() == null) {
                     message.setNextAttemptAt(clock.instant());
                 }
@@ -87,7 +128,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
                     return new OutboxReceipt(record.messageId(), record.idempotencyKey(), true);
                 }
                 return resolveExisting(record);
-            });
+            }));
         } catch (OutboxIdempotencyConflictException | OutboxStorageException failure) {
             throw failure;
         } catch (DataAccessException failure) {
@@ -99,10 +140,16 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     public List<OutboxRecord> claimDue(@Positive @Max(10_000) int limit, @NotNull String leaseOwner,
                                       @NotNull Duration leaseDuration) {
         requireLease(leaseOwner, leaseDuration);
-        return inWorkerTransaction("Failed to claim due outbox messages", () -> {
-            List<OutboxMessagePO> candidates = repository.selectDueCandidates(candidateScanLimit(limit));
-            return claim(candidates, limit, leaseOwner, leaseDuration);
-        });
+        List<OutboxRecord> result = new ArrayList<>();
+        for (int slot : rotatedSlots()) {
+            int remaining = limit - result.size();
+            if (remaining == 0) { break; }
+            result.addAll(inWorkerTransaction("Failed to claim due outbox messages", slot, () -> {
+                List<OutboxMessagePO> candidates = repository.selectDueCandidates(candidateScanLimit(remaining));
+                return claim(candidates, remaining, leaseOwner, leaseDuration);
+            }));
+        }
+        return List.copyOf(result);
     }
 
     @Override
@@ -116,16 +163,28 @@ public class MybatisPlusOutboxStore implements OutboxStore {
             return List.of();
         }
         requireLease(leaseOwner, leaseDuration);
-        return inWorkerTransaction("Failed to claim selected outbox messages", () -> {
-            List<OutboxMessagePO> candidates = repository.selectByMessageIdsCandidates(
-                    messageIds, candidateScanLimit(limit));
-            return claim(candidates, limit, leaseOwner, leaseDuration);
-        });
+        List<OutboxRecord> result = new ArrayList<>();
+        for (int slot : rotatedSlots()) {
+            int remaining = limit - result.size();
+            if (remaining == 0) { break; }
+            result.addAll(inWorkerTransaction("Failed to claim selected outbox messages", slot, () -> {
+                List<OutboxMessagePO> candidates = repository.selectByMessageIdsCandidates(
+                        messageIds, candidateScanLimit(remaining));
+                return claim(candidates, remaining, leaseOwner, leaseDuration);
+            }));
+        }
+        return List.copyOf(result);
     }
 
     @Override
     public boolean markSucceeded(@Positive long id, @NotNull String leaseOwner) {
-        return inWorkerTransaction("Failed to complete outbox message", () -> {
+        return markSucceeded(id, leaseOwner, legacySlot());
+    }
+
+    @Override
+    public boolean markSucceeded(@Positive long id, @NotNull String leaseOwner, int shardSlot) {
+        shardRouting.requireSlot(shardSlot);
+        return inWorkerTransaction("Failed to complete outbox message", shardSlot, () -> {
             OutboxMessagePO current = repository.selectProcessingForUpdate(id, leaseOwner);
             if (current == null) {
                 return false;
@@ -141,10 +200,17 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     @Override
     public boolean markRetry(@Positive long id, @NotNull String leaseOwner, @NotNull Duration delay,
                              String errorCode, String errorMessage) {
+        return markRetry(id, leaseOwner, delay, errorCode, errorMessage, legacySlot());
+    }
+
+    @Override
+    public boolean markRetry(@Positive long id, @NotNull String leaseOwner, @NotNull Duration delay,
+                             String errorCode, String errorMessage, int shardSlot) {
         if (delay == null || delay.isNegative()) {
             throw new IllegalArgumentException("OUTBOX_RETRY_DELAY_INVALID");
         }
-        return inWorkerTransaction("Failed to retry outbox message", () -> {
+        shardRouting.requireSlot(shardSlot);
+        return inWorkerTransaction("Failed to retry outbox message", shardSlot, () -> {
             OutboxMessagePO current = repository.selectProcessingForUpdate(id, leaseOwner);
             if (current == null) {
                 return false;
@@ -160,7 +226,14 @@ public class MybatisPlusOutboxStore implements OutboxStore {
 
     @Override
     public boolean markDead(@Positive long id, @NotNull String leaseOwner, String errorCode, String errorMessage) {
-        return inWorkerTransaction("Failed to dead-letter outbox message", () -> {
+        return markDead(id, leaseOwner, errorCode, errorMessage, legacySlot());
+    }
+
+    @Override
+    public boolean markDead(@Positive long id, @NotNull String leaseOwner, String errorCode, String errorMessage,
+                            int shardSlot) {
+        shardRouting.requireSlot(shardSlot);
+        return inWorkerTransaction("Failed to dead-letter outbox message", shardSlot, () -> {
             OutboxMessagePO current = repository.selectProcessingForUpdate(id, leaseOwner);
             if (current == null) {
                 return false;
@@ -179,12 +252,16 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         if (retention == null || retention.isNegative()) {
             throw new IllegalArgumentException("OUTBOX_RETENTION_INVALID");
         }
-        return inWorkerTransaction("Failed to clean up outbox messages", () -> {
+        int total = 0;
+        for (int slot : rotatedSlots()) {
+            int remaining = limit - total;
+            if (remaining == 0) { break; }
+            total += inWorkerTransaction("Failed to clean up outbox messages", slot, () -> {
             List<OutboxMessagePO> candidates = repository.selectExpiredSucceededCandidates(
-                    retention.toMillis(), candidateScanLimit(limit));
+                    retention.toMillis(), candidateScanLimit(remaining));
             int deleted = 0;
             for (OutboxMessagePO candidate : candidates) {
-                if (deleted >= limit) {
+                if (deleted >= remaining) {
                     break;
                 }
                 if (!repository.tryAcquireTransactionLock(candidate.getId())) {
@@ -194,12 +271,19 @@ public class MybatisPlusOutboxStore implements OutboxStore {
                         candidate.getId(), candidate.getVersion(), retention.toMillis());
             }
             return deleted;
-        });
+            });
+        }
+        return total;
     }
 
     @Override
     public long countBacklog() {
-        return inWorkerTransaction("Failed to count outbox backlog", repository::countBacklog);
+        long total = 0;
+        for (int slot : shardRouting.slots()) {
+            total = Math.addExact(total,
+                    inWorkerTransaction("Failed to count outbox backlog", slot, repository::countBacklog));
+        }
+        return total;
     }
 
     @Override
@@ -256,9 +340,23 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         return new OutboxReceipt(resolved.getMessageId(), resolved.getIdempotencyKey(), false);
     }
 
-    private <T> T inWorkerTransaction(String publicMessage, Supplier<T> operation) {
+    private List<Integer> rotatedSlots() {
+        List<Integer> slots = new ArrayList<>(shardRouting.slots());
+        java.util.Collections.rotate(slots, -Math.floorMod(nextShard.getAndIncrement(), slots.size()));
+        return slots;
+    }
+
+    private int legacySlot() {
+        if (shardRouting.slots().size() != 1) {
+            throw new IllegalArgumentException("OUTBOX_SHARD_SLOT_REQUIRED");
+        }
+        return 0;
+    }
+
+    private <T> T inWorkerTransaction(String publicMessage, int shardSlot, Supplier<T> operation) {
         try {
-            return workerTransaction.execute(status -> technicalContext.execute(operation));
+            return workerTransaction.execute(status -> OutboxShardContext.withSlot(
+                    shardSlot, () -> technicalContext.execute(operation)));
         } catch (OutboxStorageException failure) {
             throw failure;
         } catch (DataAccessException failure) {

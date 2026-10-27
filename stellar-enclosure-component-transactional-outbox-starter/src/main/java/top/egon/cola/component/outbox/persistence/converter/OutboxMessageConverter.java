@@ -39,6 +39,7 @@ public interface OutboxMessageConverter extends BaseForwardConverter<OutboxMessa
 
     @BeanMapping(ignoreUnmappedSourceProperties = "headers")
     @Mapping(target = "id", source = "record.id")
+    @Mapping(target = "shardSlot", source = "record.shardSlot")
     @Mapping(target = "messageId", source = "record.messageId")
     @Mapping(target = "idempotencyKey", source = "record.idempotencyKey")
     @Mapping(target = "messageFingerprint", source = "record.messageFingerprint")

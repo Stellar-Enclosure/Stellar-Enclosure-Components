@@ -25,9 +25,12 @@ import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardin
 import top.egon.cola.component.outbox.migration.OutboxLogicalDataSourceFactory;
 import top.egon.cola.component.outbox.migration.OutboxLegacyMigrationService;
 import top.egon.cola.component.outbox.migration.OutboxManagedDdlInitializer;
+import top.egon.cola.component.outbox.migration.OutboxStorageTopology;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 import top.egon.cola.component.outbox.persistence.OutboxSchemaMetadataValidator;
 import top.egon.cola.component.outbox.persistence.OutboxTechnicalContextExecutor;
+import top.egon.cola.component.outbox.persistence.OutboxShardRouting;
+import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.outbox.persistence.converter.OutboxHeadersConverter;
 import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverter;
 import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverterImpl;
@@ -42,6 +45,7 @@ import javax.sql.DataSource;
 import java.lang.reflect.Method;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Registers the managed DDL hook before Common builds the logical datasource. */
@@ -67,6 +71,7 @@ public class OutboxMybatisPlusAutoConfiguration {
             @Qualifier("egonColaShardingTopologyValidator") EgonColaShardingTopologyValidator topologyValidator,
             @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
             @Qualifier("egon.cola.component.mybatis-plus.sharding-top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties") EgonColaShardingProperties shardingProperties,
+            @Qualifier("egon.cola.component.mybatis-plus-top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties") EgonColaMybatisPlusProperties mybatisProperties,
             @Qualifier("outboxMpStorageProperties") OutboxMpStorageProperties storageProperties,
             @Qualifier("outboxStateMachineObjectMapper") ObjectMapper objectMapper
     ) {
@@ -76,7 +81,8 @@ public class OutboxMybatisPlusAutoConfiguration {
                 validationUtils,
                 shardingProperties,
                 storageProperties,
-                objectMapper
+                objectMapper,
+                mybatisProperties.getDdl().getTopologyReadyTimeout()
         );
     }
 
@@ -177,12 +183,14 @@ public class OutboxMybatisPlusAutoConfiguration {
             @Qualifier("egon.cola.component.mybatis-plus.sharding-top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties")
             EgonColaShardingProperties shardingProperties,
             @Qualifier("outboxMpStorageProperties") OutboxMpStorageProperties storageProperties,
+            @Qualifier("egonColaRoutingProfiles") Map<String, EgonColaRoutingProfileBO> profiles,
             ConfigurableListableBeanFactory beanFactory
     ) {
         validateStoreInfrastructure(infrastructure, mybatisProperties, shardingProperties,
                 storageProperties, beanFactory);
         return new MybatisPlusOutboxStore(repository, converter, technicalContext, lifecycle,
-                workerTransaction, metadataValidator, clock, storageProperties);
+                workerTransaction, metadataValidator, clock, storageProperties,
+                new OutboxShardRouting(infrastructure.dataSource(), shardingProperties, profiles));
     }
 
     @Bean("outboxLegacyMigrationService")
@@ -213,11 +221,18 @@ public class OutboxMybatisPlusAutoConfiguration {
             OutboxMpStorageProperties storageProperties,
             ConfigurableListableBeanFactory beanFactory
     ) {
-        if (shardingProperties.getMode() != EgonColaShardingProperties.ModeEnum.SHARDING
-                || shardingProperties.getDataSources() == null || shardingProperties.getDataSources().size() != 1
-                || shardingProperties.getDataSources().getFirst().role()
-                != EgonColaShardingProperties.DataSourceRoleEnum.PRIMARY) {
-            throw new OutboxConfigurationException("OUTBOX_SINGLE_PRIMARY_REQUIRED");
+        int primaryGroupCount;
+        try {
+            primaryGroupCount = OutboxStorageTopology.primaries(shardingProperties).size();
+        } catch (IllegalStateException failure) {
+            throw new OutboxConfigurationException(failure.getMessage(), failure);
+        }
+        if (primaryGroupCount > 1) {
+            Object factory = beanFactory.getBean("egonColaShardingLogicalDataSourceFactory");
+            if (!(factory instanceof OutboxLogicalDataSourceFactory outboxFactory)
+                    || !outboxFactory.enforceSingleWriteGroup()) {
+                throw new OutboxConfigurationException("OUTBOX_SHARD_GUARD_REQUIRED");
+            }
         }
         if (!mybatisProperties.getTenantId().ignores("egon_cola_outbox_message")) {
             throw new OutboxConfigurationException("OUTBOX_TENANT_TABLE_IGNORE_REQUIRED");

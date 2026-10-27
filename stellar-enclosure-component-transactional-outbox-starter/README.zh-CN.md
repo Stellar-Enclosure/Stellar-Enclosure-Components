@@ -27,7 +27,7 @@ Failsafe 执行。
 
 1. `enqueue` 在调用方当前业务事务中写入 outbox 记录。
 2. 提交后事件只作为降低延迟的唤醒提示。
-3. PostgreSQL 轮询通过 `FOR UPDATE SKIP LOCKED` 抢占到期或租约过期的记录。
+3. 轮询先查候选记录，再通过 PostgreSQL `FOR UPDATE SKIP LOCKED` 和版本条件领取到期或租约过期的记录。
 4. 对外投递在数据库事务之外执行。
 5. 重试、租约恢复和带 owner 条件的更新使记录依次处于
    `PENDING`、`PROCESSING`、`RETRY_WAIT`、`SUCCEEDED` 或 `DEAD`。
@@ -94,6 +94,7 @@ MyBatis-Plus Store 的受管结构与显式迁移配置如下：
 | `egon.cola.component.transactional-outbox.storage.mp.migration-mode` | `false` | 维护搬迁期间阻止本实例 enqueue 和调度投递 |
 | `egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout` | `30s` | 等待来源表维护锁的最长时间 |
 | `egon.cola.component.transactional-outbox.storage.mp.manifest-resource` | `db/egon-outbox-mp/manifest.json` | Common MP 加载的受管 DDL manifest |
+| `egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints` | `[]` | 已核验的旧拓扑指纹，供版本迁移验证历史 |
 
 `auto-initialize-ddl` 只控制逻辑数据源 bootstrap 是否执行建表脚本。设为
 `false` 后，组件仍会只读校验已安装的 manifest、history、列、索引和约束；
@@ -188,7 +189,7 @@ transactionalOutbox.enqueue(OutboxMessage.builder()
 ```
 
 Starter 传递依赖 Common MP 扩展与 Spring Statemachine core。应用需要将 Common MP 配置为单个
-native PostgreSQL `PRIMARY`，并提供现有 MyBatis-Plus `SqlSessionFactory` 和匹配的
+PostgreSQL `PRIMARY` 或一个及以上主从分片组，并提供现有 MyBatis-Plus `SqlSessionFactory` 和匹配的
 `DataSourceTransactionManager`。业务写入和 enqueue 必须使用同一本地数据库事务。仅 HTTP 投递时
 增加 `spring-web`，仅 RabbitMQ 投递时增加 `spring-rabbit`。
 
@@ -206,15 +207,18 @@ validator；这些 validator 继承 `BaseValidator`，并保留各自的协议�
 CREATE SCHEMA egon_outbox;
 ```
 
-启动时，逻辑数据源 hook 会在创建 logical datasource 前，为唯一物理 `PRIMARY` 调用共享的
-`EgonColaPostgreDdlRunner`。唯一受管脚本是
-`db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql`，其校验清单为
+启动时，逻辑数据源 hook 会在创建 logical datasource 前，为每个物理 `PRIMARY` 调用共享的
+`EgonColaPostgreDdlRunner`。受管脚本包括原始的
+`db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql` 和新增的
+`db/egon-outbox-mp/V20261027_001__add_outbox_shard_slot.sql`，其校验清单为
 `db/egon-outbox-mp/manifest.json`（`family: component-outbox`）。Runner 创建/校验消息表与
 `ddl_history`，不发现或修改旧表。非空且没有有效受管历史的 schema 会快速失败。不要复制该脚本到
 应用迁移目录、编辑组件 SQL 或手工修复 checksum。
 
-Common MP 必须配置为单个 native PostgreSQL `PRIMARY`、`LOCAL` 事务，以及两条指向受管表的
-`SINGLE` route。下面 datasource 与 transaction-manager 必须是业务 Command 使用的同一数据源。
+Common MP 必须使用 `LOCAL` 事务。可使用单数据源 `SHARDING`，也可使用一个或多个主从组的
+`SHARDING_READWRITE`。多组时 Outbox 表使用 `TECHNICAL_GROUP`，每个事务只能向一个主库组写入；
+尝试跨组写入会标记整个事务回滚。
+下面 datasource 与 transaction-manager 必须是业务 Command 使用的同一数据源。
 合并配置时保留宿主现有 `ignored-tables` 和 mapper locations：
 
 ```yaml
@@ -269,6 +273,56 @@ transaction:
 将示例 `primary` 替换为实际配置的 `PRIMARY` 名称。保留应用业务表的 route，不使用 `*.*.*`，运行期 mapper
 也不应读取旧来源 schema。只有新宿主确实没有缓存需求时才可设置 `cache.enabled: false`；已有宿主保留现有缓存配置。
 `mapper-locations` 必须覆盖 `mapper/outbox/OutboxMessageMapper.xml`，否则启动校验失败。
+
+多主从组可使用以下 STRATEGY 配置替换上例的 `sharding` 部分，业务表规则需一并保留；所有主库组
+必须包含在 `shard-groups` 中，`data-source` 指定旧消息所在的历史组：
+
+```yaml
+mode: SHARDING_READWRITE
+config-style: STRATEGY
+transaction-default-type: LOCAL
+data-sources:
+  - { name: shard_0_primary, logical-name: shard_0, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_0_replica, logical-name: shard_0, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_1_primary, logical-name: shard_1, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_1_replica, logical-name: shard_1, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+tables:
+  egon_cola_outbox_message: { type: TECHNICAL_GROUP, data-source: shard_0, shard-groups: [shard_0, shard_1], sharding-column: shard_slot, schema: egon_outbox }
+  ddl_history: { type: SINGLE, data-source: shard_0, schema: egon_outbox }
+```
+
+每个主库都必须先有空的 `egon_outbox` schema；逻辑 `ddl_history` 只映射历史组，但组件会在每个
+主库创建并检查独立的历史表。事务内首个业务写入确定目标组，随后的 Outbox 写入使用同组与同一
+Spring 事务。如果先入队，可在 `OutboxMessage.builder()` 中设置 `.shardGroup("shard_1")`；之后
+业务写入必须命中该组，否则整个事务回滚。没有已确定的组且未显式指定时会拒绝入队。
+业务 JDBC 必须通过 `JdbcTemplate` 或 `DataSourceUtils` 使用 Spring 绑定连接；多分片 Outbox 模式在已有事务连接
+时拒绝直接调用 `DataSource.getConnection()` 创建未托管连接。
+
+全局 `messageId` 和 `idempotencyKey` 使用稳定的分片归属。默认生成的 `messageId` 自动加前缀；
+自定义值可通过 `OutboxShardIdentity.forGroup("shard_1", "shard_0", value)` 生成，其中第二个参数
+必须是配置的历史组。无前缀的旧标识只归属历史组；若标识与事务目标组不匹配则拒绝并回滚。
+启动时逐主库扫描现有 Outbox 的槽位及标识，发现归属错误或槽位碰撞就拒绝启动，不自动移动或改写数据。
+固定的组名和历史组名属于持久路由契约，不能随意重命名。
+新版本的数据库检查约束也会拒绝标识前缀与 `shard_slot` 不一致的写入；多组启用前必须停掉所有
+旧版生产者并核验历史数据。如果旧标识恰好占用了保留前缀且归属不匹配，迁移会失败，需要人工规划，
+不能自动改写标识。自定义生成器的原始 `messageId` 最长 52 字符，前缀后的总长度不得超过 64。
+
+普通业务查询及 Outbox 候选扫描走副本，业务写入和 Outbox 写入走主库。为保证同一事务内的
+幂等校验、领取和租约确认，Starter 仅放行固定的 Outbox 技术锁定查询到主库；业务锁定读和通用
+路由 Hint 仍被拒绝。副本延迟可能使提交后的即时唤醒暂时找不到候选消息，后续轮询会重试。
+Outbox 受管 DDL 完成后会等待副本回放到主库 WAL 位置，等待时间使用 Common MP 的
+`ddl.topology-ready-timeout`（默认 60 秒）。如果启用了 Common MP `ddl.auto-migrate`，其
+`targets` 也必须覆盖 Outbox schema，manifest 使用 `classpath:db/egon-outbox-mp/manifest.json`。
+从旧拓扑升级时，先核验旧 Outbox `ddl_history` 中的路由指纹，并将其填入
+`egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints`；该配置只接受
+已核验的前序指纹，新增版本必须尚未执行，以便记录新拓扑。若新增版本已在旧拓扑执行，需要另行
+规划新的版本化迁移，不能修改历史。Common MP 的业务表迁移和跨组数据迁移仍需独立规划。
+领取、完成和清理按组分别开启事务；某组故障后，已领取但尚未交付的消息会在租约到期后恢复。
+直接调用 `OutboxStore` 完成、重试或死信时，多组模式必须传入领取结果的 `shardSlot`；旧的无槽位
+重载仅适用于单组，避免相同内部 ID 在不同库中产生歧义。
+旧表搬迁需要读取即时一致的来源和目标，在 `SHARDING_READWRITE` 下会以
+`OUTBOX_MIGRATION_REQUIRES_SINGLE_SOURCE_MODE` 拒绝；应先在单数据源模式完成并验证搬迁。
+可选业务状态机如果使用业务表 `SELECT ... FOR UPDATE`，也不适用于该严格路由模式。
 
 如果存在旧数据，不要复制旧 `V1` 文件启动切换。保持
 `db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql` 不变，并将旧表保留在原 schema。
@@ -603,6 +657,18 @@ EGON_OUTBOX_TEST_POSTGRES_ENABLED=true ./mvnw -B -ntp \
 GitHub CI 的 `CI Backend` 任务为整个 Reactor 设置
 `EGON_OUTBOX_TEST_POSTGRES_ENABLED=true`，因此这组测试始终执行、不会 assume-skip；
 Docker 或数据库启动失败会使任务失败，不会静默跳过。
+
+`OutboxPostgresqlReadwriteIntegrationTest` 是独立的主从集群测试，默认跳过，不创建数据库进程。
+仅对专用、空的 PostgreSQL 主从数据库显式设置 `EGON_OUTBOX_PG_READWRITE_IT=true`，以及
+`EGON_OUTBOX_PG_PRIMARY_URL`、`EGON_OUTBOX_PG_REPLICA_URL`、`EGON_OUTBOX_PG_USER` 和
+`EGON_OUTBOX_PG_PASSWORD` 后执行。测试会创建并清理 `egon_outbox` schema 及测试业务表；
+若该 schema 已存在则立即失败，不会修改它。账号还需要执行 `pg_control_system()` 的权限。
+
+`OutboxPostgresqlMultishardIntegrationTest` 同样默认跳过。仅在两套专用、空的主从数据库上，显式设置
+`EGON_OUTBOX_PG_MULTISHARD_IT=true`、共享的 `EGON_OUTBOX_PG_USER` / `EGON_OUTBOX_PG_PASSWORD`，以及
+`EGON_OUTBOX_PG_SHARD_0_PRIMARY_URL`、`EGON_OUTBOX_PG_SHARD_0_REPLICA_URL`、
+`EGON_OUTBOX_PG_SHARD_1_PRIMARY_URL`、`EGON_OUTBOX_PG_SHARD_1_REPLICA_URL`。测试在两套主库创建并清理
+`egon_outbox` schema 和专用业务表；任一 schema 已存在时不会覆盖它。
 
 ## 明确的支持边界
 

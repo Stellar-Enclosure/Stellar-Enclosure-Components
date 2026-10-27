@@ -29,6 +29,12 @@ import java.time.Instant;
 @TableName(value = "egon_cola_outbox_message", schema = "egon_outbox", autoResultMap = true)
 public class OutboxMessagePO extends EgonModel<OutboxMessagePO> implements BasePojo {
 
+    @TableField("shard_slot")
+    @NotNull
+    @Min(0)
+    @Builder.Default
+    private Integer shardSlot = 0;
+
     @TableField("message_id")
     @NotNull
     @Size(max = 64)
@@ -114,4 +120,33 @@ public class OutboxMessagePO extends EgonModel<OutboxMessagePO> implements BaseP
 
     @TableField("completed_at")
     private Instant completedAt;
+
+    public OutboxMessagePO(String messageId, String idempotencyKey, String messageFingerprint, String channel,
+                           String destination, String payload, String contentType, String schemaVersion,
+                           String headersJson, String traceId, OutboxStatus status, Integer attemptCount,
+                           Integer maxAttempts, Instant nextAttemptAt, String lockedBy, Instant lockedUntil,
+                           String lastErrorCode, String lastErrorMessage, Instant createdAt, Instant updatedAt,
+                           Instant completedAt) {
+        this.messageId = messageId;
+        this.idempotencyKey = idempotencyKey;
+        this.messageFingerprint = messageFingerprint;
+        this.channel = channel;
+        this.destination = destination;
+        this.payload = payload;
+        this.contentType = contentType;
+        this.schemaVersion = schemaVersion;
+        this.headersJson = headersJson;
+        this.traceId = traceId;
+        this.status = status;
+        this.attemptCount = attemptCount;
+        this.maxAttempts = maxAttempts;
+        this.nextAttemptAt = nextAttemptAt;
+        this.lockedBy = lockedBy;
+        this.lockedUntil = lockedUntil;
+        this.lastErrorCode = lastErrorCode;
+        this.lastErrorMessage = lastErrorMessage;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+        this.completedAt = completedAt;
+    }
 }

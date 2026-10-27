@@ -5,6 +5,7 @@
 <mapper namespace="top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO">
     <resultMap id="outboxMessageResultMap" type="top.egon.cola.component.outbox.persistence.po.OutboxMessagePO" autoMapping="false">
         <id column="id" property="id" javaType="java.lang.Long" jdbcType="BIGINT"/>
+        <result column="shard_slot" property="shardSlot" javaType="java.lang.Integer" jdbcType="INTEGER"/>
         <result column="tenant_id" property="tenantId" javaType="java.lang.Long" jdbcType="BIGINT"/>
         <result column="create_user_id" property="createUserId" javaType="java.lang.String" jdbcType="VARCHAR"/>
         <result column="create_time" property="createTime" javaType="java.time.Instant" jdbcType="TIMESTAMP_WITH_TIMEZONE"/>
@@ -37,21 +38,25 @@
     </resultMap>
 
     <sql id="outboxMessageColumns">
-        id, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version,
+        id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version,
         message_id, idempotency_key, message_fingerprint, channel, destination, payload, content_type,
         schema_version, headers_json, trace_id, status, attempt_count, max_attempts, next_attempt_at,
         locked_by, locked_until, last_error_code, last_error_message, created_at, updated_at, completed_at
     </sql>
 
+    <sql id="outboxShardBinding">
+        <bind name="_outboxSlot" value="@top.egon.cola.component.outbox.persistence.OutboxShardContext@currentSlot()"/>
+    </sql>
+
     <insert id="insertMessage">
         INSERT INTO egon_outbox.egon_cola_outbox_message (
-            id, message_id, idempotency_key, message_fingerprint, channel, destination,
+            id, shard_slot, message_id, idempotency_key, message_fingerprint, channel, destination,
             payload, content_type, schema_version, headers_json, trace_id, status,
             attempt_count, max_attempts, next_attempt_at, locked_by, locked_until,
             last_error_code, last_error_message, created_at, updated_at, completed_at,
             tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version
         ) VALUES (
-            #{et.id}, #{et.messageId}, #{et.idempotencyKey,jdbcType=VARCHAR}, #{et.messageFingerprint},
+            #{et.id}, #{et.shardSlot}, #{et.messageId}, #{et.idempotencyKey,jdbcType=VARCHAR}, #{et.messageFingerprint},
             #{et.channel}, #{et.destination}, #{et.payload,jdbcType=LONGVARCHAR}, #{et.contentType},
             #{et.schemaVersion,jdbcType=VARCHAR}, #{et.headersJson,jdbcType=LONGVARCHAR},
             #{et.traceId,jdbcType=VARCHAR}, #{et.status,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
@@ -66,13 +71,13 @@
 
     <insert id="insertMigrationMessage">
         INSERT INTO egon_outbox.egon_cola_outbox_message (
-            id, message_id, idempotency_key, message_fingerprint, channel, destination,
+            id, shard_slot, message_id, idempotency_key, message_fingerprint, channel, destination,
             payload, content_type, schema_version, headers_json, trace_id, status,
             attempt_count, max_attempts, next_attempt_at, locked_by, locked_until,
             last_error_code, last_error_message, created_at, updated_at, completed_at,
             tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version
         ) VALUES (
-            #{et.id}, #{et.messageId}, #{et.idempotencyKey,jdbcType=VARCHAR}, #{et.messageFingerprint},
+            #{et.id}, #{et.shardSlot}, #{et.messageId}, #{et.idempotencyKey,jdbcType=VARCHAR}, #{et.messageFingerprint},
             #{et.channel}, #{et.destination}, #{et.payload,jdbcType=LONGVARCHAR}, #{et.contentType},
             #{et.schemaVersion,jdbcType=VARCHAR}, #{et.headersJson,jdbcType=LONGVARCHAR},
             #{et.traceId,jdbcType=VARCHAR}, #{et.status,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
@@ -86,19 +91,24 @@
     </insert>
 
     <select id="selectExistingByIdentity" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND (message_id = #{messageId}
             OR idempotency_key = #{idempotencyKey,jdbcType=VARCHAR})
         ORDER BY id
+        FOR UPDATE
     </select>
 
     <select id="selectDueCandidates" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at &lt;= clock_timestamp())
             OR (status = 'PROCESSING' AND locked_until &lt; clock_timestamp()))
@@ -107,9 +117,11 @@
     </select>
 
     <select id="selectByMessageIdsCandidates" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND message_id IN
         <foreach collection="messageIds" item="messageId" open="(" separator="," close=")">
@@ -122,14 +134,18 @@
     </select>
 
     <select id="tryAcquireTransactionLock" resultType="java.lang.Boolean">
+        <include refid="outboxShardBinding"/>
         SELECT pg_try_advisory_xact_lock(id)
         FROM egon_outbox.egon_cola_outbox_message
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND tenant_id = 0
           AND deleted_at IS NULL
+        FOR UPDATE SKIP LOCKED
     </select>
 
     <update id="updateClaim">
+        <include refid="outboxShardBinding"/>
         UPDATE egon_outbox.egon_cola_outbox_message
         SET status = #{target,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
             attempt_count = attempt_count + 1,
@@ -140,6 +156,7 @@
             update_time = #{updateTime},
             version = version + 1
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND version = #{version}
           AND status = #{source,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler}
           AND tenant_id = 0
@@ -149,9 +166,11 @@
     </update>
 
     <select id="selectProcessingForUpdate" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
           AND tenant_id = 0
@@ -160,6 +179,7 @@
     </select>
 
     <update id="updateSucceeded">
+        <include refid="outboxShardBinding"/>
         UPDATE egon_outbox.egon_cola_outbox_message
         SET status = #{target,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
             locked_by = NULL,
@@ -172,6 +192,7 @@
             update_time = #{updateTime},
             version = version + 1
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
@@ -180,6 +201,7 @@
     </update>
 
     <update id="updateRetry">
+        <include refid="outboxShardBinding"/>
         UPDATE egon_outbox.egon_cola_outbox_message
         SET status = #{target,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
             next_attempt_at = clock_timestamp() + (#{delayMillis} * interval '1 millisecond'),
@@ -193,6 +215,7 @@
             update_time = #{updateTime},
             version = version + 1
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
@@ -201,6 +224,7 @@
     </update>
 
     <update id="updateDead">
+        <include refid="outboxShardBinding"/>
         UPDATE egon_outbox.egon_cola_outbox_message
         SET status = #{target,javaType=top.egon.cola.component.outbox.store.OutboxStatus,typeHandler=com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler},
             locked_by = NULL,
@@ -213,6 +237,7 @@
             update_time = #{updateTime},
             version = version + 1
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
@@ -221,9 +246,11 @@
     </update>
 
     <select id="selectExpiredSucceededCandidates" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND status = 'SUCCEEDED'
           AND completed_at &lt; clock_timestamp() - (#{retentionMillis} * interval '1 millisecond')
@@ -232,8 +259,10 @@
     </select>
 
     <delete id="deleteSucceededByIdVersion">
+        <include refid="outboxShardBinding"/>
         DELETE FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND status = 'SUCCEEDED'
           AND id = #{id}
@@ -242,17 +271,21 @@
     </delete>
 
     <select id="countBacklog" resultType="long">
+        <include refid="outboxShardBinding"/>
         SELECT count(*)
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND status IN ('PENDING', 'PROCESSING', 'RETRY_WAIT')
     </select>
 
     <select id="selectMigrationPage" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND id &gt; #{afterId}
         ORDER BY id
@@ -260,17 +293,21 @@
     </select>
 
     <select id="selectActiveById" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
         WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
           AND tenant_id = 0
           AND deleted_at IS NULL
     </select>
 
     <select id="selectActiveByIds" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
         FROM egon_outbox.egon_cola_outbox_message
-        WHERE tenant_id = 0
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
           AND deleted_at IS NULL
           AND id IN
         <foreach collection="ids" item="id" open="(" separator="," close=")">

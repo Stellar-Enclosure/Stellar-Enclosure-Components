@@ -27,4 +27,21 @@ public class OutboxLogicalDataSourceFactory implements LogicalDataSourceFactory 
         log.info("outbox logical datasource created after managed DDL initialization");
         return logical;
     }
+
+    @Override
+    public boolean permitsPrimaryRead(net.sf.jsqlparser.statement.select.Select select) {
+        return OutboxPrimaryReadPolicy.permits(select);
+    }
+
+    @Override
+    public void validateLogicalSql(String sql) throws java.sql.SQLException {
+        if (ddlInitializer.isMultiGroupMode()) {
+            OutboxShardSqlGuard.validate(sql);
+        }
+    }
+
+    @Override
+    public boolean enforceSingleWriteGroup() {
+        return ddlInitializer.isMultiGroupMode();
+    }
 }

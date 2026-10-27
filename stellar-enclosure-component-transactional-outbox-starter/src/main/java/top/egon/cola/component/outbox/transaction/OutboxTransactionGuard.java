@@ -44,4 +44,11 @@ public class OutboxTransactionGuard {
             );
         }
     }
+
+    public void markRollbackOnly() {
+        Object resource = TransactionSynchronizationManager.getResource(selectedDataSource);
+        if (resource instanceof ConnectionHolder holder) {
+            holder.setRollbackOnly();
+        }
+    }
 }

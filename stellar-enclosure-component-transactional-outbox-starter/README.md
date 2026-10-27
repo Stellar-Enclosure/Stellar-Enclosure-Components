@@ -30,7 +30,8 @@ The guarantee is **at least once**, not exactly once:
 
 1. `enqueue` stores the outbox row in the caller's active business transaction.
 2. An after-commit event is only a low-latency wake-up hint.
-3. PostgreSQL polling with `FOR UPDATE SKIP LOCKED` claims due or expired rows.
+3. Polling selects candidates and claims due or expired rows with PostgreSQL
+   `FOR UPDATE SKIP LOCKED` and a version condition.
 4. Delivery runs outside the database transaction.
 5. Retry, lease recovery, and owner-conditioned updates move a row through
    `PENDING`, `PROCESSING`, `RETRY_WAIT`, `SUCCEEDED`, or `DEAD`.
@@ -106,6 +107,7 @@ legacy migration are:
 | `egon.cola.component.transactional-outbox.storage.mp.migration-mode` | `false` | Blocks local enqueue and dispatch while maintenance migration is active |
 | `egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout` | `30s` | Maximum wait for the source-table maintenance lock |
 | `egon.cola.component.transactional-outbox.storage.mp.manifest-resource` | `db/egon-outbox-mp/manifest.json` | Managed DDL manifest loaded by Common MP |
+| `egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints` | `[]` | Verified prior topology fingerprints accepted during versioned migration |
 
 `auto-initialize-ddl` controls schema creation during logical datasource
 bootstrap. With `false`, the component still validates the installed manifest,
@@ -211,7 +213,7 @@ Import the component BOM and add only the starter:
 ```
 
 The starter depends on the Common MP extension and Spring Statemachine core.
-The application must configure Common MP with one native PostgreSQL `PRIMARY`,
+The application must configure Common MP with one PostgreSQL `PRIMARY` or one or more primary/replica groups,
 an existing MyBatis-Plus `SqlSessionFactory`, and a matching
 `DataSourceTransactionManager`. Business writes and outbox enqueue must use that
 same local database transaction. Add `spring-web` only for HTTP delivery and
@@ -236,17 +238,20 @@ CREATE SCHEMA egon_outbox;
 ```
 
 On startup, the starter's logical-datasource hook invokes the shared
-`EgonColaPostgreDdlRunner` for the unique physical `PRIMARY` before the logical
-datasource is created. The only managed outbox script is
-`db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql`, checked by
+`EgonColaPostgreDdlRunner` for each physical `PRIMARY` before the logical
+datasource is created. The managed outbox scripts are the original
+`db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql` and the new
+`db/egon-outbox-mp/V20261027_001__add_outbox_shard_slot.sql`, checked by
 `db/egon-outbox-mp/manifest.json` (`family: component-outbox`). The runner
 creates/validates the message table and its `ddl_history`; it does not discover
 or modify the legacy table. A non-empty schema without a valid managed history
 fails closed. Do not copy this script to an application migration directory,
 edit the packaged SQL, or repair a checksum by hand.
 
-Configure Common MP for one native PostgreSQL `PRIMARY`, `LOCAL` transactions,
-and two `SINGLE` routes to the managed tables. The physical datasource and
+Configure Common MP for `LOCAL` transactions. Single-source `SHARDING` and one or
+more `SHARDING_READWRITE` primary/replica groups are supported. With multiple
+groups the Outbox table uses `TECHNICAL_GROUP`; each transaction may write to only
+one primary group, and cross-group writes mark it rollback-only. The datasource and
 transaction-manager names below must refer to the same datasource used by the
 business Command. Preserve the host's existing `ignored-tables` entries and
 mapper locations when merging these settings:
@@ -308,6 +313,76 @@ the legacy source schema through the runtime mapper. The example
 existing host's cache configuration. Keep the `mapper-locations` pattern broad
 enough to include `mapper/outbox/OutboxMessageMapper.xml` or startup validation
 fails.
+
+To use multiple primary/replica groups, replace the example `sharding` section
+with the following STRATEGY settings and retain the host's business-table rules.
+`shard-groups` must include every primary group; `data-source` identifies the
+legacy group containing unscoped historical messages:
+
+```yaml
+mode: SHARDING_READWRITE
+config-style: STRATEGY
+transaction-default-type: LOCAL
+data-sources:
+  - { name: shard_0_primary, logical-name: shard_0, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_0_replica, logical-name: shard_0, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_1_primary, logical-name: shard_1, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+  - { name: shard_1_replica, logical-name: shard_1, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+tables:
+  egon_cola_outbox_message: { type: TECHNICAL_GROUP, data-source: shard_0, shard-groups: [shard_0, shard_1], sharding-column: shard_slot, schema: egon_outbox }
+  ddl_history: { type: SINGLE, data-source: shard_0, schema: egon_outbox }
+```
+
+Create the empty `egon_outbox` schema on every primary first. The logical
+`ddl_history` route names the legacy group, but the component creates and checks
+a separate history table on each primary. The transaction's first business write
+pins its group and the Outbox write uses the same group and Spring transaction.
+To enqueue first, set `.shardGroup("shard_1")` on `OutboxMessage.builder()`;
+a later business write to another group marks the whole transaction rollback-only.
+Without a pinned or explicitly selected group, enqueue fails closed.
+Business JDBC must use the Spring-bound connection through `JdbcTemplate` or
+`DataSourceUtils`. Multi-group Outbox mode rejects a direct `DataSource.getConnection()` when
+a transaction connection is already bound.
+
+Globally unique `messageId` and `idempotencyKey` values have stable group
+affinity. Generated message IDs receive the prefix automatically. For explicit
+values, use `OutboxShardIdentity.forGroup("shard_1", "shard_0", value)`, with
+the configured legacy group as the second argument. Unprefixed historic values
+belong only to the legacy group; a mismatch rejects the enqueue and rolls back.
+Startup scans existing Outbox rows on each primary and rejects misassigned slots,
+identities, or slot collisions; it never moves or rewrites existing data. Group
+names and the legacy group name are persistent routing contracts.
+Database check constraints also reject identity prefixes that disagree with
+`shard_slot`. Stop all old producers and inspect historical rows before enabling
+multiple groups. A historic identity that happens to use a reserved prefix for
+another group makes the migration fail and requires a manual plan; it is never
+rewritten automatically. Custom ID generators have at most 52 characters before
+the prefix, keeping the final `messageId` within 64 characters.
+
+Business queries and outbox candidate scans use replicas; business and outbox
+writes use the primary. Fixed outbox locking reads are allowed on the primary
+for transaction-local idempotency, claims and lease confirmation. Business
+locking reads and general routing hints remain forbidden. Replica lag can delay
+an after-commit wake-up; subsequent polling retries the message. Legacy migration
+requires current source and target data and fails with
+`OUTBOX_MIGRATION_REQUIRES_SINGLE_SOURCE_MODE` in read/write mode: complete and
+verify it in single-source mode first. After
+Outbox DDL, startup waits for replicas to replay the primary WAL position using
+Common MP's `ddl.topology-ready-timeout` (60 seconds by default). When Common MP
+`ddl.auto-migrate` is enabled, its `targets` must also cover the Outbox schema
+with `classpath:db/egon-outbox-mp/manifest.json`. For an old topology, verify the
+prior Outbox `ddl_history` fingerprint and configure
+`egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints`.
+The new migration must still be pending to record the new topology; if already
+applied under the old topology, plan a new versioned migration rather than editing
+history. Business-table and cross-group data migrations require separate planning.
+Claims, completion, and cleanup use separate transactions per group; if a later
+group fails, already-claimed messages recover after their lease expires. Direct
+`OutboxStore` completion, retry, and dead-letter calls must pass the claimed
+record's `shardSlot` in multi-group mode; old overloads remain available for a
+single group and fail closed for multiple groups. The optional business state machine is
+incompatible with strict routing if its repository locks business rows using
+`SELECT ... FOR UPDATE`.
 
 If legacy rows exist, do not start cutover by copying the old `V1` file. Leave
 `db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql`
@@ -682,6 +757,22 @@ environment switch to execute. The GitHub CI `CI Backend` job sets
 `EGON_OUTBOX_TEST_POSTGRES_ENABLED=true` for the whole reactor, so this suite always
 runs there and never assume-skips; Docker or database startup failures fail the job
 instead of silently skipping it.
+
+`OutboxPostgresqlReadwriteIntegrationTest` is a separate, opt-in replication test;
+it does not start a database process. Set `EGON_OUTBOX_PG_READWRITE_IT=true`,
+`EGON_OUTBOX_PG_PRIMARY_URL`, `EGON_OUTBOX_PG_REPLICA_URL`, `EGON_OUTBOX_PG_USER`,
+and `EGON_OUTBOX_PG_PASSWORD` only for a dedicated empty primary/replica database.
+The test creates and removes the `egon_outbox` schema and a test business table;
+it fails without modifying an existing `egon_outbox` schema. The account also needs
+permission to execute `pg_control_system()`.
+
+`OutboxPostgresqlMultishardIntegrationTest` is also opt-in. For two dedicated,
+empty primary/replica databases, set `EGON_OUTBOX_PG_MULTISHARD_IT=true`, shared
+`EGON_OUTBOX_PG_USER` / `EGON_OUTBOX_PG_PASSWORD`, and
+`EGON_OUTBOX_PG_SHARD_0_PRIMARY_URL`, `EGON_OUTBOX_PG_SHARD_0_REPLICA_URL`,
+`EGON_OUTBOX_PG_SHARD_1_PRIMARY_URL`, and `EGON_OUTBOX_PG_SHARD_1_REPLICA_URL`.
+The test creates and removes the `egon_outbox` schema and dedicated business
+tables on both primaries; existing schemas are never overwritten.
 
 ## Explicit Scope
 

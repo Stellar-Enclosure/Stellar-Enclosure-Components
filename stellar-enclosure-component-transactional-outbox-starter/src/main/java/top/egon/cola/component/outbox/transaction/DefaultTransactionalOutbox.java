@@ -59,9 +59,22 @@ public class DefaultTransactionalOutbox implements TransactionalOutbox {
 
     @Override
     public OutboxReceipt enqueue(OutboxMessage message) {
-        transactionGuard.requireSelectedTransaction();
+        try {
+            transactionGuard.requireSelectedTransaction();
+            return enqueueInTransaction(message);
+        } catch (RuntimeException | Error failure) {
+            transactionGuard.markRollbackOnly();
+            throw failure;
+        }
+    }
+
+    private OutboxReceipt enqueueInTransaction(OutboxMessage message) {
         validator.validateEnvelope(message);
-        String messageId = message.messageId() == null ? idGenerator.nextId() : message.messageId();
+        if (message.shardGroup() != null) {
+            store.selectShard(message.shardGroup());
+        }
+        String messageId = message.messageId() == null
+                ? store.prepareGeneratedMessageId(idGenerator.nextId()) : message.messageId();
         SerializedOutboxPayload serializedPayload =
                 serializer.serialize(message.payload(), message.contentType());
         validator.validateSerialized(serializedPayload, message.headers());

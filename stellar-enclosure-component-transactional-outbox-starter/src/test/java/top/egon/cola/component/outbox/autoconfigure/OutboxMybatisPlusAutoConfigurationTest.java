@@ -174,6 +174,26 @@ class OutboxMybatisPlusAutoConfigurationTest {
     }
 
     @Test
+    void primaryReplicaGroupsStartWhenTheTechnicalTableCoversAllGroups() {
+        contextRunner.withPropertyValues("test.outbox.readwrite=true")
+                .run(context -> assertThat(context).hasNotFailed().hasSingleBean(MybatisPlusOutboxStore.class));
+        contextRunner.withPropertyValues("test.outbox.readwrite=true", "test.outbox.multiple-primary=true")
+                .run(context -> assertThat(context).hasNotFailed().hasSingleBean(MybatisPlusOutboxStore.class));
+    }
+
+    @Test
+    void multiGroupRejectsACustomFactoryThatDoesNotInstallTheOutboxGuard() {
+        contextRunner.withPropertyValues("test.outbox.readwrite=true", "test.outbox.multiple-primary=true")
+                .withBean("egonColaShardingLogicalDataSourceFactory",
+                        top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingDataSourceBootstrapper.LogicalDataSourceFactory.class,
+                        () -> (physical, yaml) -> mock(DataSource.class))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure().toString()).contains("OUTBOX_SHARD_GUARD_REQUIRED");
+                });
+    }
+
+    @Test
     void missingMapperXmlFailsInsteadOfCreatingAJdbcStore() {
         contextRunner.withPropertyValues("test.outbox.mapper-xml-missing=true")
                 .run(context -> {
@@ -212,6 +232,15 @@ class OutboxMybatisPlusAutoConfigurationTest {
     @Configuration(proxyBeanMethods = false)
     static class TestInfrastructureConfiguration {
 
+        @Bean("outboxManagedDdlInitializer")
+        top.egon.cola.component.outbox.migration.OutboxManagedDdlInitializer outboxManagedDdlInitializer(
+                @org.springframework.beans.factory.annotation.Value("${test.outbox.readwrite:false}") boolean readwrite,
+                @org.springframework.beans.factory.annotation.Value("${test.outbox.multiple-primary:false}") boolean multiplePrimary) {
+            var initializer = mock(top.egon.cola.component.outbox.migration.OutboxManagedDdlInitializer.class);
+            org.mockito.Mockito.when(initializer.isMultiGroupMode()).thenReturn(readwrite && multiplePrimary);
+            return initializer;
+        }
+
         @Bean("dataSource")
         DataSource dataSource() {
             return mock(DataSource.class);
@@ -229,8 +258,23 @@ class OutboxMybatisPlusAutoConfigurationTest {
         }
 
         @Bean("egonColaRoutingProfiles")
-        Map<String, EgonColaRoutingProfileBO> routingProfiles() {
-            return Map.of();
+        Map<String, EgonColaRoutingProfileBO> routingProfiles(
+                @Qualifier("egon.cola.component.mybatis-plus.sharding-top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties")
+                EgonColaShardingProperties properties) {
+            List<String> groups = properties.getDataSources().stream()
+                    .filter(source -> source.role() == EgonColaShardingProperties.DataSourceRoleEnum.PRIMARY)
+                    .map(EgonColaShardingProperties.PhysicalDataSourceProperties::logicalName).toList();
+            if (properties.getMode() == EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE && groups.size() > 1) {
+                var table = new EgonColaShardingProperties.TableProperties("TECHNICAL_GROUP", groups.getFirst(),
+                        "shard_slot", null, null, "egon_outbox", groups);
+                return Map.of("egon_cola_outbox_message", new top.egon.cola.component.common.mybatis.sharding.strategy
+                        .EgonColaTechnicalGroupShardingStrategy().toRoutingProfile("egon_cola_outbox_message", table, properties.getDataSources()));
+            }
+            var node = new top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO(
+                    "primary_a", "egon_outbox", "egon_cola_outbox_message");
+            return Map.of("egon_cola_outbox_message",
+                    top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyNodes.simple(
+                            "egon_cola_outbox_message", EgonColaRoutingProfileBO.TableKindEnum.SINGLE, List.of(node)));
         }
 
         @Bean("egonColaWriteTargetResolver")
@@ -248,13 +292,18 @@ class OutboxMybatisPlusAutoConfigurationTest {
         @Bean("egon.cola.component.mybatis-plus.sharding-top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties")
         EgonColaShardingProperties shardingProperties(
                 @org.springframework.beans.factory.annotation.Value("${test.outbox.multiple-primary:false}") boolean multiplePrimary,
-                @org.springframework.beans.factory.annotation.Value("${test.outbox.strategy-config-style:false}") boolean strategyConfigStyle
+                @org.springframework.beans.factory.annotation.Value("${test.outbox.strategy-config-style:false}") boolean strategyConfigStyle,
+                @org.springframework.beans.factory.annotation.Value("${test.outbox.readwrite:false}") boolean readwrite
         ) {
-            List<EgonColaShardingProperties.PhysicalDataSourceProperties> sources = multiplePrimary
+            List<EgonColaShardingProperties.PhysicalDataSourceProperties> sources = readwrite
+                    ? (multiplePrimary ? List.of(primary("primary_a"), replica("replica_a", "primary_a"),
+                    primary("primary_b"), replica("replica_b", "primary_b"))
+                    : List.of(primary("primary_a"), replica("replica_a", "primary_a"))) : multiplePrimary
                     ? List.of(primary("primary_a"), primary("primary_b"))
                     : List.of(primary("primary_a"));
             return EgonColaShardingProperties.builder()
-                    .mode(EgonColaShardingProperties.ModeEnum.SHARDING)
+                    .mode(readwrite ? EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE
+                            : EgonColaShardingProperties.ModeEnum.SHARDING)
                     .configStyle(strategyConfigStyle
                             ? EgonColaShardingProperties.ConfigStyleEnum.STRATEGY
                             : EgonColaShardingProperties.ConfigStyleEnum.NATIVE)
@@ -308,6 +357,12 @@ class OutboxMybatisPlusAutoConfigurationTest {
         private static EgonColaShardingProperties.PhysicalDataSourceProperties primary(String name) {
             return new EgonColaShardingProperties.PhysicalDataSourceProperties(name, name,
                     EgonColaShardingProperties.DataSourceRoleEnum.PRIMARY, "org.postgresql.Driver",
+                    "jdbc:postgresql://localhost/outbox_test", "test", "test");
+        }
+
+        private static EgonColaShardingProperties.PhysicalDataSourceProperties replica(String name, String group) {
+            return new EgonColaShardingProperties.PhysicalDataSourceProperties(name, group,
+                    EgonColaShardingProperties.DataSourceRoleEnum.REPLICA, "org.postgresql.Driver",
                     "jdbc:postgresql://localhost/outbox_test", "test", "test");
         }
     }

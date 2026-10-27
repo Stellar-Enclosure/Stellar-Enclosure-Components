@@ -12,6 +12,16 @@ import java.util.List;
 
 public interface OutboxStore {
 
+    default void selectShard(String group) {
+        if (group != null) {
+            throw new UnsupportedOperationException("OUTBOX_EXPLICIT_SHARD_UNSUPPORTED");
+        }
+    }
+
+    default String prepareGeneratedMessageId(String generated) {
+        return generated;
+    }
+
     OutboxReceipt enqueue(@NotNull @Valid NewOutboxRecord record);
 
     List<OutboxRecord> claimDue(
@@ -29,6 +39,10 @@ public interface OutboxStore {
 
     boolean markSucceeded(@Positive long id, @NotNull String leaseOwner);
 
+    default boolean markSucceeded(@Positive long id, @NotNull String leaseOwner, int shardSlot) {
+        return markSucceeded(id, leaseOwner);
+    }
+
     boolean markRetry(
             @Positive long id,
             @NotNull String leaseOwner,
@@ -38,6 +52,15 @@ public interface OutboxStore {
     );
 
     boolean markDead(@Positive long id, @NotNull String leaseOwner, String errorCode, String errorMessage);
+
+    default boolean markRetry(@Positive long id, @NotNull String leaseOwner, @NotNull Duration delay,
+                              String errorCode, String errorMessage, int shardSlot) {
+        return markRetry(id, leaseOwner, delay, errorCode, errorMessage);
+    }
+
+    default boolean markDead(@Positive long id, @NotNull String leaseOwner, String errorCode, String errorMessage, int shardSlot) {
+        return markDead(id, leaseOwner, errorCode, errorMessage);
+    }
 
     int deleteSucceeded(@NotNull Duration retention, @Positive @Max(10_000) int limit);
 

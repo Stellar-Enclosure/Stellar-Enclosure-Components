@@ -86,10 +86,12 @@ class DefaultTransactionalOutboxTest {
                 .isInstanceOf(IllegalArgumentException.class);
 
         verify(store, never()).enqueue(any());
+        verify(transactionGuard).markRollbackOnly();
     }
 
     @Test
     void shouldUseOneGeneratedIdForTheRecordReceiptAndWakeSignal() {
+        when(store.prepareGeneratedMessageId("generated-id")).thenReturn("generated-id");
         when(store.enqueue(any())).thenAnswer(invocation -> {
             NewOutboxRecord record = invocation.getArgument(0);
             return new OutboxReceipt(record.messageId(), record.idempotencyKey(), true);
@@ -106,6 +108,23 @@ class DefaultTransactionalOutboxTest {
         assertThat(receipt.messageId()).isEqualTo("generated-id");
         verify(afterCommitBuffer).record("generated-id");
         verify(idGenerator).nextId();
+    }
+
+    @Test
+    void explicitShardIsSelectedBeforePreparingTheGeneratedIdentity() {
+        OutboxMessage message = OutboxMessage.builder().shardGroup("group_b").channel("http")
+                .destination("orders").payload(Map.of("orderId", "1")).build();
+        when(store.prepareGeneratedMessageId("generated-id")).thenReturn("scoped-id");
+        when(store.enqueue(any())).thenAnswer(invocation -> {
+            NewOutboxRecord record = invocation.getArgument(0);
+            return new OutboxReceipt(record.messageId(), null, true);
+        });
+
+        assertThat(outbox.enqueue(message).messageId()).isEqualTo("scoped-id");
+        InOrder order = inOrder(store);
+        order.verify(store).selectShard("group_b");
+        order.verify(store).prepareGeneratedMessageId("generated-id");
+        order.verify(store).enqueue(any());
     }
 
     @Test

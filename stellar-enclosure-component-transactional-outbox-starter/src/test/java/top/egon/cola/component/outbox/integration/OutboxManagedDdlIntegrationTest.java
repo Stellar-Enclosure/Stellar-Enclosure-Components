@@ -274,7 +274,7 @@ class OutboxManagedDdlIntegrationTest {
         fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
 
         assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_message"));
-        assertEquals(1, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
     }
 
     @Test
@@ -361,7 +361,7 @@ class OutboxManagedDdlIntegrationTest {
         }
 
         assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_message"));
-        assertEquals(1, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
     }
 
     @AfterEach

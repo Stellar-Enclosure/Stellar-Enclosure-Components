@@ -17,7 +17,10 @@ import top.egon.cola.component.outbox.validation.OutboxMessageValidator;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 class OutboxLegacyMigrationServiceTest {
 
@@ -72,6 +75,22 @@ class OutboxLegacyMigrationServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("OUTBOX_MIGRATION_BATCH_SIZE_INVALID");
         verifyNoInteractions(ddlInitializer, repository);
+    }
+
+    @Test
+    void strictReadwriteMigrationFailsBeforeAccessingAnyRows() {
+        OutboxManagedDdlInitializer ddlInitializer = mock(OutboxManagedDdlInitializer.class);
+        when(ddlInitializer.isReadwriteMode()).thenReturn(true);
+        OutboxMessageRepository repository = mock(OutboxMessageRepository.class);
+        OutboxLegacyMigrationService service = service(
+                new OutboxMpStorageProperties().setMigrationMode(true), ddlInitializer, repository);
+
+        assertThatThrownBy(() -> service.migrate("legacy_outbox", 10, false))
+                .isInstanceOf(OutboxConfigurationException.class)
+                .hasMessage("OUTBOX_MIGRATION_REQUIRES_SINGLE_SOURCE_MODE");
+        verify(ddlInitializer).isReadwriteMode();
+        verifyNoMoreInteractions(ddlInitializer);
+        verifyNoInteractions(repository);
     }
 
     private OutboxLegacyMigrationService service(

@@ -11,6 +11,7 @@ import lombok.NoArgsConstructor;
 import lombok.experimental.Accessors;
 
 import java.time.Duration;
+import java.util.List;
 
 /** Storage and maintenance settings for the managed MyBatis-Plus outbox. */
 @Data
@@ -40,6 +41,19 @@ public class OutboxMpStorageProperties {
     @Builder.Default
     private String manifestResource = "db/egon-outbox-mp/manifest.json";
 
+    @NotNull
+    @Builder.Default
+    private List<@Pattern(regexp = "[0-9a-f]{64}") String> previousRouteFingerprints = List.of();
+
+    public OutboxMpStorageProperties(String sqlSessionFactoryBeanName, boolean migrationMode,
+                                     boolean autoInitializeDdl, Duration migrationLockTimeout, String manifestResource) {
+        this.sqlSessionFactoryBeanName = sqlSessionFactoryBeanName;
+        this.migrationMode = migrationMode;
+        this.autoInitializeDdl = autoInitializeDdl;
+        this.migrationLockTimeout = migrationLockTimeout;
+        this.manifestResource = manifestResource;
+    }
+
     public OutboxMpStorageProperties(String sqlSessionFactoryBeanName, boolean migrationMode,
                                      Duration migrationLockTimeout, String manifestResource) {
         this.sqlSessionFactoryBeanName = sqlSessionFactoryBeanName;
@@ -53,5 +67,12 @@ public class OutboxMpStorageProperties {
     public boolean isMigrationLockTimeoutPositive() {
         return migrationLockTimeout != null && !migrationLockTimeout.isNegative()
                 && !migrationLockTimeout.isZero();
+    }
+
+    @AssertTrue(message = "Outbox previous route fingerprints must be distinct and bounded")
+    public boolean isPreviousRouteFingerprintsValid() {
+        return previousRouteFingerprints != null && previousRouteFingerprints.size() <= 16
+                && previousRouteFingerprints.stream().allMatch(value -> value != null && value.matches("[0-9a-f]{64}"))
+                && new java.util.HashSet<>(previousRouteFingerprints).size() == previousRouteFingerprints.size();
     }
 }

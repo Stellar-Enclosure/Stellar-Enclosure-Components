@@ -117,4 +117,12 @@ class OutboxTransactionGuardTest {
         assertThatCode(new OutboxTransactionGuard(dataSource)::requireSelectedTransaction).doesNotThrowAnyException();
     }
 
+    @Test
+    void aCaughtOutboxFailureStillMarksTheSelectedTransactionForRollback() {
+        ConnectionHolder holder = new ConnectionHolder(mock(Connection.class));
+        TransactionSynchronizationManager.bindResource(dataSource, holder);
+        new OutboxTransactionGuard(dataSource).markRollbackOnly();
+        org.assertj.core.api.Assertions.assertThat(holder.isRollbackOnly()).isTrue();
+    }
+
 }

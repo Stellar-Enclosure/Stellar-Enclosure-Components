@@ -98,6 +98,9 @@ public class OutboxLegacyMigrationService {
         if (!storageProperties.isMigrationMode()) {
             throw new OutboxConfigurationException("OUTBOX_MIGRATION_MODE_REQUIRED");
         }
+        if (ddlInitializer.isReadwriteMode()) {
+            throw new OutboxConfigurationException("OUTBOX_MIGRATION_REQUIRES_SINGLE_SOURCE_MODE");
+        }
         validationUtils.validate(storageProperties);
 
         DataSource physicalPrimary = ddlInitializer.physicalMetadataDataSource(routeFingerprint);

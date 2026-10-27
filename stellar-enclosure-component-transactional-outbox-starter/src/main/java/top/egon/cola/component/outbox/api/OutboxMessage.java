@@ -16,6 +16,7 @@ public final class OutboxMessage {
     private final Map<String, String> headers;
     private final Instant availableAt;
     private final String traceId;
+    private final String shardGroup;
 
     private OutboxMessage(Builder builder) {
         this.messageId = builder.messageId;
@@ -28,6 +29,7 @@ public final class OutboxMessage {
         this.headers = Map.copyOf(builder.headers);
         this.availableAt = builder.availableAt;
         this.traceId = builder.traceId;
+        this.shardGroup = builder.shardGroup;
     }
 
     public static Builder builder() {
@@ -74,6 +76,10 @@ public final class OutboxMessage {
         return traceId;
     }
 
+    public String shardGroup() {
+        return shardGroup;
+    }
+
     public static final class Builder {
 
         private String messageId;
@@ -86,6 +92,7 @@ public final class OutboxMessage {
         private final Map<String, String> headers = new LinkedHashMap<>();
         private Instant availableAt;
         private String traceId;
+        private String shardGroup;
 
         public Builder messageId(String messageId) {
             this.messageId = messageId;
@@ -142,6 +149,11 @@ public final class OutboxMessage {
 
         public Builder traceId(String traceId) {
             this.traceId = traceId;
+            return this;
+        }
+
+        public Builder shardGroup(String shardGroup) {
+            this.shardGroup = shardGroup;
             return this;
         }
 

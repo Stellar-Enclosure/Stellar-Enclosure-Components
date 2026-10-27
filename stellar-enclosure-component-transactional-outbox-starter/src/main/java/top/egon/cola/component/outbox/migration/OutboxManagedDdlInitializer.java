@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.datasource.AbstractDataSource;
@@ -17,16 +16,17 @@ import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlResult;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO.RoleEnum;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaPostgreDdlRunner;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaManagedDdlInitializer;
 import top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.PartitionKeyBO;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
-import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ModeEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.PhysicalDataSourceProperties;
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingTopologyValidator;
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingTopologyValidator.TopologyBO;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
+import top.egon.cola.component.outbox.api.OutboxShardIdentity;
 
 import javax.sql.DataSource;
 import java.io.IOException;
@@ -34,15 +34,17 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Prepares the fixed outbox schema through the shared managed-DDL runner or read-only verification path. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
 public class OutboxManagedDdlInitializer {
 
     private static final String OUTBOX_SCHEMA = "egon_outbox";
@@ -66,9 +68,38 @@ public class OutboxManagedDdlInitializer {
     @Qualifier("outboxStateMachineObjectMapper")
     private final ObjectMapper objectMapper;
 
+    private final Duration topologyReadyTimeout;
+
     private final ResourcePatternResolver resources = new PathMatchingResourcePatternResolver();
 
     private volatile ReadinessBO readiness;
+    private volatile boolean multiGroupMode;
+
+    public OutboxManagedDdlInitializer(EgonColaPostgreDdlRunner ddlRunner,
+                                      EgonColaShardingTopologyValidator topologyValidator,
+                                      ValidationUtils validationUtils,
+                                      EgonColaShardingProperties shardingProperties,
+                                      OutboxMpStorageProperties storageProperties,
+                                      ObjectMapper objectMapper) {
+        this(ddlRunner, topologyValidator, validationUtils, shardingProperties, storageProperties,
+                objectMapper, Duration.ofSeconds(60));
+    }
+
+    public OutboxManagedDdlInitializer(EgonColaPostgreDdlRunner ddlRunner,
+                                      EgonColaShardingTopologyValidator topologyValidator,
+                                      ValidationUtils validationUtils,
+                                      EgonColaShardingProperties shardingProperties,
+                                      OutboxMpStorageProperties storageProperties,
+                                      ObjectMapper objectMapper,
+                                      Duration topologyReadyTimeout) {
+        this.ddlRunner = ddlRunner;
+        this.topologyValidator = topologyValidator;
+        this.validationUtils = validationUtils;
+        this.shardingProperties = shardingProperties;
+        this.storageProperties = storageProperties;
+        this.objectMapper = objectMapper;
+        this.topologyReadyTimeout = topologyReadyTimeout;
+    }
 
     public synchronized void initialize(@NotEmpty Map<@NotBlank String, @NotNull DataSource> physicalSources,
                                         @NotEmpty byte[] yaml) {
@@ -80,35 +111,54 @@ public class OutboxManagedDdlInitializer {
         validationUtils.validate(storageProperties);
         validateStorageTopology();
 
-        PhysicalDataSourceProperties primary = primaryDataSource();
-        DataSource primaryDataSource = physicalSources.get(primary.name());
-        if (physicalSources.size() != 1 || primaryDataSource == null) {
-            throw new IllegalStateException("OUTBOX_SINGLE_PRIMARY_REQUIRED");
+        Map<String, PhysicalDataSourceProperties> primaries = OutboxStorageTopology.primaries(shardingProperties);
+        multiGroupMode = primaries.size() > 1;
+        if (physicalSources.size() != shardingProperties.getDataSources().size()
+                || shardingProperties.getDataSources().stream().anyMatch(source -> !physicalSources.containsKey(source.name()))) {
+            throw new IllegalStateException("OUTBOX_SHARD_TOPOLOGY_INVALID");
         }
 
         TopologyBO topology = topologyValidator.validate(shardingProperties, yaml);
-        validateTransactionAndSingleNodes(topology, primary.name());
+        Map<Integer, String> slots = validateTransactionAndNodes(topology, primaries);
         EgonColaDdlManifestBO manifest = loadManifest();
         if (storageProperties.isAutoInitializeDdl()) {
-            DataSource scopedDataSource = new SchemaScopedDataSource(primaryDataSource, OUTBOX_SCHEMA);
-            List<EgonColaDdlResult> results = ddlRunner.run(List.of(new EgonColaDdlTargetBO(
-                    primary.name(), OUTBOX_SCHEMA, RoleEnum.MASTER_DATA, scopedDataSource, manifest,
-                    topology.fingerprint())));
-            validateRunnerResults(results, manifest, primary.name());
-            readiness = new ReadinessBO(primaryDataSource, topology.fingerprint());
+            List<EgonColaDdlTargetBO> targets = primaries.values().stream()
+                    .map(primary -> new EgonColaDdlTargetBO(primary.name(), OUTBOX_SCHEMA, RoleEnum.MASTER_DATA,
+                            new SchemaScopedDataSource(physicalSources.get(primary.name()), OUTBOX_SCHEMA), manifest,
+                            topology.fingerprint(), Set.copyOf(storageProperties.getPreviousRouteFingerprints())))
+                    .toList();
+            List<EgonColaDdlResult> results = ddlRunner.run(targets);
+            validateRunnerResults(results, manifest, primaries);
             log.info("outbox managed DDL ready: schema={} scripts={} routeFingerprint={}",
                     OUTBOX_SCHEMA, results.size(), topology.fingerprint());
         } else {
-            readiness = new ReadinessBO(primaryDataSource, topology.fingerprint());
             log.info("outbox managed DDL skipped; read-only schema validation required: schema={} routeFingerprint={}",
                     OUTBOX_SCHEMA, topology.fingerprint());
         }
+        if (shardingProperties.getMode() == ModeEnum.SHARDING_READWRITE) {
+            EgonColaManagedDdlInitializer.awaitReplicaReplay(shardingProperties.getDataSources(), primaries,
+                    physicalSources, topologyReadyTimeout);
+        }
+        Map<String, DataSource> primarySources = new TreeMap<>();
+        primaries.forEach((group, primary) -> primarySources.put(group, physicalSources.get(primary.name())));
+        if (primarySources.size() > 1) {
+            validateShardContents(primarySources, slots);
+        }
+        readiness = new ReadinessBO(Map.copyOf(primarySources), topology.fingerprint());
     }
 
     public boolean isReadyFor(@NotNull DataSource primaryDataSource, @NotBlank String routeFingerprint) {
         ReadinessBO current = readiness;
-        return current != null && current.primaryDataSource() == primaryDataSource
+        return current != null && current.primaryDataSources().values().stream().anyMatch(source -> source == primaryDataSource)
                 && current.routeFingerprint().equals(routeFingerprint);
+    }
+
+    public boolean isReadwriteMode() {
+        return shardingProperties.getMode() == ModeEnum.SHARDING_READWRITE;
+    }
+
+    public boolean isMultiGroupMode() {
+        return multiGroupMode;
     }
 
     /** Returns the retained physical PRIMARY only for read-only metadata checks after bootstrap readiness. */
@@ -120,32 +170,34 @@ public class OutboxManagedDdlInitializer {
         if (current == null || !current.routeFingerprint().equals(routeFingerprint)) {
             throw new IllegalStateException("OUTBOX_DDL_READINESS_MISSING");
         }
-        return current.primaryDataSource();
+        if (current.primaryDataSources().size() != 1) {
+            throw new IllegalStateException("OUTBOX_SINGLE_PRIMARY_REQUIRED");
+        }
+        return current.primaryDataSources().values().iterator().next();
+    }
+
+    public Map<String, DataSource> physicalMetadataDataSources(@NotBlank String routeFingerprint) {
+        ReadinessBO current = readiness;
+        if (current == null || routeFingerprint == null || !current.routeFingerprint().equals(routeFingerprint)) {
+            throw new IllegalStateException("OUTBOX_DDL_READINESS_MISSING");
+        }
+        return current.primaryDataSources();
     }
 
     private void validateStorageTopology() {
-        if (shardingProperties.getMode() != ModeEnum.SHARDING
+        if ((shardingProperties.getMode() != ModeEnum.SHARDING
+                && shardingProperties.getMode() != ModeEnum.SHARDING_READWRITE)
                 || !"LOCAL".equals(shardingProperties.getTransactionDefaultType())) {
             throw new IllegalStateException("OUTBOX_SHARDING_LOCAL_REQUIRED");
         }
-        if (shardingProperties.getDataSources() == null || shardingProperties.getDataSources().size() != 1
-                || shardingProperties.getDataSources().getFirst().role() != DataSourceRoleEnum.PRIMARY) {
-            throw new IllegalStateException("OUTBOX_SINGLE_PRIMARY_REQUIRED");
-        }
+        OutboxStorageTopology.primaries(shardingProperties);
         if (!"db/egon-outbox-mp/manifest.json".equals(storageProperties.getManifestResource())) {
             throw new IllegalStateException("OUTBOX_DDL_MANIFEST_RESOURCE_FIXED");
         }
     }
 
-    private PhysicalDataSourceProperties primaryDataSource() {
-        List<PhysicalDataSourceProperties> dataSources = shardingProperties.getDataSources();
-        if (dataSources.size() != 1 || dataSources.getFirst().role() != DataSourceRoleEnum.PRIMARY) {
-            throw new IllegalStateException("OUTBOX_SINGLE_PRIMARY_REQUIRED");
-        }
-        return dataSources.getFirst();
-    }
-
-    private static void validateTransactionAndSingleNodes(TopologyBO topology, String primaryName) {
+    private Map<Integer, String> validateTransactionAndNodes(TopologyBO topology,
+                                                              Map<String, PhysicalDataSourceProperties> primaries) {
         org.apache.shardingsphere.driver.yaml.YamlJDBCConfiguration configuration =
                 org.apache.shardingsphere.infra.util.yaml.YamlEngine.unmarshal(
                         new String(topology.yaml(), java.nio.charset.StandardCharsets.UTF_8),
@@ -154,7 +206,28 @@ public class OutboxManagedDdlInitializer {
                 || !"LOCAL".equals(configuration.getTransaction().getDefaultType())) {
             throw new IllegalStateException("OUTBOX_LOCAL_TRANSACTION_REQUIRED");
         }
-        for (String table : REQUIRED_TABLES) {
+        EgonColaRoutingProfileBO message = topology.profiles().get(REQUIRED_TABLES.getFirst());
+        if (message == null) {
+            throw new IllegalStateException("OUTBOX_SINGLE_NODE_REQUIRED: " + REQUIRED_TABLES.getFirst());
+        }
+        Map<Integer, String> slots;
+        if (message.kind() == EgonColaRoutingProfileBO.TableKindEnum.SINGLE && primaries.size() == 1) {
+            PhysicalDataSourceProperties only = primaries.values().iterator().next();
+            String group = shardingProperties.getMode() == ModeEnum.SHARDING ? only.name() : only.logicalName();
+            slots = Map.of(0, group);
+        } else if (message.kind() == EgonColaRoutingProfileBO.TableKindEnum.TECHNICAL_GROUP
+                && Set.copyOf(message.tenantSlotMap().values()).equals(primaries.keySet())) {
+            slots = message.tenantSlotMap();
+        } else {
+            throw new IllegalStateException("OUTBOX_SHARD_TOPOLOGY_REQUIRED");
+        }
+        List<EgonColaPhysicalTargetBO> messageNodes = message.actualNodes().get(new PartitionKeyBO(0, 0));
+        if (messageNodes == null || messageNodes.size() != slots.size()
+                || messageNodes.stream().anyMatch(node -> !slots.containsValue(node.group())
+                        || !OUTBOX_SCHEMA.equals(node.schema()) || !REQUIRED_TABLES.getFirst().equals(node.table()))) {
+            throw new IllegalStateException("OUTBOX_SHARD_TOPOLOGY_MISMATCH");
+        }
+        for (String table : REQUIRED_TABLES.subList(1, REQUIRED_TABLES.size())) {
             EgonColaRoutingProfileBO profile = topology.profiles().get(table);
             if (profile == null || profile.kind() != EgonColaRoutingProfileBO.TableKindEnum.SINGLE
                     || profile.actualNodes().size() != 1) {
@@ -165,10 +238,11 @@ public class OutboxManagedDdlInitializer {
                 throw new IllegalStateException("OUTBOX_SINGLE_NODE_REQUIRED: " + table);
             }
             EgonColaPhysicalTargetBO node = nodes.getFirst();
-            if (!primaryName.equals(node.group()) || !OUTBOX_SCHEMA.equals(node.schema()) || !table.equals(node.table())) {
+            if (!slots.get(0).equals(node.group()) || !OUTBOX_SCHEMA.equals(node.schema()) || !table.equals(node.table())) {
                 throw new IllegalStateException("OUTBOX_SINGLE_NODE_MISMATCH: " + table);
             }
         }
+        return slots;
     }
 
     private EgonColaDdlManifestBO loadManifest() {
@@ -192,21 +266,56 @@ public class OutboxManagedDdlInitializer {
     }
 
     private void validateRunnerResults(List<EgonColaDdlResult> results, EgonColaDdlManifestBO manifest,
-                                       String primaryName) {
-        if (results == null || results.size() != manifest.scripts().size()) {
+                                       Map<String, PhysicalDataSourceProperties> primaries) {
+        List<String> aliases = primaries.values().stream().map(PhysicalDataSourceProperties::name).sorted().toList();
+        if (results == null || results.size() != manifest.scripts().size() * aliases.size()) {
             throw new IllegalStateException("OUTBOX_DDL_MANIFEST_INCOMPLETE");
         }
         for (int index = 0; index < results.size(); index++) {
             EgonColaDdlResult result = validationUtils.validate(results.get(index));
-            EgonColaDdlManifestBO.ScriptBO script = manifest.scripts().get(index);
-            if (!primaryName.equals(result.alias()) || !OUTBOX_SCHEMA.equals(result.schema())
+            EgonColaDdlManifestBO.ScriptBO script = manifest.scripts().get(index % manifest.scripts().size());
+            if (!aliases.get(index / manifest.scripts().size()).equals(result.alias()) || !OUTBOX_SCHEMA.equals(result.schema())
                     || !script.version().equals(result.version()) || !script.sha256().equals(result.checksum())) {
                 throw new IllegalStateException("OUTBOX_DDL_RESULT_MISMATCH");
             }
         }
     }
 
-    private record ReadinessBO(DataSource primaryDataSource, String routeFingerprint) {
+    private void validateShardContents(Map<String, DataSource> primarySources, Map<Integer, String> slots) {
+        int queryTimeout = (int) Math.min(Integer.MAX_VALUE, Math.max(1, topologyReadyTimeout.toSeconds()));
+        for (var shard : primarySources.entrySet()) {
+            int expected = slots.entrySet().stream().filter(entry -> entry.getValue().equals(shard.getKey()))
+                    .map(Map.Entry::getKey).findFirst().orElseThrow();
+            try (Connection connection = shard.getValue().getConnection()) {
+                connection.setReadOnly(true);
+                connection.setAutoCommit(false);
+                try (var statement = connection.prepareStatement("SELECT shard_slot, message_id, idempotency_key "
+                        + "FROM egon_outbox.egon_cola_outbox_message")) {
+                    statement.setQueryTimeout(queryTimeout);
+                    statement.setFetchSize(512);
+                    try (var rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            int slot = rows.getInt(1);
+                            boolean slotNull = rows.wasNull();
+                            String messageId = rows.getString(2);
+                            String key = rows.getString(3);
+                            if (slotNull || slot != expected
+                                    || OutboxShardIdentity.slotOf(messageId, slots) != expected
+                                    || key != null && OutboxShardIdentity.slotOf(key, slots) != expected) {
+                                throw new IllegalStateException("OUTBOX_SHARD_DATA_MISMATCH: " + shard.getKey());
+                            }
+                        }
+                    }
+                } finally {
+                    connection.rollback();
+                }
+            } catch (SQLException | IllegalArgumentException failure) {
+                throw new IllegalStateException("OUTBOX_SHARD_DATA_VALIDATION_FAILED: " + shard.getKey(), failure);
+            }
+        }
+    }
+
+    private record ReadinessBO(Map<String, DataSource> primaryDataSources, String routeFingerprint) {
     }
 
     private static final class SchemaScopedDataSource extends AbstractDataSource {

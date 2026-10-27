@@ -380,7 +380,7 @@ public class OutboxDispatcher {
             DeliveryResult result,
             OutboxLifecycleSignalEnum signal
     ) {
-        transition(store.markSucceeded(record.id(), record.lockedBy()), record);
+        transition(store.markSucceeded(record.id(), record.lockedBy(), record.shardSlot()), record);
     }
 
     private void markRetryTarget(
@@ -393,7 +393,8 @@ public class OutboxDispatcher {
                 record.lockedBy(),
                 retryPolicy.nextDelay(record.attemptCount()),
                 sanitize(result.code(), 64),
-                sanitize(result.message(), 512)
+                sanitize(result.message(), 512),
+                record.shardSlot()
         );
         if (transition(updated, record)) {
             metrics.retry(record.channel());
@@ -429,7 +430,8 @@ public class OutboxDispatcher {
                 record.id(),
                 record.lockedBy(),
                 errorCode,
-                errorMessage
+                errorMessage,
+                record.shardSlot()
         );
         if (!transition(updated, record)) {
             return;

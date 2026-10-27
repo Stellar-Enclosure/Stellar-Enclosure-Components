@@ -374,7 +374,7 @@ class ComponentContractGovernanceTest {
     }
 
     @Test
-    void managedMpMigrationHasOneChecksummedVersionAndKeepsLegacySqlImmutable() throws Exception {
+    void managedMpMigrationChecksumsBothVersionsAndKeepsLegacySqlImmutable() throws Exception {
         Path managedSql = MANAGED_OUTBOX_SQL;
         Path manifest = MANAGED_OUTBOX_MANIFEST;
         Path legacySql = LEGACY_OUTBOX_SQL;
@@ -383,12 +383,17 @@ class ComponentContractGovernanceTest {
 
         assertThat(root.path("family").asText()).isEqualTo("component-outbox");
         assertThat(root.path("scripts").isArray()).isTrue();
-        assertThat(root.path("scripts").size()).isEqualTo(1);
+        assertThat(root.path("scripts").size()).isEqualTo(2);
         JsonNode script = root.path("scripts").get(0);
         assertThat(script.path("version").asText()).isEqualTo("20260924_001");
         assertThat(script.path("path").asText()).isEqualTo(
                 "db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql");
         assertThat(script.path("sha256").asText()).isEqualTo(sha256(sqlBytes));
+        JsonNode shardScript = root.path("scripts").get(1);
+        assertThat(shardScript.path("version").asText()).isEqualTo("20261027_001");
+        assertThat(shardScript.path("path").asText()).isEqualTo("db/egon-outbox-mp/V20261027_001__add_outbox_shard_slot.sql");
+        assertThat(shardScript.path("sha256").asText()).isEqualTo(sha256(Files.readAllBytes(
+                Path.of("src/main/resources").resolve(shardScript.path("path").asText()))));
         assertThat(sha256(Files.readAllBytes(legacySql))).isEqualTo(LEGACY_OUTBOX_SQL_SHA256);
 
         String store = read(MAIN_SOURCES.resolve(
@@ -421,7 +426,8 @@ class ComponentContractGovernanceTest {
                 "egon.cola.component.transactional-outbox.storage.mp.migration-mode",
                 "egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout",
                 "egon.cola.component.transactional-outbox.storage.mp.manifest-resource",
-                "egon.cola.component.transactional-outbox.storage.mp.auto-initialize-ddl");
+                "egon.cola.component.transactional-outbox.storage.mp.auto-initialize-ddl",
+                "egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints");
 
         assertThat(englishKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);
         assertThat(chineseKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);
