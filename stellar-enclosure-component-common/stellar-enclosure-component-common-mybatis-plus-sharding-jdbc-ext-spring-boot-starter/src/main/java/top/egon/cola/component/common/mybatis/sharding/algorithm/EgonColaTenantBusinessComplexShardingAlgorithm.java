@@ -16,7 +16,7 @@ import java.util.Properties;
  * Table candidates for tenant then business-root two-level sharding.
  */
 @Slf4j
-public final class EgonColaTenantBusinessComplexShardingAlgorithm implements ComplexKeysShardingAlgorithm<Long> {
+public final class EgonColaTenantBusinessComplexShardingAlgorithm implements ComplexKeysShardingAlgorithm<Comparable<?>> {
 
     private EgonColaRoutingProfileBO profile;
 
@@ -26,21 +26,21 @@ public final class EgonColaTenantBusinessComplexShardingAlgorithm implements Com
     }
 
     @Override
-    public Collection<String> doSharding(Collection<String> available, ComplexKeysShardingValue<Long> value) {
+    public Collection<String> doSharding(Collection<String> available, ComplexKeysShardingValue<Comparable<?>> value) {
         if (profile == null || value == null || value.getColumnNameAndShardingValuesMap() == null
                 || value.getColumnNameAndRangeValuesMap().containsKey("tenant_id")) {
             throw new IllegalArgumentException("SHARDING_KEY");
         }
-        Collection<Long> tenants = value.getColumnNameAndShardingValuesMap().get("tenant_id");
+        Collection<Comparable<?>> tenants = value.getColumnNameAndShardingValuesMap().get("tenant_id");
         if (tenants == null || tenants.size() != 1) {
             throw new IllegalArgumentException("SHARDING_KEY");
         }
-        Collection<Long> selected = value.getColumnNameAndShardingValuesMap().get(profile.secondaryColumn());
-        List<Long> roots = selected == null ? List.of() : List.copyOf(selected);
+        Collection<Comparable<?>> selected = value.getColumnNameAndShardingValuesMap().get(profile.secondaryColumn());
+        List<Long> roots = selected == null ? List.of() : selected.stream().map(EgonColaShardingValue::positive).toList();
         boolean range = roots.isEmpty() && value.getColumnNameAndRangeValuesMap().containsKey(profile.secondaryColumn());
         var result = EgonColaTwoLevelRouteStrategy.routeCandidates(profile, new EgonColaRouteQuery(
                 value.getLogicTableName(),
-                tenants.iterator().next(),
+                EgonColaShardingValue.positive(tenants.iterator().next()),
                 roots,
                 EgonColaRouteQuery.OperationEnum.ROUTE_CANDIDATES,
                 range));

@@ -2,6 +2,40 @@
 
 消费本 Starter 必须同时使用 PostgreSQL、MyBatis-Plus 与 ShardingSphere-JDBC。排除 `shardingsphere-jdbc` 不受支持，编译或启动必须失败。逻辑 `@Primary DataSource` 由一份 YAML（前缀 `egon.cola.component.mybatis-plus.sharding`）描述。`config-style: STRATEGY` 与 `config-style: NATIVE` 互斥。
 
+## 分片主从读写分离
+
+`mode: SHARDING_READWRITE` 按 `logical-name` 将物理数据源组成主从组，每组必须恰好有一个 `PRIMARY` 和至少一个 `REPLICA`。分片节点使用组名；普通查询和事务内查询路由到该组副本，写入路由到该组主库，副本不可用时不回退到主库。`SHARDING` 保留原有单数据源/纯分片行为，不提供只读副本保证。
+
+```yaml
+egon:
+  cola:
+    component:
+      mybatis-plus:
+        sharding:
+          enabled: true
+          mode: SHARDING_READWRITE
+          config-style: STRATEGY
+          transaction-default-type: LOCAL
+          data-sources:
+            - { name: shard_0_primary, logical-name: shard_0, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+            - { name: shard_0_replica, logical-name: shard_0, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_0_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+            - { name: shard_1_primary, logical-name: shard_1, role: PRIMARY, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_PRIMARY_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+            - { name: shard_1_replica, logical-name: shard_1, role: REPLICA, driver-class-name: org.postgresql.Driver, jdbc-url: "${PG_1_REPLICA_URL}", username: "${PG_USER}", password: "${PG_PASSWORD}" }
+          tables:
+            orders:
+              type: COMPLEX_TENANT_THEN_BUSINESS
+              shard-groups: [shard_0, shard_1]
+              sharding-column: tenant_id
+              table-columns: [tenant_id, order_id]
+              root-key-name: order_id
+```
+
+组件使用 ShardingSphere `DYNAMIC` 事务读策略和 `ROUND_ROBIN` 副本选择。启动时检查每组的 `pg_control_system()` 系统标识与数据库名一致，每次借用连接检查角色与系统标识，执行 SQL 前再次检查 `pg_is_in_recovery()`；严格模式禁止 `HintManager` 和影响路由的 SQL Hint，锁定读等路由到错误角色的 SQL 也会被拒绝。数据库账号必须能执行这些系统函数，每条业务 SQL 会增加一次角色检查往返。严格模式不支持通过 `unwrap` 绕过数据源守卫，也不支持业务存储过程调用。事务内副本读看不到本事务未提交的写入，也可能受到复制延迟影响；不要将它用于要求读己写的业务。故障切换、复制健康和延迟监控仍由 PostgreSQL 集群管理，应用级缓存不提供强一致保证。
+
+启用 transactional-outbox 时，其逻辑数据源工厂仅放行固定的 Outbox 技术锁定查询和 schema 校验查询到主库，业务查询仍遵循严格路由。多组使用 `TECHNICAL_GROUP` 与固定 `shard_slot`，同一事务的业务与 Outbox 写入必须落在同一主库组；物理数据源守卫也会拦截跨组 JDBC 写入。详见 [Outbox 配置](../../stellar-enclosure-component-transactional-outbox-starter/README.zh-CN.md#受管-mp-schema-与旧数据搬迁)。
+
+`STANDARD_TENANT_ID` 和 `COMPLEX_TENANT_THEN_BUSINESS` 可用 `shard-groups` 选择该表参与分片的逻辑组，避免把仅用于元数据的 PRIMARY 包含进去；不配置时沿用所有 PRIMARY 组。NATIVE 模式可以提供 `!READWRITE_SPLITTING`，严格模式要求其组映射与数据源配置完全一致且事务读策略为 `DYNAMIC`；分片算法必须能与本组件的写目标守卫验证一致，无法验证的自定义算法会被拒绝。原有 `SHARDING` NATIVE 配置不受这一严格模式限制。更改组顺序、组数量或规则前必须规划既有数据迁移。
+
 推荐 STRATEGY：订单/明细使用 `COMPLEX_TENANT_THEN_BUSINESS`（先 `tenant_id` 再 `order_id`）。默认事务 LOCAL。STRATEGY 下 `transaction-default-type` 一定作为生成规则的 `defaultType` 写出；NATIVE 下它只是宿主 YAML 未写 `defaultType` 时的回退。校验只接受 `LOCAL` 或 `XA`，其他取值以 `LOCAL_TRANSACTION_REQUIRED` 失败。选择 XA（`transaction-default-type: XA`）只是转发该取值：本 starter 不依赖任何 XA 事务 provider，宿主必须自行引入 provider 及其恢复管理器。
 
 `tables.<name>.schema` 可选，缺省为 `public`。仅 `SINGLE` 表支持非 `public` schema；其他表策略配置时以 `SCHEMA_OVERRIDE_REQUIRES_SINGLE` 拒绝。解析后的 schema 会纳入路由 profile 和拓扑指纹。
@@ -171,10 +205,28 @@ LOCAL Guard 与声明的事务类型无关，跨 SqlSessionFactory 检查事务�
 
 不要把 `EgonColaDdlTargetBO` 注册为默认 MP IDdl Bean，也不要混用 MP 默认 DdlApplicationRunner。本 Starter 负责物理池、拓扑校验、TableInfo 维护、脚本 DDL 与逻辑数据源；应用不得再复制 `ShardingDataSourceBootstrapper`。
 
-七个生成脚手架都依赖本 starter：其中六个由该运行器接管并显式启用，旧 B/V/manual SQL 原样归档；Agent 关闭该运行器并继续使用 Flyway。
+可以显式配置启动前迁移。`auto-migrate` 默认关闭；仅设置旧的 `ddl.enabled` 不会自动运行脚本。每个分片组和 schema 必须提供独立目标，脚本需创建规则中实际使用的物理表名。
+
+```yaml
+egon:
+  cola:
+    component:
+      mybatis-plus:
+        ddl:
+          enabled: true
+          auto-migrate: true
+          topology-ready-timeout: PT60S
+          targets:
+            - { logical-name: shard_0, schema: public, role: SHARD, manifest-resource: "classpath:db/egon-mp/repository-manifest.json" }
+            - { logical-name: shard_1, schema: public, role: SHARD, manifest-resource: "classpath:db/egon-mp/repository-manifest.json" }
+```
+
+组件在逻辑数据源创建前对指定的物理 PRIMARY 执行已有的版本化 manifest；验证所有路由物理表存在后，在主从模式等待每个副本回放到主库迁移完成后的 WAL 位置，超时启动失败。回放查询受剩余等待时间限制，连接获取仍受连接池和 JDBC 的超时配置约束。各主库独立提交，失败后重试会继续校验已完成的版本；并非跨分片原子迁移。只支持显式脚本迁移，TableInfo 生成器仍是未执行的 SQL 建议，不能自动推断索引、约束和安全的列类型变更。已有 Flyway 版本不可修改；需要变更时追加新版本。
+
+新增逻辑表会改变路由指纹。若只新增表、原有表的路由和主库组完全不变，可在 `ddl.previous-route-exclusions` 中逐项列出某个历史拓扑尚未包含的当前逻辑表，例如 `previous-route-exclusions: [[new_orders]]`。组件从当前拓扑排除这些表并重新计算历史指纹，只有与已安装历史完全匹配且 manifest 有新版本时才执行迁移；原有表改分片或更换主库组仍会失败。以后启动需要保留覆盖所有已安装历史指纹的声明，不会修改历史记录。
 
 ## 配置与验证
 
 核心配置位于 `egon.cola.component.mybatis-plus`；源脚手架四个 profile 给出完整配置。Common 的 `ddl.enabled` 默认 false，六个非 Agent 脚手架显式启用，Agent 显式关闭。主键配置位于 `egon.cola.component.id`。
 
-CPU/Mock/H2 用例参考官方 MyBatis-Plus 测试的真实 Mapper/插件调用方式。它们不证明 PG DDL、复制、分片实际落点或性能。真实 PG/SS 测试默认跳过，由环境变量开启：`EGON_MP_PG_MODEL_TEST=true` 启用逻辑删除与乐观锁用例，`EGON_MP_PG_DDL_TEST=true` 启用受管 DDL 用例，两者都从 `EGON_MP_PG_URL` / `EGON_MP_PG_USER` / `EGON_MP_PG_PASSWORD` 读取专用测试库连接。这些用例不在 CI 中执行，必须手动运行；SQL 性能需在真实数据分布上以 EXPLAIN 验收。
+CPU/Mock/H2 用例参考官方 MyBatis-Plus 测试的真实 Mapper/插件调用方式。它们不证明 PG DDL、复制、分片实际落点或性能。真实 PG/SS 测试默认跳过，由环境变量开启：`EGON_MP_PG_MODEL_TEST=true` 启用逻辑删除与乐观锁用例，`EGON_MP_PG_DDL_TEST=true` 启用受管 DDL 用例，两者都从 `EGON_MP_PG_URL` / `EGON_MP_PG_USER` / `EGON_MP_PG_PASSWORD` 读取专用测试库连接。`EgonColaPostgreSqlReadwriteIT` 须显式指定 Maven 测试名并设置 `EGON_MP_PG_SHARDING_IT=true`、用户密码以及 `EGON_MP_PG_SHARD_0_PRIMARY_URL`、`EGON_MP_PG_SHARD_0_REPLICA_URL`、`EGON_MP_PG_SHARD_1_PRIMARY_URL`、`EGON_MP_PG_SHARD_1_REPLICA_URL`；两组都必须是专用物理复制测试集群。该测试创建并清理随机命名的测试表。这些用例不在 CI 中执行，必须手动运行；SQL 性能需在真实数据分布上以 EXPLAIN 验收。

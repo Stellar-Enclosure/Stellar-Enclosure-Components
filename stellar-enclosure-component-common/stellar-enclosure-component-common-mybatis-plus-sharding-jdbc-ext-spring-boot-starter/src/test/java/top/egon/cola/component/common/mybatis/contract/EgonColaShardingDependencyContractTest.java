@@ -18,7 +18,10 @@ class EgonColaShardingDependencyContractTest {
         assertThat(pom).contains("<artifactId>shardingsphere-jdbc</artifactId>");
         assertThat(pom).contains("<artifactId>shardingsphere-parser-sql-engine-postgresql</artifactId>");
         assertThat(pom).doesNotContain("<artifactId>shardingsphere-jdbc-core-spring-boot-starter</artifactId>");
-        assertThat(pom).doesNotContain("<artifactId>shardingsphere-parser-sql-engine-mysql</artifactId>");
+        assertThat(pom).containsPattern("(?s)<dependency>\\s*<groupId>org\\.apache\\.shardingsphere</groupId>\\s*"
+                + "<artifactId>shardingsphere-parser-sql-engine-mysql</artifactId>\\s*"
+                + "<version>\\$\\{shardingsphere\\.version}</version>\\s*<scope>test</scope>\\s*</dependency>");
+        assertThat(pom.split("<artifactId>shardingsphere-parser-sql-engine-mysql</artifactId>", -1)).hasSize(2);
         assertThat(pom).doesNotContain("<artifactId>shardingsphere-parser-sql-engine-sql92</artifactId>");
         assertThat(pom).doesNotContain("<artifactId>shardingsphere-transaction-xa-core</artifactId>");
         String parent = Files.readString(Path.of("..", "pom.xml"));

@@ -7,10 +7,12 @@ import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.P
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.TableKindEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.PhysicalDataSourceProperties;
+import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.TableProperties;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.LinkedHashSet;
 import java.util.stream.Collectors;
 
 /**
@@ -33,6 +35,18 @@ public final class EgonColaShardingStrategyNodes {
                 .filter(Objects::nonNull)
                 .distinct()
                 .toList();
+    }
+
+    static List<String> primaryGroups(List<PhysicalDataSourceProperties> dataSources, TableProperties table) {
+        List<String> available = primaryGroups(dataSources);
+        if (table.shardGroups() == null || table.shardGroups().isEmpty()) {
+            return available;
+        }
+        var selected = new LinkedHashSet<>(table.shardGroups());
+        if (selected.size() != table.shardGroups().size() || !available.containsAll(selected)) {
+            throw new EgonColaMybatisPlusConfigurationException("SHARDING_GROUP_INVALID");
+        }
+        return List.copyOf(selected);
     }
 
     static void requirePrimary(List<PhysicalDataSourceProperties> dataSources, String logicalName) {

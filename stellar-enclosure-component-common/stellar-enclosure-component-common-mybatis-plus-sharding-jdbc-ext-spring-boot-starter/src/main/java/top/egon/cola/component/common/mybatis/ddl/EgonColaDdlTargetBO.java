@@ -13,6 +13,7 @@ import top.egon.cola.component.common.core.enums.EgonEnum;
 import javax.sql.DataSource;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Consumer;
 
 /**
@@ -22,7 +23,13 @@ public record EgonColaDdlTargetBO(@NotBlank @Pattern(regexp = "[a-zA-Z_][a-zA-Z0
                                   @NotBlank @Pattern(regexp = "[a-z_][a-z0-9_]{0,62}") String schema,
                                   @NotNull RoleEnum role, @JsonIgnore @NotNull DataSource dataSource,
                                   @NotNull @Valid EgonColaDdlManifestBO manifest,
-                                  @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String routeFingerprint) implements IDdl {
+                                  @NotBlank @Pattern(regexp = "[0-9a-f]{64}") String routeFingerprint,
+                                  @NotNull Set<@Pattern(regexp = "[0-9a-f]{64}") String> compatibleRouteFingerprints) implements IDdl {
+
+    public EgonColaDdlTargetBO(String alias, String schema, RoleEnum role, DataSource dataSource,
+                               EgonColaDdlManifestBO manifest, String routeFingerprint) {
+        this(alias, schema, role, dataSource, manifest, routeFingerprint, Set.of());
+    }
 
     public EgonColaDdlTargetBO {
         if (alias == null || !alias.matches("[a-zA-Z_][a-zA-Z0-9_-]{0,62}") || schema == null || !schema.matches("[a-z_][a-z0-9_]{0,62}") || routeFingerprint == null || !routeFingerprint.matches("[0-9a-f]{64}")) {
@@ -31,6 +38,10 @@ public record EgonColaDdlTargetBO(@NotBlank @Pattern(regexp = "[a-zA-Z_][a-zA-Z0
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(dataSource, "dataSource");
         Objects.requireNonNull(manifest, "manifest");
+        compatibleRouteFingerprints = Set.copyOf(Objects.requireNonNull(compatibleRouteFingerprints, "compatibleRouteFingerprints"));
+        if (compatibleRouteFingerprints.stream().anyMatch(value -> !value.matches("[0-9a-f]{64}"))) {
+            throw new IllegalArgumentException("Invalid compatible routing fingerprint");
+        }
     }
 
     @Override

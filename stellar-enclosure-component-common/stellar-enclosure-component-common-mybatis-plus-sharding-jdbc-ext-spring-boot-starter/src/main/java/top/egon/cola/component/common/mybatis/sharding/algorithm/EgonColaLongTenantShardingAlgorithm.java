@@ -17,7 +17,7 @@ import java.util.Properties;
  * Routes a positive tenant id to one stable database group using mix64-v1.
  */
 @Slf4j
-public final class EgonColaLongTenantShardingAlgorithm implements StandardShardingAlgorithm<Long> {
+public final class EgonColaLongTenantShardingAlgorithm implements StandardShardingAlgorithm<Comparable<?>> {
 
     private EgonColaRoutingProfileBO profile;
 
@@ -27,13 +27,13 @@ public final class EgonColaLongTenantShardingAlgorithm implements StandardShardi
     }
 
     @Override
-    public String doSharding(Collection<String> available, PreciseShardingValue<Long> value) {
-        if (profile == null || value == null || value.getValue() == null || value.getValue() <= 0) {
+    public String doSharding(Collection<String> available, PreciseShardingValue<Comparable<?>> value) {
+        if (profile == null || value == null) {
             throw new IllegalArgumentException("SHARDING_KEY");
         }
         var result = EgonColaTwoLevelRouteStrategy.routeCandidates(profile, new EgonColaRouteQuery(
                 value.getLogicTableName(),
-                value.getValue(),
+                EgonColaShardingValue.positive(value.getValue()),
                 List.of(),
                 EgonColaRouteQuery.OperationEnum.ROUTE_CANDIDATES,
                 false));
@@ -45,7 +45,7 @@ public final class EgonColaLongTenantShardingAlgorithm implements StandardShardi
     }
 
     @Override
-    public Collection<String> doSharding(Collection<String> available, RangeShardingValue<Long> value) {
+    public Collection<String> doSharding(Collection<String> available, RangeShardingValue<Comparable<?>> value) {
         throw new UnsupportedOperationException("TENANT_RANGE_FORBIDDEN");
     }
 }

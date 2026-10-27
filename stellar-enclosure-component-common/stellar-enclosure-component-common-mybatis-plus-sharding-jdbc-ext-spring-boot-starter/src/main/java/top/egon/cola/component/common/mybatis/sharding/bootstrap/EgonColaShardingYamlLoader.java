@@ -10,6 +10,9 @@ import org.springframework.stereotype.Component;
 import top.egon.cola.component.common.mybatis.exception.EgonColaMybatisPlusConfigurationException;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ConfigStyleEnum;
+import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
+import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ModeEnum;
+import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.PhysicalDataSourceProperties;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.TableProperties;
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategy;
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyFactory;
@@ -17,6 +20,9 @@ import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaSharding
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -36,6 +42,7 @@ public class EgonColaShardingYamlLoader {
     private final Environment environment;
 
     public byte[] load(EgonColaShardingProperties properties) {
+        strategyFactory.create(properties);
         if (properties.getConfigStyle() == ConfigStyleEnum.NATIVE) {
             return loadNative(properties.getNativeRulesResource());
         }
@@ -63,6 +70,8 @@ public class EgonColaShardingYamlLoader {
         StringBuilder shardingTables = new StringBuilder();
         StringBuilder shardingAlgorithms = new StringBuilder();
         StringBuilder standaloneRules = new StringBuilder();
+        StringBuilder singleTables = new StringBuilder();
+        StringBuilder broadcastTables = new StringBuilder();
         Set<String> tableNames = new LinkedHashSet<>();
         Set<String> algorithmNames = new LinkedHashSet<>();
         yaml.append("databaseName: egon\nrules:\n");
@@ -70,8 +79,14 @@ public class EgonColaShardingYamlLoader {
             for (Map.Entry<String, TableProperties> entry : properties.getTables().entrySet()) {
                 EgonColaShardingStrategy strategy = strategyFactory.create(entry.getValue().type(), entry.getValue());
                 String fragment = strategy.toRulesFragment(entry.getKey(), entry.getValue(), properties.getDataSources());
-                if ("STANDARD_TENANT_ID".equals(strategy.type())) {
+                if ("STANDARD_TENANT_ID".equals(strategy.type())
+                        || "COMPLEX_TENANT_THEN_BUSINESS".equals(strategy.type())
+                        || "TECHNICAL_GROUP".equals(strategy.type())) {
                     mergeStandardFragment(fragment, shardingTables, shardingAlgorithms, tableNames, algorithmNames);
+                } else if ("SINGLE".equals(strategy.type())) {
+                    appendTableEntries(fragment, "- !SINGLE\n  tables:\n", singleTables);
+                } else if ("BROADCAST".equals(strategy.type())) {
+                    appendTableEntries(fragment, "- !BROADCAST\n  tables:\n", broadcastTables);
                 } else {
                     standaloneRules.append(fragment);
                 }
@@ -81,9 +96,53 @@ public class EgonColaShardingYamlLoader {
             yaml.append("- !SHARDING\n  tables:\n").append(shardingTables)
                     .append("  shardingAlgorithms:\n").append(shardingAlgorithms);
         }
+        if (singleTables.length() > 0) {
+            yaml.append("- !SINGLE\n  tables:\n").append(singleTables);
+        }
+        if (broadcastTables.length() > 0) {
+            yaml.append("- !BROADCAST\n  tables:\n").append(broadcastTables);
+        }
         yaml.append(standaloneRules);
+        if (properties.getMode() == ModeEnum.SHARDING_READWRITE) {
+            appendReadwriteRules(yaml, properties.getDataSources());
+        }
         yaml.append("transaction:\n  defaultType: ").append(properties.getTransactionDefaultType()).append('\n');
         return yaml.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static void appendTableEntries(String fragment, String header, StringBuilder target) {
+        if (fragment == null || !fragment.startsWith(header)) {
+            throw new EgonColaMybatisPlusConfigurationException("INVALID_SHARDING_FRAGMENT");
+        }
+        target.append(fragment.substring(header.length()));
+    }
+
+    private static void appendReadwriteRules(StringBuilder yaml, List<PhysicalDataSourceProperties> sources) {
+        Map<String, List<PhysicalDataSourceProperties>> groups = new LinkedHashMap<>();
+        Set<String> names = new LinkedHashSet<>();
+        for (PhysicalDataSourceProperties source : sources) {
+            if (!names.add(source.name())) {
+                throw new EgonColaMybatisPlusConfigurationException("DUPLICATE_PHYSICAL_DATASOURCE");
+            }
+            groups.computeIfAbsent(source.logicalName(), ignored -> new ArrayList<>()).add(source);
+        }
+        yaml.append("- !READWRITE_SPLITTING\n  dataSourceGroups:\n");
+        for (Map.Entry<String, List<PhysicalDataSourceProperties>> group : groups.entrySet()) {
+            List<PhysicalDataSourceProperties> primaries = group.getValue().stream()
+                    .filter(source -> source.role() == DataSourceRoleEnum.PRIMARY).toList();
+            List<String> replicas = group.getValue().stream()
+                    .filter(source -> source.role() == DataSourceRoleEnum.REPLICA)
+                    .map(PhysicalDataSourceProperties::name).toList();
+            if (primaries.size() != 1 || replicas.isEmpty()) {
+                throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_REQUIRES_PRIMARY_AND_REPLICA");
+            }
+            yaml.append("    ").append(group.getKey()).append(":\n")
+                    .append("      writeDataSourceName: ").append(primaries.getFirst().name()).append('\n')
+                    .append("      readDataSourceNames: [").append(String.join(", ", replicas)).append("]\n")
+                    .append("      transactionalReadQueryStrategy: DYNAMIC\n")
+                    .append("      loadBalancerName: egon_round_robin\n");
+        }
+        yaml.append("  loadBalancers:\n    egon_round_robin:\n      type: ROUND_ROBIN\n");
     }
 
     private static void mergeStandardFragment(String fragment, StringBuilder tables, StringBuilder algorithms,

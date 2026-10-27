@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /**
  * Tenant-first then business-root two-level sharding using mix64-v1.
@@ -45,11 +46,15 @@ public class EgonColaComplexTenantThenBusinessShardingStrategy implements EgonCo
     @Override
     public void validateTable(TableProperties table) {
         EgonColaSingleTableShardingStrategy.requireType(table, TYPE);
-        if (table.rootKeyName() == null || table.rootKeyName().isBlank()) {
+        if (table.rootKeyName() == null || table.rootKeyName().isBlank() || "tenant_id".equals(table.rootKeyName())) {
+            throw new EgonColaMybatisPlusConfigurationException("SHARDING_KEY");
+        }
+        if (table.shardingColumn() != null && !table.shardingColumn().isBlank()
+                && !"tenant_id".equals(table.shardingColumn())) {
             throw new EgonColaMybatisPlusConfigurationException("SHARDING_KEY");
         }
         List<String> columns = table.tableColumns() == null ? List.of() : table.tableColumns();
-        if (!columns.contains("tenant_id") || !columns.contains(table.rootKeyName())) {
+        if (columns.size() != 2 || !columns.contains("tenant_id") || !columns.contains(table.rootKeyName())) {
             throw new EgonColaMybatisPlusConfigurationException("SHARDING_KEY");
         }
         Objects.requireNonNull(routeStrategy, "egonColaTwoLevelRouteStrategy");
@@ -62,22 +67,35 @@ public class EgonColaComplexTenantThenBusinessShardingStrategy implements EgonCo
         List<EgonColaPhysicalTargetBO> nodes = new ArrayList<>();
         profile.actualNodes().values().forEach(nodes::addAll);
         String actual = EgonColaShardingStrategyNodes.joinNodes(nodes);
+        String slots = profile.tenantSlotMap().entrySet().stream()
+                .map(entry -> entry.getKey() + "=" + entry.getValue())
+                .collect(Collectors.joining(","));
+        String common = "      logical-table: " + logicalTable + "\n"
+                + "      tenant-slot-count: " + profile.tenantSlotCount() + "\n"
+                + "      secondary-bucket-count: " + profile.secondaryBucketCount() + "\n"
+                + "      tenant-slot-map: " + slots + "\n"
+                + "      actual-data-nodes: " + actual + "\n"
+                + "      secondary-column: " + profile.secondaryColumn() + "\n"
+                + "      root-key-name: " + profile.rootKeyName() + "\n"
+                + "      secondary-seed: " + Long.toUnsignedString(profile.secondarySeed()) + "\n"
+                + "      algorithm-version: " + profile.algorithmVersion() + "\n"
+                + "      max-read-fanout-tables: " + profile.maxReadFanoutTables() + "\n";
         return "tables:\n  " + logicalTable + ":\n    actualDataNodes: " + actual
                 + "\n    databaseStrategy:\n      standard:\n        shardingColumn: tenant_id\n"
                 + "        shardingAlgorithmName: " + logicalTable + "_database\n"
                 + "    tableStrategy:\n      complex:\n        shardingColumns: tenant_id,"
                 + table.rootKeyName() + "\n        shardingAlgorithmName: " + logicalTable + "_table\n"
                 + "shardingAlgorithms:\n  " + logicalTable + "_database:\n    type: CLASS_BASED\n"
-                + "    props:\n      strategy: STANDARD\n      algorithmClassName: " + DATABASE_ALGORITHM + "\n"
+                + "    props:\n      strategy: STANDARD\n      algorithmClassName: " + DATABASE_ALGORITHM + "\n" + common
                 + "  " + logicalTable + "_table:\n    type: CLASS_BASED\n    props:\n      strategy: COMPLEX\n"
-                + "      algorithmClassName: " + TABLE_ALGORITHM + "\n";
+                + "      algorithmClassName: " + TABLE_ALGORITHM + "\n" + common;
     }
 
     @Override
     public EgonColaRoutingProfileBO toRoutingProfile(String logicalTable, TableProperties table,
                                                      List<PhysicalDataSourceProperties> dataSources) {
         validateTable(table);
-        List<String> groups = EgonColaShardingStrategyNodes.primaryGroups(dataSources);
+        List<String> groups = EgonColaShardingStrategyNodes.primaryGroups(dataSources, table);
         if (groups.isEmpty()) {
             throw new EgonColaMybatisPlusConfigurationException("BROADCAST_PRIMARY_REQUIRED");
         }

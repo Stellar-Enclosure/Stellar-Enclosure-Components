@@ -2,6 +2,7 @@ package top.egon.cola.component.common.mybatis.sharding;
 
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.common.mybatis.exception.EgonColaMybatisPlusConfigurationException;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaManagedDdlInitializer;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ConfigStyleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ModeEnum;
@@ -44,6 +45,28 @@ class EgonColaShardingDataSourceBootstrapperTest {
         assertThatThrownBy(() -> bootstrapper.createDataSource(properties))
                 .isInstanceOf(EgonColaMybatisPlusConfigurationException.class)
                 .hasMessageContaining("INVALID_TOPOLOGY");
+        verify(pools).close(physical.values());
+        verifyNoInteractions(logical);
+    }
+
+    @Test
+    void migrationFailureClosesPoolsBeforeTheLogicalDataSourceIsCreated() throws Exception {
+        EgonColaShardingProperties properties = properties();
+        Map<String, DataSource> physical = Map.of("shard_0", mock(DataSource.class));
+        var pools = mock(EgonColaPhysicalDataSourceFactory.class);
+        var loader = mock(EgonColaShardingYamlLoader.class);
+        var validator = mock(EgonColaShardingTopologyValidator.class);
+        var logical = mock(LogicalDataSourceFactory.class);
+        var initializer = mock(EgonColaManagedDdlInitializer.class);
+        var topology = mock(EgonColaShardingTopologyValidator.TopologyBO.class);
+        when(pools.create(properties)).thenReturn(physical);
+        when(loader.load(properties)).thenReturn(new byte[]{1});
+        when(validator.validate(eq(properties), any())).thenReturn(topology);
+        org.mockito.Mockito.doThrow(new IllegalStateException("migration failed"))
+                .when(initializer).initialize(properties, physical, topology);
+
+        var bootstrapper = new EgonColaShardingDataSourceBootstrapper(pools, loader, validator, logical, initializer);
+        assertThatThrownBy(() -> bootstrapper.createDataSource(properties)).hasMessageContaining("migration failed");
         verify(pools).close(physical.values());
         verifyNoInteractions(logical);
     }

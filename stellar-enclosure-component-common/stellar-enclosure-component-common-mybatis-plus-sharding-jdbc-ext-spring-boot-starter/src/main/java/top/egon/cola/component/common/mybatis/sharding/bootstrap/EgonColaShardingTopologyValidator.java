@@ -21,6 +21,8 @@ import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingPropertie
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.PhysicalDataSourceProperties;
 import top.egon.cola.component.common.mybatis.sharding.resolver.EgonColaShardingWriteTargetResolver;
+import top.egon.cola.component.common.mybatis.sharding.algorithm.EgonColaGroupShardAlgorithm;
+import top.egon.cola.component.common.mybatis.sharding.algorithm.EgonColaGroupShardSlots;
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyNodes;
 
 import java.nio.charset.StandardCharsets;
@@ -34,6 +36,12 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Objects;
+import java.util.Locale;
+import java.util.Arrays;
+import java.util.stream.Collectors;
 
 /**
  * Validates one typed ShardingSphere policy and materializes routing profiles.
@@ -90,14 +98,150 @@ public class EgonColaShardingTopologyValidator {
                 }
             }
         }
+        if (properties.getMode() == EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE) {
+            validateReadwrite(properties, configuration, profiles);
+        }
         if (profiles.isEmpty() && properties.getConfigStyle()
                 == EgonColaShardingProperties.ConfigStyleEnum.STRATEGY
                 && (properties.getTables() == null || properties.getTables().isEmpty())) {
             throw new EgonColaMybatisPlusConfigurationException("INVALID_TOPOLOGY");
         }
-        String fingerprint = digest("ss-policy-v1|" + profiles + '|' + schemas);
+        String fingerprint = fingerprint(profiles, schemas);
         return new TopologyBO(YamlEngine.marshal(configuration).getBytes(StandardCharsets.UTF_8),
                 profiles, schemas, broadcast, fingerprint);
+    }
+
+    /** Uses the same canonical order for the current topology and verified additive predecessors. */
+    public static String fingerprint(Map<String, EgonColaRoutingProfileBO> profiles, Map<String, String> schemas) {
+        return digest("ss-policy-v1|" + new TreeMap<>(profiles) + '|' + new TreeMap<>(schemas));
+    }
+
+    private static void validateReadwrite(EgonColaShardingProperties properties, YamlJDBCConfiguration configuration,
+                                          Map<String, EgonColaRoutingProfileBO> profiles) {
+        if (configuration.getRules() == null) {
+            throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+        }
+        if (profiles.isEmpty()) {
+            throw new EgonColaMybatisPlusConfigurationException("INVALID_TOPOLOGY");
+        }
+        Map<String, List<PhysicalDataSourceProperties>> groups = new TreeMap<>();
+        Set<String> names = new HashSet<>();
+        Map<String, String> groupNames = new HashMap<>();
+        for (PhysicalDataSourceProperties source : properties.getDataSources()) {
+            if (!names.add(source.name().toLowerCase(Locale.ROOT))) {
+                throw new EgonColaMybatisPlusConfigurationException("DUPLICATE_PHYSICAL_DATASOURCE");
+            }
+            String previousName = groupNames.putIfAbsent(source.logicalName().toLowerCase(Locale.ROOT), source.logicalName());
+            if (previousName != null && !previousName.equals(source.logicalName())) {
+                throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+            }
+            groups.computeIfAbsent(source.logicalName(), ignored -> new ArrayList<>()).add(source);
+        }
+        for (var source : properties.getDataSources()) {
+            String groupWithSameName = groupNames.get(source.name().toLowerCase(Locale.ROOT));
+            if (groupWithSameName != null && !groupWithSameName.equals(source.logicalName())) {
+                throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+            }
+        }
+        List<YamlReadwriteSplittingRuleConfiguration> rules = configuration.getRules().stream()
+                .filter(YamlReadwriteSplittingRuleConfiguration.class::isInstance)
+                .map(YamlReadwriteSplittingRuleConfiguration.class::cast).toList();
+        if (rules.size() != 1 || !rules.getFirst().getDataSourceGroups().keySet().equals(groups.keySet())) {
+            throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+        }
+        groups.forEach((name, sources) -> {
+            List<String> primaries = sources.stream().filter(source -> source.role() == DataSourceRoleEnum.PRIMARY)
+                    .map(PhysicalDataSourceProperties::name).toList();
+            List<String> replicas = sources.stream().filter(source -> source.role() == DataSourceRoleEnum.REPLICA)
+                    .map(PhysicalDataSourceProperties::name).toList();
+            var rule = rules.getFirst().getDataSourceGroups().get(name);
+            if (primaries.size() != 1 || replicas.isEmpty() || rule == null
+                    || !primaries.getFirst().equals(rule.getWriteDataSourceName())
+                    || rule.getReadDataSourceNames() == null
+                    || !new HashSet<>(replicas).equals(new HashSet<>(rule.getReadDataSourceNames()))
+                    || rule.getReadDataSourceNames().size() != replicas.size()
+                    || !"DYNAMIC".equals(rule.getTransactionalReadQueryStrategy())) {
+                throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+            }
+        });
+        profiles.values().stream().flatMap(profile -> profile.actualNodes().values().stream())
+                .flatMap(List::stream).forEach(node -> {
+                    if (!groups.containsKey(node.group())) {
+                        throw new EgonColaMybatisPlusConfigurationException("READWRITE_GROUP_MISMATCH");
+                    }
+                });
+        validateGuardAlgorithms(configuration, profiles);
+    }
+
+    private static void validateGuardAlgorithms(YamlJDBCConfiguration configuration,
+                                                Map<String, EgonColaRoutingProfileBO> profiles) {
+        for (Object rule : configuration.getRules()) {
+            if (rule instanceof YamlShardingRuleConfiguration sharding && sharding.getTables() != null) {
+                sharding.getTables().forEach((table, configured) -> {
+                    EgonColaRoutingProfileBO profile = profiles.get(table);
+                    var database = configured.getDatabaseStrategy();
+                    if (database == null || database.getStandard() == null || sharding.getShardingAlgorithms() == null) {
+                        throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                    }
+                    var algorithm = sharding.getShardingAlgorithms().get(database.getStandard().getShardingAlgorithmName());
+                    if (profile.kind() == TableKindEnum.TECHNICAL_GROUP) {
+                        if (algorithm == null || !"CLASS_BASED".equals(algorithm.getType())
+                                || !"shard_slot".equals(database.getStandard().getShardingColumn())
+                                || configured.getTableStrategy() != null
+                                || !EgonColaGroupShardAlgorithm.class.getName().equals(
+                                        algorithm.getProps().getProperty("algorithmClassName"))
+                                || !"STANDARD".equals(algorithm.getProps().getProperty("strategy"))
+                                || !EgonColaGroupShardSlots.encode(profile.tenantSlotMap()).equals(
+                                        algorithm.getProps().getProperty("slot-targets"))) {
+                            throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                        }
+                        return;
+                    }
+                    if (algorithm == null || !"CLASS_BASED".equals(algorithm.getType())
+                            || !"tenant_id".equals(database.getStandard().getShardingColumn())) {
+                        throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                    }
+                    Properties props = algorithm.getProps();
+                    String className = props.getProperty("algorithmClassName");
+                    if (profile.kind() == TableKindEnum.TENANT_LEGACY) {
+                        List<EgonColaPhysicalTargetBO> nodes = profile.actualNodes().values().stream().flatMap(List::stream).toList();
+                        List<String> order = nodes.stream().map(EgonColaPhysicalTargetBO::group).toList();
+                        if (!Objects.equals(className, "top.egon.cola.component.common.mybatis.sharding.algorithm.EgonColaStandardTenantIdShardingAlgorithm")
+                                || new HashSet<>(order).size() != order.size()
+                                || !"true".equals(props.getProperty("require-complete-targets"))
+                                || !String.join(",", order).equals(props.getProperty("target-order"))) {
+                            throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                        }
+                        if (configured.getTableStrategy() != null) {
+                            var tableStrategy = configured.getTableStrategy().getStandard();
+                            var tableAlgorithm = tableStrategy == null ? null : sharding.getShardingAlgorithms().get(tableStrategy.getShardingAlgorithmName());
+                            if (tableAlgorithm == null || !"CLASS_BASED".equals(tableAlgorithm.getType())
+                                    || !"tenant_id".equals(tableStrategy.getShardingColumn())
+                                    || !Objects.equals(className, tableAlgorithm.getProps().getProperty("algorithmClassName"))
+                                    || !String.join(",", nodes.stream().map(EgonColaPhysicalTargetBO::table).toList())
+                                            .equals(tableAlgorithm.getProps().getProperty("target-order"))) {
+                                throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                            }
+                        }
+                    } else if (profile.kind() == TableKindEnum.TENANT_ID_TWO_LEVEL) {
+                        var tableStrategy = configured.getTableStrategy().getComplex();
+                        var tableAlgorithm = tableStrategy == null ? null : sharding.getShardingAlgorithms().get(tableStrategy.getShardingAlgorithmName());
+                        if (!Objects.equals(className, "top.egon.cola.component.common.mybatis.sharding.algorithm.EgonColaLongTenantShardingAlgorithm")
+                                || !profile.equals(EgonColaShardingWriteTargetResolver.profile(props))
+                                || tableAlgorithm == null || !"CLASS_BASED".equals(tableAlgorithm.getType())
+                                || !Objects.equals(tableAlgorithm.getProps().getProperty("algorithmClassName"),
+                                        "top.egon.cola.component.common.mybatis.sharding.algorithm.EgonColaTenantBusinessComplexShardingAlgorithm")
+                                || "tenant_id".equals(profile.secondaryColumn()) || tableStrategy.getShardingColumns() == null
+                                || !Set.of("tenant_id", profile.secondaryColumn()).equals(
+                                        Arrays.stream(tableStrategy.getShardingColumns().split(","))
+                                                .map(String::trim).collect(Collectors.toSet()))
+                                || !profile.equals(EgonColaShardingWriteTargetResolver.profile(tableAlgorithm.getProps()))) {
+                            throw new EgonColaMybatisPlusConfigurationException("SHARDING_GUARD_ALGORITHM_UNSUPPORTED");
+                        }
+                    }
+                });
+            }
+        }
     }
 
     private static void addSingle(YamlSingleRuleConfiguration single, Map<String, String> schemas,
@@ -170,9 +314,26 @@ public class EgonColaShardingTopologyValidator {
                 if (nodes.isEmpty()) {
                     throw new EgonColaMybatisPlusConfigurationException("INVALID_TOPOLOGY");
                 }
-                put(profiles, new EgonColaRoutingProfileBO(table, TableKindEnum.TENANT_LEGACY, "legacy-v1",
-                        1, 1, Map.of(), null, null, EgonColaShardingStrategyNodes.SEED,
-                        Map.of(new PartitionKeyBO(0, 0), nodes), 1, null));
+                var database = configured.getDatabaseStrategy();
+                var standard = database == null ? null : database.getStandard();
+                var algorithm = standard == null || sharding.getShardingAlgorithms() == null ? null
+                        : sharding.getShardingAlgorithms().get(standard.getShardingAlgorithmName());
+                if (algorithm != null && EgonColaGroupShardAlgorithm.class.getName()
+                        .equals(algorithm.getProps().getProperty("algorithmClassName"))) {
+                    Map<Integer, String> slots = EgonColaGroupShardSlots.decode(algorithm.getProps().getProperty("slot-targets"));
+                    if (!slots.equals(EgonColaGroupShardSlots.resolve(
+                            nodes.stream().map(EgonColaPhysicalTargetBO::group).toList(), slots.get(0)))
+                            || nodes.stream().map(EgonColaPhysicalTargetBO::schema).distinct().count() != 1) {
+                        throw new EgonColaMybatisPlusConfigurationException("INVALID_TOPOLOGY");
+                    }
+                    put(profiles, new EgonColaRoutingProfileBO(table, TableKindEnum.TECHNICAL_GROUP, "group-slot-v1",
+                            1, 1, slots, null, null, EgonColaShardingStrategyNodes.SEED,
+                            Map.of(new PartitionKeyBO(0, 0), nodes), 1, null));
+                } else {
+                    put(profiles, new EgonColaRoutingProfileBO(table, TableKindEnum.TENANT_LEGACY, "legacy-v1",
+                            1, 1, Map.of(), null, null, EgonColaShardingStrategyNodes.SEED,
+                            Map.of(new PartitionKeyBO(0, 0), nodes), 1, null));
+                }
             }
         });
     }

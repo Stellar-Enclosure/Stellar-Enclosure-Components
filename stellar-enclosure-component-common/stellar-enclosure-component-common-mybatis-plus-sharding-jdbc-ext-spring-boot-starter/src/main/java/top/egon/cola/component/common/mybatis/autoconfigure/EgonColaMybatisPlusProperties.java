@@ -5,6 +5,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Pattern;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -15,6 +16,7 @@ import lombok.experimental.Accessors;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -22,6 +24,8 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.List;
+import java.util.ArrayList;
 
 /**
  * Technical policies for the Egon COLA MyBatis-Plus starter.
@@ -248,6 +252,13 @@ public class EgonColaMybatisPlusProperties {
     @Data
     @EqualsAndHashCode(callSuper = true)
     public static class Ddl extends Toggle {
+        private boolean autoMigrate;
+        @Valid
+        @NotNull
+        private List<@NotNull @Valid ManagedDdlTarget> targets = new ArrayList<>();
+        @Valid
+        @NotNull
+        private List<@NotEmpty List<@NotBlank @Pattern(regexp = "[a-z_][a-z0-9_]{0,62}") String>> previousRouteExclusions = new ArrayList<>();
         @NotNull
         private Duration lockTimeout = Duration.ofSeconds(30);
         @NotNull
@@ -258,6 +269,13 @@ public class EgonColaMybatisPlusProperties {
         public Ddl() {
             super(false);
         }
+    }
+
+    public record ManagedDdlTarget(
+            @NotBlank String logicalName,
+            @NotBlank @Pattern(regexp = "[a-z_][a-z0-9_]{0,62}") String schema,
+            @NotNull EgonColaDdlTargetBO.RoleEnum role,
+            @NotBlank String manifestResource) {
     }
 
     @Data

@@ -2,7 +2,6 @@ package top.egon.cola.component.common.mybatis.interceptor;
 
 import com.baomidou.mybatisplus.core.toolkit.PluginUtils;
 import com.baomidou.mybatisplus.extension.plugins.inner.InnerInterceptor;
-import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.ibatis.executor.statement.StatementHandler;
@@ -10,13 +9,13 @@ import org.apache.ibatis.mapping.SqlCommandType;
 import org.apache.ibatis.session.Configuration;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.datasource.ConnectionHolder;
-import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteResult;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaWriteTargetResolver;
+import top.egon.cola.component.common.mybatis.routing.EgonColaTransactionWriteTarget;
 
 import java.sql.Connection;
 import java.util.LinkedHashSet;
@@ -28,8 +27,6 @@ import java.util.Set;
 @Slf4j
 @RequiredArgsConstructor
 public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInterceptor {
-
-    private static final Object WRITE_TARGET_KEY = new Object();
 
     @Qualifier("egonColaWriteTargetResolver")
     private final EgonColaWriteTargetResolver resolver;
@@ -86,27 +83,12 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
                 if (targetCount != 1) { throw new IllegalStateException("LOCAL_TRANSACTION_REQUIRED"); }
                 return;
             }
-            WriteTargetBO previous = (WriteTargetBO) TransactionSynchronizationManager.getResource(WRITE_TARGET_KEY);
             String group = groups.iterator().next();
-            if (previous != null && (previous.factory() != factory || !previous.group().equals(group))) {
-                throw new IllegalStateException("LOCAL_WRITE_TARGET_MISMATCH");
-            }
-            Object resource = TransactionSynchronizationManager.getResource(factory.getEnvironment().getDataSource());
-            if (!(resource instanceof ConnectionHolder holder) || !TransactionSynchronizationManager.isSynchronizationActive()) {
+            var target = EgonColaTransactionWriteTarget.capture(factory.getEnvironment().getDataSource());
+            if (target == null) {
                 throw new IllegalStateException("LOCAL_TRANSACTION_RESOURCE_MISSING");
             }
-            if (previous == null) {
-                WriteTargetBO state = new WriteTargetBO(factory, group, holder);
-                TransactionSynchronizationManager.bindResource(WRITE_TARGET_KEY, state);
-                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                    @Override
-                    public void suspend() { TransactionSynchronizationManager.unbindResourceIfPossible(WRITE_TARGET_KEY); }
-                    @Override
-                    public void resume() { TransactionSynchronizationManager.bindResource(WRITE_TARGET_KEY, state); }
-                    @Override
-                    public void afterCompletion(int status) { TransactionSynchronizationManager.unbindResourceIfPossible(WRITE_TARGET_KEY); }
-                });
-            }
+            target.pin(group, factory);
         } catch (RuntimeException failure) {
             markRollbackOnly(factory);
             throw failure;
@@ -114,13 +96,7 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
     }
 
     private static void markRollbackOnly(Configuration factory) {
-        Object previous = TransactionSynchronizationManager.getResource(WRITE_TARGET_KEY);
-        if (previous instanceof WriteTargetBO state) { state.holder().setRollbackOnly(); }
-        if (factory.getEnvironment() != null) {
-            Object resource = TransactionSynchronizationManager.getResource(factory.getEnvironment().getDataSource());
-            if (resource instanceof ConnectionHolder holder) { holder.setRollbackOnly(); }
-        }
+        EgonColaTransactionWriteTarget.markRollbackOnly(
+                factory.getEnvironment() == null ? null : factory.getEnvironment().getDataSource());
     }
-
-    private record WriteTargetBO(@NotNull Configuration factory, @NotNull String group, @NotNull ConnectionHolder holder) {}
 }

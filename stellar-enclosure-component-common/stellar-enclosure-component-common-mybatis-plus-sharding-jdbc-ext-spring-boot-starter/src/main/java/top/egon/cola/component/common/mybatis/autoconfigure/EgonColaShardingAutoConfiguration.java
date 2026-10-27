@@ -10,8 +10,11 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.io.ResourceLoader;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.common.mybatis.exception.EgonColaMybatisPlusConfigurationException;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaManagedDdlInitializer;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaPostgreDdlRunner;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy;
 import top.egon.cola.component.common.mybatis.routing.EgonColaWriteTargetResolver;
@@ -30,6 +33,7 @@ import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaSharding
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyFactory;
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaSingleTableShardingStrategy;
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaStandardTenantIdShardingStrategy;
+import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaTechnicalGroupShardingStrategy;
 
 import javax.sql.DataSource;
 import java.time.Clock;
@@ -48,6 +52,7 @@ import java.util.Map;
         EgonColaBroadcastReadOnlyShardingStrategy.class,
         EgonColaStandardTenantIdShardingStrategy.class,
         EgonColaComplexTenantThenBusinessShardingStrategy.class,
+        EgonColaTechnicalGroupShardingStrategy.class,
         EgonColaNativeYamlShardingStrategy.class,
         EgonColaShardingStrategyFactory.class,
         EgonColaPhysicalDataSourceFactory.class,
@@ -83,8 +88,10 @@ public class EgonColaShardingAutoConfiguration {
             @Qualifier("egonColaPhysicalDataSourceFactory") EgonColaPhysicalDataSourceFactory pools,
             @Qualifier("egonColaShardingYamlLoader") EgonColaShardingYamlLoader yamlLoader,
             @Qualifier("egonColaShardingTopologyValidator") EgonColaShardingTopologyValidator validator,
-            @Qualifier("egonColaShardingLogicalDataSourceFactory") LogicalDataSourceFactory logical) {
-        return new EgonColaShardingDataSourceBootstrapper(pools, yamlLoader, validator, logical);
+            @Qualifier("egonColaShardingLogicalDataSourceFactory") LogicalDataSourceFactory logical,
+            EgonColaMybatisPlusProperties properties, EgonColaPostgreDdlRunner runner, ResourceLoader resources) {
+        var initializer = new EgonColaManagedDdlInitializer(properties.getDdl(), runner, resources);
+        return new EgonColaShardingDataSourceBootstrapper(pools, yamlLoader, validator, logical, initializer);
     }
 
     @Bean("dataSource")

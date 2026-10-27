@@ -160,17 +160,24 @@ public class EgonColaShardingProperties {
             String shardingColumn,
             List<String> tableColumns,
             String rootKeyName,
-            @Pattern(regexp = "[a-z_][a-z0-9_]{0,62}") String schema) {
+            @Pattern(regexp = "[a-z_][a-z0-9_]{0,62}") String schema,
+            List<@NotBlank @Pattern(regexp = "[a-zA-Z_][a-zA-Z0-9_-]*") String> shardGroups) {
 
         public TableProperties(String type, String dataSource, String shardingColumn,
                                List<String> tableColumns, String rootKeyName) {
-            this(type, dataSource, shardingColumn, tableColumns, rootKeyName, "public");
+            this(type, dataSource, shardingColumn, tableColumns, rootKeyName, "public", null);
+        }
+
+        public TableProperties(String type, String dataSource, String shardingColumn,
+                               List<String> tableColumns, String rootKeyName, String schema) {
+            this(type, dataSource, shardingColumn, tableColumns, rootKeyName, schema, null);
         }
 
         @ConstructorBinding
         public TableProperties {
             schema = schema == null ? "public" : schema;
             tableColumns = tableColumns == null ? null : List.copyOf(tableColumns);
+            shardGroups = shardGroups == null ? null : List.copyOf(shardGroups);
         }
     }
 }

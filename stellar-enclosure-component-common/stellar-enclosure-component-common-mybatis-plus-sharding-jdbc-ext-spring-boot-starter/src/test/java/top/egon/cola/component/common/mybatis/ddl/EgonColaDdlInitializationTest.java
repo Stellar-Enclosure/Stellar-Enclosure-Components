@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -60,6 +61,8 @@ class EgonColaDdlInitializationTest {
         order.verify(jdbc.sql()).execute(contains("CREATE TABLE IF NOT EXISTS ddl_history"));
         order.verify(jdbc.historyInsert()).executeUpdate();
         order.verify(jdbc.connection()).commit();
+        verify(jdbc.connection()).prepareStatement("SELECT set_config('search_path', ?, true)");
+        verify(jdbc.connection(), never()).setSchema(anyString());
         verify(jdbc.connection(), never()).rollback();
         assertThat(jdbc.committed().get()).hasSize(1);
         assertThat(runner().run(List.of(target))).singleElement()
@@ -134,6 +137,39 @@ class EgonColaDdlInitializationTest {
         EgonColaDdlTargetBO altered = new EgonColaDdlTargetBO("primary", "public", EgonColaDdlTargetBO.RoleEnum.SHARD,
                 jdbc.source(), manifest(1), "b".repeat(64));
         assertThatThrownBy(() -> runner().run(List.of(altered))).hasMessageContaining("ROUTE_FINGERPRINT_MISMATCH");
+        verify(jdbc.sql(), never()).execute(anyString());
+    }
+
+    @Test
+    void acceptsVerifiedAdditiveRouteTransitionOnlyWithANewMigrationVersion() throws Exception {
+        JdbcFixtureBO jdbc = fixture(List.of(manifest(1).scripts().getFirst()), false);
+        var target = new EgonColaDdlTargetBO("primary", "public", EgonColaDdlTargetBO.RoleEnum.SHARD,
+                jdbc.source(), manifest(2), "b".repeat(64), Set.of(ROUTE));
+
+        assertThat(runner().run(List.of(target))).extracting(EgonColaDdlResult::status)
+                .containsExactly(EgonColaDdlResult.StatusEnum.SKIPPED, EgonColaDdlResult.StatusEnum.APPLIED);
+        assertThat(runner().run(List.of(target))).extracting(EgonColaDdlResult::status)
+                .containsExactly(EgonColaDdlResult.StatusEnum.SKIPPED, EgonColaDdlResult.StatusEnum.SKIPPED);
+    }
+
+    @Test
+    void rejectsCompatibleOldFingerprintWhenNoMigrationRecordsTheNewRoute() throws Exception {
+        JdbcFixtureBO jdbc = fixture(List.of(manifest(1).scripts().getFirst()), false);
+        var target = new EgonColaDdlTargetBO("primary", "public", EgonColaDdlTargetBO.RoleEnum.SHARD,
+                jdbc.source(), manifest(1), "b".repeat(64), Set.of(ROUTE));
+
+        assertThatThrownBy(() -> runner().run(List.of(target)))
+                .hasMessageContaining("ROUTE_FINGERPRINT_MIGRATION_REQUIRED");
+        verify(jdbc.sql(), never()).execute(anyString());
+    }
+
+    @Test
+    void rejectsAnUnrelatedOldFingerprintEvenWhenAnAdditivePredecessorIsConfigured() throws Exception {
+        JdbcFixtureBO jdbc = fixture(List.of(manifest(1).scripts().getFirst()), false);
+        var target = new EgonColaDdlTargetBO("primary", "public", EgonColaDdlTargetBO.RoleEnum.SHARD,
+                jdbc.source(), manifest(2), "b".repeat(64), Set.of("c".repeat(64)));
+
+        assertThatThrownBy(() -> runner().run(List.of(target))).hasMessageContaining("ROUTE_FINGERPRINT_MISMATCH");
         verify(jdbc.sql(), never()).execute(anyString());
     }
 
@@ -250,6 +286,7 @@ class EgonColaDdlInitializationTest {
         AtomicReference<List<ScriptBO>> committed = new AtomicReference<>(List.copyOf(installed));
         List<ScriptBO> pending = new ArrayList<>(installed);
         Map<Integer, String> parameters = new HashMap<>();
+        Map<String, String> routes = new HashMap<>();
         when(source.getConnection()).thenReturn(connection);
         when(connection.getAutoCommit()).thenReturn(true);
         when(connection.getMetaData()).thenReturn(metadata);
@@ -289,7 +326,7 @@ class EgonColaDdlInitializationTest {
                             case 2 -> "SQL";
                             case 3 -> script.version();
                             case 4 -> script.sha256();
-                            case 5 -> ROUTE;
+                            case 5 -> routes.getOrDefault(script.version(), ROUTE);
                             default -> throw new IllegalArgumentException();
                         };
                     });
@@ -302,6 +339,7 @@ class EgonColaDdlInitializationTest {
                 .when(insert).setString(anyInt(), anyString());
         when(insert.executeUpdate()).thenAnswer(call -> {
             pending.add(new ScriptBO(parameters.get(3), parameters.get(1), parameters.get(4)));
+            routes.put(parameters.get(3), parameters.get(6));
             return 1;
         });
         doAnswer(call -> { committed.set(List.copyOf(pending)); return null; }).when(connection).commit();

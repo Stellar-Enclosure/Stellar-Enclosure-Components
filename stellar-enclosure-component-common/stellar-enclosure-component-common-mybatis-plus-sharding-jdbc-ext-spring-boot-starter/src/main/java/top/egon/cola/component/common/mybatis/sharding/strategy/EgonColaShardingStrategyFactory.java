@@ -43,8 +43,14 @@ public class EgonColaShardingStrategyFactory {
         EgonColaShardingStrategy strategy = create(type);
         if (table != null) {
             validationUtils.validate(table);
-            if (!EgonColaSingleTableShardingStrategy.TYPE.equals(type) && !"public".equals(table.schema())) {
+            if (!EgonColaSingleTableShardingStrategy.TYPE.equals(type) && !"TECHNICAL_GROUP".equals(type)
+                    && !"public".equals(table.schema())) {
                 throw new EgonColaMybatisPlusConfigurationException("SCHEMA_OVERRIDE_REQUIRES_SINGLE");
+            }
+            if (table.shardGroups() != null && !table.shardGroups().isEmpty()
+                    && !"STANDARD_TENANT_ID".equals(type) && !"COMPLEX_TENANT_THEN_BUSINESS".equals(type)
+                    && !"TECHNICAL_GROUP".equals(type)) {
+                throw new EgonColaMybatisPlusConfigurationException("SHARDING_GROUP_INVALID");
             }
             strategy.validateTable(table);
         }

@@ -123,6 +123,7 @@ public final class EgonColaPostgreDdlRunner {
             connection.setAutoCommit(false);
             String path = "validation";
             try {
+                configureSchema(connection, target);
                 validatePrimary(connection, target);
                 configureAndLock(connection, target);
                 InstalledPrefixBO prefix = installedPrefix(connection, target);
@@ -192,6 +193,17 @@ public final class EgonColaPostgreDdlRunner {
         }
     }
 
+    private void configureSchema(Connection connection, EgonColaDdlTargetBO target) throws SQLException {
+        if (!"PostgreSQL".equals(connection.getMetaData().getDatabaseProductName())) {
+            throw new IllegalStateException("POSTGRESQL_REQUIRED");
+        }
+        try (PreparedStatement statement = connection.prepareStatement("SELECT set_config('search_path', ?, true)")) {
+            statement.setString(1, '"' + target.schema() + "\",pg_catalog");
+            statement.setQueryTimeout((int) Math.max(1, statementTimeout.toSeconds()));
+            statement.execute();
+        }
+    }
+
     private void configureAndLock(Connection connection, EgonColaDdlTargetBO target) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("SELECT set_config('lock_timeout', ?, true), set_config('statement_timeout', ?, true), " + "set_config('egon_migration.role', ?, true), set_config('search_path', ?, true)")) {
             statement.setString(1, lockTimeout.toMillis() + "ms");
@@ -225,6 +237,7 @@ public final class EgonColaPostgreDdlRunner {
         }
         int count = 0;
         int start = -1;
+        String latestFingerprint = null;
         try (PreparedStatement statement = connection.prepareStatement("SELECT script,type,version,checksum,route_fingerprint,tenant_id FROM " + target.getDdlGenerator().getDdlHistory() + " ORDER BY version")) {
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
@@ -242,15 +255,21 @@ public final class EgonColaPostgreDdlRunner {
                     if (!script.sha256().equals(rows.getString(4))) {
                         throw new IllegalStateException("CHECKSUM_MISMATCH");
                     }
-                    if (!target.routeFingerprint().equals(rows.getString(5))) {
+                    String recordedFingerprint = rows.getString(5);
+                    if (!target.routeFingerprint().equals(recordedFingerprint)
+                            && !target.compatibleRouteFingerprints().contains(recordedFingerprint)) {
                         throw new IllegalStateException("ROUTE_FINGERPRINT_MISMATCH");
                     }
+                    latestFingerprint = recordedFingerprint;
                     count++;
                 }
             }
         }
         if (start == -1) {
             throw new IllegalStateException("REBUILD_REQUIRED: unmanaged empty ddl_history");
+        }
+        if (!target.routeFingerprint().equals(latestFingerprint) && count >= target.manifest().scripts().size()) {
+            throw new IllegalStateException("ROUTE_FINGERPRINT_MIGRATION_REQUIRED");
         }
         return new InstalledPrefixBO(start, count);
     }
@@ -275,6 +294,7 @@ public final class EgonColaPostgreDdlRunner {
         try (Connection confirmation = target.dataSource().getConnection()) {
             confirmation.setAutoCommit(false);
             try {
+                configureSchema(confirmation, target);
                 validatePrimary(confirmation, target);
                 configureAndLock(confirmation, target);
                 return installedPrefix(confirmation, target).installed() > index;

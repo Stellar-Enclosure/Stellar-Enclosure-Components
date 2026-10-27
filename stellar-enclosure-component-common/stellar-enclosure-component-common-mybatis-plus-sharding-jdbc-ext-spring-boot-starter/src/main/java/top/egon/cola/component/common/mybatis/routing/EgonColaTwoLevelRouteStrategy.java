@@ -58,6 +58,7 @@ public final class EgonColaTwoLevelRouteStrategy {
                 targets.addAll(profile.actualNodes().get(new PartitionKeyBO(0, 0)));
             }
             case TENANT_LEGACY -> throw new IllegalArgumentException("TENANT_LEGACY requires the existing ShardingNodeMap adapter");
+            case TECHNICAL_GROUP -> throw new IllegalArgumentException("TECHNICAL_SHARD_SLOT_REQUIRED");
             case TENANT_ID_TWO_LEVEL -> {
                 if (query.operation() == OperationEnum.COMMAND
                         && (query.rangeRequested() || query.secondaryValues().isEmpty())) {

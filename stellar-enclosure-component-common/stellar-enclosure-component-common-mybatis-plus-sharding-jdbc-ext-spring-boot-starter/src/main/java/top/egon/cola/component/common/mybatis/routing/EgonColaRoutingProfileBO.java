@@ -109,6 +109,16 @@ public record EgonColaRoutingProfileBO(
                     }
                 }
             }
+            if (kind == TableKindEnum.TECHNICAL_GROUP) {
+                List<EgonColaPhysicalTargetBO> nodes = actualNodes.get(new PartitionKeyBO(0, 0));
+                if (actualNodes.size() != 1 || nodes == null || !tenantSlotMap.containsKey(0)
+                        || nodes.size() != tenantSlotMap.size()
+                        || !new HashSet<>(tenantSlotMap.values()).equals(nodes.stream()
+                                .map(EgonColaPhysicalTargetBO::group).collect(java.util.stream.Collectors.toSet()))
+                        || nodes.stream().anyMatch(node -> !logicalTable.equals(node.table()))) {
+                    throw new IllegalArgumentException("Invalid technical shard topology");
+                }
+            }
         }
     }
 
@@ -122,7 +132,8 @@ public record EgonColaRoutingProfileBO(
         SINGLE(0, "SINGLE"),
         BROADCAST_READ_ONLY(1, "BROADCAST_READ_ONLY"),
         TENANT_LEGACY(2, "TENANT_LEGACY"),
-        TENANT_ID_TWO_LEVEL(3, "TENANT_ID_TWO_LEVEL");
+        TENANT_ID_TWO_LEVEL(3, "TENANT_ID_TWO_LEVEL"),
+        TECHNICAL_GROUP(4, "TECHNICAL_GROUP");
 
         private final int code;
         private final String message;

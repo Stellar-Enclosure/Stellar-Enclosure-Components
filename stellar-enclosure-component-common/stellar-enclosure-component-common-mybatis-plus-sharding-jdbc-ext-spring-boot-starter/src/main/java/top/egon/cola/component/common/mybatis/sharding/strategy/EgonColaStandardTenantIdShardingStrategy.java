@@ -56,21 +56,22 @@ public class EgonColaStandardTenantIdShardingStrategy implements EgonColaShardin
                 + "    tableStrategy:\n      standard:\n        shardingColumn: tenant_id\n"
                 + "        shardingAlgorithmName: " + logicalTable + "_table\n"
                 + "shardingAlgorithms:\n"
-                + standardAlgorithm(logicalTable + "_database", databaseTargets)
-                + standardAlgorithm(logicalTable + "_table", tableTargets);
+                + standardAlgorithm(logicalTable + "_database", databaseTargets, true)
+                + standardAlgorithm(logicalTable + "_table", tableTargets, false);
     }
 
-    private static String standardAlgorithm(String name, List<String> targetOrder) {
+    private static String standardAlgorithm(String name, List<String> targetOrder, boolean requireComplete) {
         return "  " + name + ":\n    type: CLASS_BASED\n    props:\n"
                 + "      strategy: STANDARD\n      algorithmClassName: " + ALGORITHM + "\n"
-                + "      target-order: " + String.join(",", targetOrder) + "\n";
+                + "      target-order: " + String.join(",", targetOrder) + "\n"
+                + "      require-complete-targets: " + requireComplete + "\n";
     }
 
     @Override
     public EgonColaRoutingProfileBO toRoutingProfile(String logicalTable, TableProperties table,
                                                      List<PhysicalDataSourceProperties> dataSources) {
         validateTable(table);
-        List<String> groups = EgonColaShardingStrategyNodes.primaryGroups(dataSources);
+        List<String> groups = EgonColaShardingStrategyNodes.primaryGroups(dataSources, table);
         if (groups.isEmpty()) {
             throw new EgonColaMybatisPlusConfigurationException("BROADCAST_PRIMARY_REQUIRED");
         }

@@ -67,7 +67,7 @@ class EgonColaContractGovernanceTest {
             entry(EgonColaDdlTargetBO.RoleEnum.class, "MASTER_DATA", "SHARD"),
             entry(EgonColaRouteQuery.OperationEnum.class, "QUERY", "COMMAND", "ROUTE_CANDIDATES"),
             entry(EgonColaRoutingProfileBO.TableKindEnum.class,
-                    "SINGLE", "BROADCAST_READ_ONLY", "TENANT_LEGACY", "TENANT_ID_TWO_LEVEL"),
+                    "SINGLE", "BROADCAST_READ_ONLY", "TENANT_LEGACY", "TENANT_ID_TWO_LEVEL", "TECHNICAL_GROUP"),
             entry(EgonColaShardingProperties.ModeEnum.class, "SHARDING", "SHARDING_READWRITE"),
             entry(EgonColaShardingProperties.ConfigStyleEnum.class, "STRATEGY", "NATIVE"),
             entry(EgonColaShardingProperties.DataSourceRoleEnum.class, "PRIMARY", "REPLICA"),
