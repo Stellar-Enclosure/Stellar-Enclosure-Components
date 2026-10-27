@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -302,6 +303,112 @@ class EgonColaCacheAnnotationTest {
     }
 
     @Test
+    void transactionDoesNotRepopulateAKeyInvalidatedEarlierInTheSameTransaction() {
+        Cache users = manager.getCache("users");
+        users.put("41:user:alice", "old");
+        TransactionTemplate transaction = new TransactionTemplate(new LocalTransactionManager());
+        transaction.executeWithoutResult(status -> {
+            users.evict("41:user:alice");
+            users.put("41:user:alice", "stale-replica-read");
+        });
+        assertThat(users.get("41:user:alice")).isNull();
+    }
+
+    @Test
+    void outerTransactionDoesNotRepopulateAKeyEvictedByCommittedInnerTransaction() {
+        Cache users = manager.getCache("users");
+        var transactionManager = new LocalTransactionManager();
+        var outer = new TransactionTemplate(transactionManager);
+        var inner = new TransactionTemplate(transactionManager);
+        inner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        outer.executeWithoutResult(status -> {
+            users.put("41:user:alice", "stale-replica-read");
+            inner.executeWithoutResult(innerStatus -> users.evict("41:user:alice"));
+        });
+
+        assertThat(users.get("41:user:alice")).isNull();
+    }
+
+    @Test
+    void invalidationDuringATransactionalReadPreventsStaleCachePublication() {
+        Cache users = manager.getCache("users");
+        var transactionManager = new LocalTransactionManager();
+        var outer = new TransactionTemplate(transactionManager);
+        var inner = new TransactionTemplate(transactionManager);
+        inner.setPropagationBehavior(org.springframework.transaction.TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        outer.executeWithoutResult(status -> {
+            assertThat(users.get("41:user:alice")).isNull();
+            inner.executeWithoutResult(innerStatus -> users.evict("41:user:alice"));
+            users.put("41:user:alice", "stale-replica-read");
+        });
+        assertThat(users.get("41:user:alice")).isNull();
+
+        outer.executeWithoutResult(status -> assertThat(users.get("41:user:bob", () -> {
+            inner.executeWithoutResult(innerStatus -> users.evict("41:user:bob"));
+            return "stale-replica-read";
+        })).isEqualTo("stale-replica-read"));
+        assertThat(users.get("41:user:bob")).isNull();
+    }
+
+    @Test
+    void concurrentEvictionCannotBeOverwrittenByAnEarlierTransactionLoad() throws Exception {
+        Cache users = manager.getCache("users");
+        RMapCache<String, Object> l2 = manager.l2("users");
+        String key = "41:user:alice";
+        String region = properties.getKeyPrefix() + ":users";
+        CountDownLatch writeStarted = new CountDownLatch(1);
+        CountDownLatch allowWrite = new CountDownLatch(1);
+        CountDownLatch evictionStarted = new CountDownLatch(1);
+        CountDownLatch removeEntered = new CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(call -> {
+            writeStarted.countDown();
+            if (!allowWrite.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("write was not released");
+            }
+            data.get(region).put(key, call.getArgument(1));
+            ttls.put(region + ":" + key, call.getArgument(2));
+            return true;
+        }).when(l2).fastPut(org.mockito.ArgumentMatchers.eq(key), any(), anyLong(), any());
+        org.mockito.Mockito.doAnswer(call -> {
+            removeEntered.countDown();
+            return data.get(region).remove(key) == null ? 0L : 1L;
+        }).when(l2).fastRemove(any(String[].class));
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> write = executor.submit(() -> {
+                MDC.put("tenantId", "41");
+                try {
+                    new TransactionTemplate(new LocalTransactionManager()).executeWithoutResult(status ->
+                            users.put(key, "stale-replica-read"));
+                } finally {
+                    MDC.clear();
+                }
+            });
+            assertThat(writeStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<?> eviction = executor.submit(() -> {
+                MDC.put("tenantId", "41");
+                try {
+                    evictionStarted.countDown();
+                    users.evict(key);
+                } finally {
+                    MDC.clear();
+                }
+            });
+            assertThat(evictionStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            removeEntered.await(200, TimeUnit.MILLISECONDS);
+            allowWrite.countDown();
+            write.get(5, TimeUnit.SECONDS);
+            eviction.get(5, TimeUnit.SECONDS);
+            assertThat(users.get(key)).isNull();
+        } finally {
+            allowWrite.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void l2HitBackfillsL1OnlyWhenRemainingLifetimeIsKnown() {
         Cache users = manager.getCache("users");
         users.put("41:user:carol", "shared");
@@ -309,19 +416,118 @@ class EgonColaCacheAnnotationTest {
         when(l2.remainTimeToLive("41:user:carol")).thenReturn(-1L);
         manager.applyRemotePut("users", List.of("41:user:carol"));
 
-        AtomicInteger loads = new AtomicInteger();
-        Object hit = users.get("41:user:carol", () -> {
-            loads.incrementAndGet();
-            return null;
-        });
-        assertThat(hit).isEqualTo("shared");
-        assertThat(loads).hasValue(0);
+        assertThat(users.get("41:user:carol")).isNull();
         assertThat(l1Peek(users, "41:user:carol")).isNull();
 
         when(l2.remainTimeToLive("41:user:carol")).thenReturn(60000L);
         Object refilled = users.get("41:user:carol", () -> null);
         assertThat(refilled).isEqualTo("shared");
         assertThat(l1Peek(users, "41:user:carol")).isNotNull();
+    }
+
+    @Test
+    void remoteInvalidationDuringL2LookupDoesNotRefillStaleL1() {
+        Cache users = manager.getCache("users");
+        users.put("41:user:carol", "old");
+        manager.applyRemotePut("users", List.of("41:user:carol"));
+        RMapCache<String, Object> l2 = manager.l2("users");
+        when(l2.remainTimeToLive("41:user:carol")).thenAnswer(call -> {
+            manager.applyRemotePut("users", List.of("41:user:carol"));
+            return 60000L;
+        });
+
+        assertThat(users.get("41:user:carol")).isNull();
+        assertThat(l1Peek(users, "41:user:carol")).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void mutatingInputOrReturnedValuesDoesNotChangeTheL1Snapshot() {
+        Cache users = manager.getCache("users");
+        var value = new LinkedHashMap<String, Object>();
+        value.put("name", "old");
+        value.put("nested", new LinkedHashMap<>(Map.of("state", "old")));
+        users.put("41:user:alice", value);
+        value.put("name", "mutated-input");
+        ((Map<String, Object>) value.get("nested")).put("state", "mutated-input");
+
+        Map<String, Object> first = (Map<String, Object>) users.get("41:user:alice").get();
+        assertThat(first).containsEntry("name", "old");
+        assertThat((Map<String, Object>) first.get("nested")).containsEntry("state", "old");
+        first.put("name", "mutated-return");
+        ((Map<String, Object>) first.get("nested")).put("state", "mutated-return");
+        Map<String, Object> second = (Map<String, Object>) users.get("41:user:alice").get();
+        assertThat(second).containsEntry("name", "old");
+        assertThat((Map<String, Object>) second.get("nested")).containsEntry("state", "old");
+    }
+
+    @Test
+    void mutableEntitySnapshotPreservesInheritedFieldsAndIsIsolated() {
+        Cache users = manager.getCache("users");
+        MutableEntity original = new MutableEntity();
+        original.setId(7L);
+        original.setCreatedAt(java.time.Instant.parse("2026-01-01T00:00:00Z"));
+        original.setName("old");
+        users.put("41:user:alice", original);
+        original.setName("changed");
+
+        MutableEntity first = users.get("41:user:alice", MutableEntity.class);
+        assertThat(first.getId()).isEqualTo(7L);
+        assertThat(first.getCreatedAt()).isEqualTo(java.time.Instant.parse("2026-01-01T00:00:00Z"));
+        assertThat(first.getName()).isEqualTo("old");
+        first.setName("modified-return");
+        assertThat(users.get("41:user:alice", MutableEntity.class).getName()).isEqualTo("old");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void concurrentCacheMissesDoNotShareTheMutableLoaderResult() throws Exception {
+        Cache users = manager.getCache("users");
+        CountDownLatch loaderStarted = new CountDownLatch(1);
+        CountDownLatch releaseLoader = new CountDownLatch(1);
+        AtomicInteger loads = new AtomicInteger();
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<Map<String, Object>> request = () -> {
+                MDC.put("tenantId", "41");
+                try {
+                    return users.get("41:user:alice", () -> {
+                        loads.incrementAndGet();
+                        loaderStarted.countDown();
+                        if (!releaseLoader.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("loader was not released");
+                        }
+                        Map<String, Object> loaded = new LinkedHashMap<>();
+                        loaded.put("name", "old");
+                        return loaded;
+                    });
+                } finally {
+                    MDC.clear();
+                }
+            };
+            Future<Map<String, Object>> firstFuture = executor.submit(request);
+            assertThat(loaderStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Map<String, Object>> secondFuture = executor.submit(request);
+            releaseLoader.countDown();
+            Map<String, Object> first = firstFuture.get(5, TimeUnit.SECONDS);
+            Map<String, Object> second = secondFuture.get(5, TimeUnit.SECONDS);
+            assertThat(loads).hasValue(1);
+            assertThat(first).isNotSameAs(second);
+            first.put("name", "changed");
+            assertThat(second).containsEntry("name", "old");
+            assertThat((Map<String, Object>) users.get("41:user:alice").get()).containsEntry("name", "old");
+        } finally {
+            releaseLoader.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void uncopyableValueInvalidatesOldEntryInsteadOfCachingASharedReference() {
+        Cache users = manager.getCache("users");
+        users.put("41:user:alice", "old");
+        users.put("41:user:alice", new Object());
+        assertThat(users.get("41:user:alice")).isNull();
     }
 
     private static Object l1Peek(Cache cache, String key) {
@@ -416,6 +622,21 @@ class EgonColaCacheAnnotationTest {
             calls.incrementAndGet();
             return "missing".equals(name) ? null : name;
         }
+    }
+
+    public static class EntityBase {
+        private Long id;
+        private java.time.Instant createdAt;
+        public Long getId() { return id; }
+        public void setId(Long id) { this.id = id; }
+        public java.time.Instant getCreatedAt() { return createdAt; }
+        public void setCreatedAt(java.time.Instant createdAt) { this.createdAt = createdAt; }
+    }
+
+    public static class MutableEntity extends EntityBase {
+        private String name;
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
     }
 
     static class LocalTransactionManager extends AbstractPlatformTransactionManager {

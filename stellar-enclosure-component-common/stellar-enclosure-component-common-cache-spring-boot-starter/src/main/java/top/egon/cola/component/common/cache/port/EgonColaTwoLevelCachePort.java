@@ -8,6 +8,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import top.egon.cola.component.common.cache.autoconfigure.EgonColaCacheProperties;
 import top.egon.cola.component.common.cache.core.EgonColaTwoLevelCacheManager;
+import top.egon.cola.component.common.cache.core.EgonColaCacheTransactionState;
 import top.egon.cola.component.common.cache.event.EgonColaCacheChangedEvent.KeyGuard;
 import top.egon.cola.component.common.core.cache.EgonColaCachePort;
 
@@ -27,7 +28,7 @@ import static top.egon.cola.component.common.cache.event.EgonColaCacheChangedOpe
 import static top.egon.cola.component.common.cache.event.EgonColaCacheChangedOperation.PREFIX_EVICT;
 
 /**
- * {@link EgonColaCachePort} 的两级缓存实现：读侧复用内核互斥回源，写侧以线程内
+ * {@link EgonColaCachePort} 的两级缓存实现：读侧复用内核互斥回源，写侧以事务内
  * {@link EvictionBuffer} 缓冲、事务 afterCommit 后执行"本地双级失效 + 通用事件发布 +
  * 延迟第二拍重放"。登记期守卫（区域名/键形状/租户段）fail-fast，先于任何缓存交互；
  * 提交后任何缓存故障只记日志不上抛（REQ-025）。
@@ -39,7 +40,7 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
     private final EgonColaTwoLevelCacheManager manager;
     private final EgonColaCacheProperties properties;
 
-    private final ThreadLocal<EvictionBuffer> buffers = ThreadLocal.withInitial(EvictionBuffer::new);
+    private final Object bufferResourceKey = new Object();
 
     @Override
     public Object get(String cacheName, String key, Supplier<Object> loader) {
@@ -92,17 +93,31 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
                 requireTenantSegment(glob, tenant);
             }
         }
-        EvictionBuffer buffer = buffers.get();
-        boolean needsSynchronization = buffer.offer(cacheName, exactKeys, globPatterns);
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            if (needsSynchronization) {
-                TransactionSynchronizationManager
-                        .registerSynchronization(new EvictionSynchronization(buffer));
-            }
-        } else {
+        boolean active = TransactionSynchronizationManager.isActualTransactionActive();
+        if (active && !TransactionSynchronizationManager.isSynchronizationActive()) {
+            throw new IllegalStateException("CACHE_TRANSACTION_SYNCHRONIZATION_REQUIRED");
+        }
+        EgonColaCacheTransactionState.mark(cacheName,
+                exactKeys == null ? List.of() : exactKeys, globPatterns == null ? List.of() : globPatterns);
+        if (!active) {
+            EvictionBuffer buffer = new EvictionBuffer();
+            buffer.offer(cacheName, tenant, exactKeys, globPatterns);
             log.warn("no transaction context; immediate eviction applied region={}", cacheName);
             flushEvictions(buffer.drain());
+            return;
         }
+        EvictionBuffer buffer = (EvictionBuffer) TransactionSynchronizationManager.getResource(bufferResourceKey);
+        if (buffer == null) {
+            buffer = new EvictionBuffer();
+            TransactionSynchronizationManager.bindResource(bufferResourceKey, buffer);
+            try {
+                TransactionSynchronizationManager.registerSynchronization(new EvictionSynchronization(buffer));
+            } catch (RuntimeException failure) {
+                TransactionSynchronizationManager.unbindResourceIfPossible(bufferResourceKey);
+                throw failure;
+            }
+        }
+        buffer.offer(cacheName, tenant, exactKeys, globPatterns);
     }
 
     private long currentTenantOrThrow() {
@@ -141,12 +156,12 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
         }
     }
 
-    /** afterCommit 语义：先主拍（本地双级失效 + 发布），再排延迟第二拍（仅本地、不再发布）。 */
+    /** afterCommit 语义：先失效并发布，再延迟执行第二次跨节点失效。 */
     private void flushEvictions(List<EvictionBuffer.Pending> items) {
         for (EvictionBuffer.Pending item : items) {
             try {
                 applyLocallyAndPublish(item);
-                manager.scheduler().schedule(() -> replayLocally(item),
+                manager.scheduler().schedule(() -> replayAndPublish(item),
                         properties.getSecondEvictDelay().toMillis(), TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException ex) {
                 log.warn("CACHE_L2_OPERATION_FAILED region={} op=SCHEDULER reason=scheduler-closed",
@@ -168,26 +183,24 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
         }
     }
 
-    private void replayLocally(EvictionBuffer.Pending item) {
+    private void replayAndPublish(EvictionBuffer.Pending item) {
         try {
-            if (!item.exactKeys().isEmpty()) {
-                manager.applyLocalEviction(item.cacheName(), item.exactKeys());
-            }
-            for (String glob : item.globs()) {
-                manager.applyLocalPrefixEviction(item.cacheName(), glob);
-            }
+            applyLocallyAndPublish(item);
         } catch (Exception ex) {
             log.warn("CACHE_L2_OPERATION_FAILED region={} op=REPLAY", item.cacheName(), ex);
         }
     }
 
     /**
-     * 线程内失效登记缓冲（Buffer 模式，镜像既有 after-commit 先例）：同区域合并去重保序，
+     * 事务内失效登记缓冲：按区域和租户合并去重，保证单个事件只包含一个租户的键。
      * 每事务窗口只挂一根同步器；回滚经 afterCompletion 丢弃，杜绝脏键泄漏到下次提交。
      */
     static final class EvictionBuffer {
 
         record Pending(String cacheName, List<String> exactKeys, List<String> globs) {
+        }
+
+        private record RegionTenant(String cacheName, long tenant) {
         }
 
         private static final class RegionBatch {
@@ -196,31 +209,23 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
             private final LinkedHashSet<String> globs = new LinkedHashSet<>();
         }
 
-        private final Map<String, RegionBatch> regions = new LinkedHashMap<>();
-        private boolean synchronizationRegistered;
-
-        synchronized boolean offer(String cacheName, Collection<String> exactKeys,
-                                   Collection<String> globPatterns) {
-            RegionBatch batch = regions.computeIfAbsent(cacheName, name -> new RegionBatch());
+        private final Map<RegionTenant, RegionBatch> regions = new LinkedHashMap<>();
+        synchronized void offer(String cacheName, long tenant, Collection<String> exactKeys,
+                                Collection<String> globPatterns) {
+            RegionBatch batch = regions.computeIfAbsent(new RegionTenant(cacheName, tenant), key -> new RegionBatch());
             if (exactKeys != null) {
                 batch.exactKeys.addAll(exactKeys);
             }
             if (globPatterns != null) {
                 batch.globs.addAll(globPatterns);
             }
-            if (synchronizationRegistered) {
-                return false;
-            }
-            synchronizationRegistered = true;
-            return true;
         }
 
         synchronized List<Pending> drain() {
             List<Pending> drained = new ArrayList<>(regions.size());
-            regions.forEach((name, batch) -> drained.add(new Pending(name,
+            regions.forEach((key, batch) -> drained.add(new Pending(key.cacheName(),
                     List.copyOf(batch.exactKeys), List.copyOf(batch.globs))));
             regions.clear();
-            synchronizationRegistered = false;
             return drained;
         }
     }
@@ -234,16 +239,32 @@ public class EgonColaTwoLevelCachePort implements EgonColaCachePort {
         }
 
         @Override
+        public void suspend() {
+            TransactionSynchronizationManager.unbindResourceIfPossible(bufferResourceKey);
+        }
+
+        @Override
+        public void resume() {
+            TransactionSynchronizationManager.bindResource(bufferResourceKey, buffer);
+        }
+
+        @Override
         public void afterCommit() {
             flushEvictions(buffer.drain());
         }
 
         @Override
         public void afterCompletion(int status) {
-            if (status == STATUS_ROLLED_BACK) {
-                buffer.drain();
-            } else {
-                flushEvictions(buffer.drain());
+            try {
+                if (status == STATUS_ROLLED_BACK) {
+                    buffer.drain();
+                } else {
+                    flushEvictions(buffer.drain());
+                }
+            } finally {
+                if (TransactionSynchronizationManager.getResource(bufferResourceKey) == buffer) {
+                    TransactionSynchronizationManager.unbindResource(bufferResourceKey);
+                }
             }
         }
     }

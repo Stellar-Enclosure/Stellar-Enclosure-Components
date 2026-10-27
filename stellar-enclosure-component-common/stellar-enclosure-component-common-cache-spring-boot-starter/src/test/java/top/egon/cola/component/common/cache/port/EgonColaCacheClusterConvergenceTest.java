@@ -56,14 +56,18 @@ class EgonColaCacheClusterConvergenceTest extends CacheRedisTestSupport {
 
     /** A 侧"事务提交"：登记后手工驱动同步器，触发 afterCommit 真实失效与发布。 */
     private void commitEvictionOnA(long tenantId, List<String> exactKeys, List<String> globs) {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
         TransactionSynchronizationManager.initSynchronization();
         try {
             withTenant(tenantId, () ->
                     portA.registerEvictionAfterCommit(REGION, exactKeys, globs));
             TransactionSynchronizationManager.getSynchronizations()
                     .forEach(TransactionSynchronization::afterCommit);
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(synchronization -> synchronization.afterCompletion(TransactionSynchronization.STATUS_COMMITTED));
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
         }
     }
 

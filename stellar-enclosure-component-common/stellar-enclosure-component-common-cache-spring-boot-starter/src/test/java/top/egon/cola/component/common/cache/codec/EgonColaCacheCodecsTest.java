@@ -3,12 +3,17 @@ package top.egon.cola.component.common.cache.codec;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.redisson.codec.JsonJacksonCodec;
+import org.redisson.client.handler.State;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import top.egon.cola.component.common.cache.event.EgonColaCacheChangedEvent;
 import top.egon.cola.component.common.cache.event.EgonColaCacheChangedOperation;
 import top.egon.cola.component.common.cache.model.EgonColaCacheNullValueBO;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,5 +114,95 @@ class EgonColaCacheCodecsTest {
         assertThatThrownBy(() -> codec.getObjectMapper()
                 .readValue("[\"javax.script.ScriptEngineManager\",{}]", Object.class))
                 .isInstanceOf(IOException.class);
+    }
+
+    @Test
+    void typedSnapshotsPreserveCommonCacheValueTypesAndDoNotShareMutableState() throws Exception {
+        var mutable = new LinkedHashMap<String, Object>();
+        mutable.put("count", 7L);
+        mutable.put("nested", new LinkedHashMap<>(Map.of("name", "old")));
+        for (Object value : List.of("name", 7L, Instant.parse("2026-09-18T00:00:00Z"),
+                mutable, new MutableValue("old"), EgonColaCacheNullValueBO.INSTANCE)) {
+            Object snapshot = valueMapper.readValue(valueMapper.writeValueAsBytes(value), value.getClass());
+            assertThat(snapshot).isEqualTo(value);
+            if (value instanceof Map || value instanceof MutableValue) {
+                assertThat(snapshot).isNotSameAs(value);
+            }
+        }
+    }
+
+    @Test
+    void finalRecordCanRoundTripAsAnUntypedRedisValue() throws Exception {
+        var value = new RecordValue("value");
+        JsonJacksonCodec codec = EgonColaCacheCodecs.mapValueCodec();
+        ByteBuf encoded = codec.getMapValueEncoder().encode(value);
+        try {
+            assertThat(codec.getMapValueDecoder().decode(encoded, new State())).isEqualTo(value);
+        } finally {
+            encoded.release();
+        }
+    }
+
+    @Test
+    void objectTypedWriterCanEncodeFinalRecordForAnUntypedReader() throws Exception {
+        var value = new RecordValue("value");
+        byte[] json = valueMapper.writerFor(Object.class).writeValueAsBytes(value);
+        assertThat(valueMapper.readValue(json, Object.class)).isEqualTo(value);
+    }
+
+    @Test
+    void mapValueEncoderKeepsExistingKeysAndPreviouslyEncodedValuesReadable() throws Exception {
+        JsonJacksonCodec codec = EgonColaCacheCodecs.mapValueCodec();
+        ByteBuf oldKey = codec.getValueEncoder().encode("41:7");
+        ByteBuf mapKey = codec.getMapKeyEncoder().encode("41:7");
+        ByteBuf oldValue = Unpooled.wrappedBuffer(valueMapper.writeValueAsBytes(new MutableValue("old")));
+        try {
+            assertThat(ByteBufUtil.getBytes(mapKey)).isEqualTo(ByteBufUtil.getBytes(oldKey));
+            assertThat(codec.getMapValueDecoder().decode(oldValue, new State())).isEqualTo(new MutableValue("old"));
+        } finally {
+            oldKey.release();
+            mapKey.release();
+            oldValue.release();
+        }
+    }
+
+    @Test
+    void mapValueEncoderPreservesScalarCollectionAndNullSentinelTypes() throws Exception {
+        JsonJacksonCodec codec = EgonColaCacheCodecs.mapValueCodec();
+        for (Object value : List.of("value", 7L, true, NOW, new LinkedHashMap<>(Map.of("name", "value")),
+                new ArrayList<>(List.of("a", "b")), EgonColaCacheNullValueBO.INSTANCE)) {
+            ByteBuf encoded = codec.getMapValueEncoder().encode(value);
+            try {
+                Object decoded = codec.getMapValueDecoder().decode(encoded, new State());
+                assertThat(decoded).isEqualTo(value).isInstanceOf(value.getClass());
+            } finally {
+                encoded.release();
+            }
+        }
+    }
+
+    public record RecordValue(String name) {
+    }
+
+    public static class MutableValue {
+        private String name;
+
+        public MutableValue() {
+        }
+
+        MutableValue(String name) {
+            this.name = name;
+        }
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MutableValue value && java.util.Objects.equals(name, value.name);
+        }
+
+        @Override
+        public int hashCode() { return java.util.Objects.hashCode(name); }
     }
 }

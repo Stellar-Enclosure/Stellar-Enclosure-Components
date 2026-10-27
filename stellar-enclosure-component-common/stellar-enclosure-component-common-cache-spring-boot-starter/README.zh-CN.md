@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Spring Cache 原生注解 + L1 Guava + L2 Redisson `RMapCache`，通过一个 Redis Pub/Sub 通道失效各节点 L1。
+Spring Cache 原生注解 + L1 Guava + L2 Redisson `RMapCache`，通过一个 Redis Pub/Sub 通道失效各节点 L1。L1 保存使用现有受限编解码器生成的值快照，每次读取还原独立对象，避免调用方修改共享缓存引用。
 适用于 Java 25 / Spring Boot 4.1.x。mp-sd-ext 只负责持久化，缓存策略由具体 Repository 的业务方法声明。
 沿用 Spring Cache SPI 和现有两级缓存实现，不提供自定义缓存注解、SpEL 解析器或业务切面。
 
@@ -135,7 +135,7 @@ public class UserLookupRepository {
 
 ## 4. Key 和租户边界
 
-所有 Key 必须是 `tenantId:businessKey` 字符串，例如 `41:7`、`41:code:alice`、`41:query:page:1`。
+所有 Key 必须是 `tenantId:businessKey` 字符串，例如 `41:7`、`41:code:alice`、`41:query:page:1`。租户段使用 Long 的规范十进制表示，不接受 `041:7` 等带前导零的形式，避免租户区域清理遗漏；滚动升级前应将所有节点的键生成方式统一为规范格式。
 租户前缀为数值，业务段非空，不允许 `*` 和控制字符；区域名为 `[A-Za-z0-9_.-]{1,100}`。
 默认 Spring `SimpleKey` / Long Key 不符合此约定。仓储的单键入口必须使用 `keyGenerator = "egonColaRepositoryKeyGenerator"`，
 其余形状（组合查询键）由宿主注册返回上述字符串的具名 `KeyGenerator` 或 SpEL 承担。
@@ -158,13 +158,13 @@ public class UserLookupRepository {
   空值哨兵使用 `null-expire`，不加抖动。
 - **击穿**：`@Cacheable(sync=true)` 调用 `Cache.get(key, Callable)`。本机合并同 Key 的重叠加载，
   Redis 正常时再使用分布式锁与二次查询。锁等待超时、Redis 故障时回源但不回填，本机重叠请求仍共享本次结果。
-  分布式锁采用有限租期，超过租期或等待时间、Redis 故障时，不保证全群集只执行一次。
+  分布式锁采用有限租期，超过租期或等待时间、Redis 故障时，不保证全群集只执行一次。值无法安全快照时不缓存，重叠请求会各自回源。
   按数据库最坏耗时配置 `lock.wait-time` / `lock.lease-time`，不要把 `sync=true` 当成业务互斥锁。
 
 ## 6. 事务、集群一致性和手动操作
 
 存在实际 Spring 事务和事务同步器时，`put`、`evict`、`clear` 在提交后执行，回滚丢弃；无事务时立即执行。
-事务内读绕过缓存，加载结果只在提交后发布，避免其他事务看见未提交值。事务内同步加载不跨事务合并。
+事务内读绕过缓存，加载结果只在提交后发布，避免其他事务看见未提交值。若同一事务登记了该键或租户区域的失效，或者加载后该区域在本节点发生失效，事务内加载的值不会在提交后重新填入缓存；L2 读取期间收到本节点失效也不会回填 L1。事务内同步加载不跨事务合并。
 需要缓存写入处于同一事务时，应由外层 Service 开启事务，或让事务 advisor 的顺序先于缓存 advisor。
 `beforeInvocation=true` 使用立即失效方法，保留 Spring 原生行为。
 
@@ -187,7 +187,32 @@ cache.evict(tenantId + ":" + id);
 直接 `RedisTemplate.delete` 不会自动清理各节点 L1，也不会自动具备本组件的事务语义。
 
 为兼容已有手动调用，`egonColaCachePort` Bean 和 common-core 的 `EgonColaCachePort` 保留；
-mp-sd-ext 及脚手架已不再注入它。`second-evict-delay` 仅作用于旧端口的提交后延迟失效，注解路径使用上面的 Cache SPI 语义。
+mp-sd-ext 及脚手架已不再注入它。旧端口的延迟第二次失效也会向其他节点广播；待失效键按事务和租户隔离，`REQUIRES_NEW` 的提交与外层事务分别处理。
+
+### 可配置的写入失效策略
+
+Spring `@CacheEvict` 保持原生注解时序。需要配置策略的写入口应显式使用 `egonColaCacheMutationExecutor` 包围数据库写入：
+
+```java
+@Transactional
+public boolean updateUser(UserPO user) {
+    String key = EgonColaTenantIdProvider.currentTenantId() + ":" + user.getId();
+    return cacheMutationExecutor.execute("UserPO", List.of(key), () -> userRepository.updateById(user));
+}
+```
+
+```yaml
+egon.cola.component.cache:
+  consistency-strategy: DELAYED_DOUBLE_DELETE
+  second-evict-delay: PT3S
+  regions:
+    UserPO:
+      consistency-strategy: WRITE_BEFORE_DELETE
+```
+
+`DELETE_BEFORE_WRITE` 在写入前立即失效；`WRITE_BEFORE_DELETE` 在写入成功且事务提交后失效（默认）；`DELAYED_DOUBLE_DELETE` 在写入前失效，成功提交后按 `second-evict-delay` 再失效并广播。回滚不会执行提交后的操作。可为区域覆盖策略，或通过带策略名的 `execute` 重载按调用指定；宿主注册实现 `EgonColaCacheConsistencyStrategy` 的 Bean 后可使用自定义名称。所有影响缓存的写路径仍需经过该入口或声明自己的失效操作。
+
+这些策略不能消除异步副本滞后或 Redis Pub/Sub 丢失导致的全部旧值；延迟任务存于应用进程，进程退出可能丢失。它们不承诺数据库与缓存强一致，也不替代可靠消息或业务版本校验。
 
 ## 7. 配置
 
@@ -208,7 +233,9 @@ mp-sd-ext 及脚手架已不再注入它。`second-evict-delay` 仅作用于旧�
 | `batch.max-keys`                                 | `1000`                  | 旧端口批读上限及分批删除大小 |
 | `lock.wait-time`                                 | `PT0.5S`                | 分布式锁最大等待       |
 | `lock.lease-time`                                | `PT10S`                 | 分布式锁租期         |
-| `second-evict-delay`                             | `PT5S`                  | 旧端口延迟二次失效      |
+| `second-evict-delay`                             | `PT5S`                  | 延迟二次失效等待时间      |
+| `consistency-strategy` | `WRITE_BEFORE_DELETE` | 显式写入执行器的默认策略 |
+| `regions.<name>.consistency-strategy` | 继承全局 | 区域级写入策略 |
 
 `node-id` 留空时，manager 在首次需要时生成 `node-<UUID>` 并在进程内复用；显式配置的值原样使用。
 
@@ -216,7 +243,8 @@ mp-sd-ext 及脚手架已不再注入它。`second-evict-delay` 仅作用于旧�
 直接以 `The elements [...] were left unbound.` 失败，而不是被静默忽略，避免滚动发布中新旧节点混用不同 TTL 语义。
 
 L2 codec 沿用受限类型白名单：`top.egon.cola.`、`java.util.`、`java.time.`、`java.lang.`。
-不在白名单中的宿主对象不能直接作为 L2 值；不要仅根据 L1 命中判断 Redis 序列化已通过。
+不在白名单中的宿主对象不能直接作为 L2 值；值必须能通过同一 codec 往返还原，失败时跳过缓存并失效该键。快照编解码会增加 L1 读写的 CPU 和内存开销，应在真实负载下评估。
+L2 的 map value 使用带根类型信息的编码，支持还原允许的 final 类型；map key 编码不变，已有可解码的旧值仍可读取。
 
 ## 8. 验证
 

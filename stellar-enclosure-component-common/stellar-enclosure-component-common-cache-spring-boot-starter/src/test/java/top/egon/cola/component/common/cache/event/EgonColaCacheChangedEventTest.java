@@ -149,4 +149,14 @@ class EgonColaCacheChangedEventTest {
         assertThatCode(() -> KeyGuard.requireExactKey("41:7")).doesNotThrowAnyException();
         assertThatCode(() -> KeyGuard.requireGlob("41:*")).doesNotThrowAnyException();
     }
+
+    @Test
+    void rejectsNonCanonicalAndOverflowingTenantPrefixes() {
+        assertThatThrownBy(() -> KeyGuard.requireTenant("041:7", 41L))
+                .hasMessageContaining("CACHE_KEY_TENANT_MISMATCH");
+        assertThatThrownBy(() -> KeyGuard.requireGlob("041:*"))
+                .hasMessageContaining("CACHE_KEY_TENANT_MISMATCH");
+        assertThatThrownBy(() -> KeyGuard.requireExactKey("9223372036854775808:7"))
+                .hasMessageContaining("CACHE_KEY_TENANT_MISMATCH");
+    }
 }

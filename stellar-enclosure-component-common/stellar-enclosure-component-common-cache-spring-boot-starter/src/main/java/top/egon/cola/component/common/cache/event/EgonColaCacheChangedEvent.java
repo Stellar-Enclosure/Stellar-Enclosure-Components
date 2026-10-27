@@ -79,12 +79,14 @@ public record EgonColaCacheChangedEvent(int schemaVersion, String eventId, Strin
             if (key == null || !EXACT.matcher(key).matches()) {
                 throw new IllegalArgumentException("CACHE_KEY_TENANT_MISMATCH: " + key);
             }
+            requireCanonicalTenant(key);
         }
 
         public static void requireGlob(String key) {
             if (key == null || !GLOB.matcher(key).matches()) {
                 throw new IllegalArgumentException("CACHE_GLOB_PATTERN_FORBIDDEN: " + key);
             }
+            requireCanonicalTenant(key);
         }
 
         public static long tenantOf(String key) {
@@ -94,6 +96,17 @@ public record EgonColaCacheChangedEvent(int schemaVersion, String eventId, Strin
 
         private static long parseTenant(String key) {
             return Long.parseLong(key.substring(0, key.indexOf(':')));
+        }
+
+        private static void requireCanonicalTenant(String key) {
+            String prefix = key.substring(0, key.indexOf(':'));
+            try {
+                if (!prefix.equals(Long.toString(Long.parseLong(prefix)))) {
+                    throw new IllegalArgumentException("CACHE_KEY_TENANT_MISMATCH: " + key);
+                }
+            } catch (NumberFormatException failure) {
+                throw new IllegalArgumentException("CACHE_KEY_TENANT_MISMATCH: " + key, failure);
+            }
         }
 
         public static void requireTenant(String key, long currentTenantId) {

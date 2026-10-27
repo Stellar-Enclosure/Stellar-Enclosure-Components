@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.redisson.codec.JsonJacksonCodec;
+import org.redisson.client.protocol.Encoder;
+import io.netty.buffer.Unpooled;
 import top.egon.cola.component.common.cache.model.EgonColaCacheNullValueBO;
 
 /**
@@ -68,6 +70,9 @@ public final class EgonColaCacheCodecs {
      */
     private static final class RestrictedTypeCodec extends JsonJacksonCodec {
 
+        private final Encoder mapValueEncoder = value -> Unpooled.wrappedBuffer(
+                getObjectMapper().writerFor(Object.class).writeValueAsBytes(value));
+
         RestrictedTypeCodec(ObjectMapper mapper) {
             super(mapper);
         }
@@ -75,6 +80,11 @@ public final class EgonColaCacheCodecs {
         @Override
         protected void initTypeInclusion(ObjectMapper mapper) {
             // keep the restricted default typing configured by valueMapper()
+        }
+
+        @Override
+        public Encoder getMapValueEncoder() {
+            return mapValueEncoder;
         }
     }
 }

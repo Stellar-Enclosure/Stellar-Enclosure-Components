@@ -31,6 +31,7 @@ public class EgonColaCacheProperties {
     @Valid
     private Redis redis = new Redis();
     private String tenantMdcKey = "tenantId";
+    private String consistencyStrategy = "WRITE_BEFORE_DELETE";
     @NotNull
     private Duration secondEvictDelay = Duration.ofSeconds(5);
     @Valid
@@ -88,6 +89,7 @@ public class EgonColaCacheProperties {
         private Duration l2Expire;
         private Duration l2Jitter;
         private Duration nullExpire;
+        private String consistencyStrategy;
 
         @AssertTrue(message = "region TTLs must be positive and their jitter sum must not overflow")
         public boolean isDurationValid() {

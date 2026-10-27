@@ -65,12 +65,15 @@ class EgonColaTwoLevelCachePortEvictionIntegrationTest extends CacheRedisTestSup
      * 手工事务同步器驱动（等价 TransactionTemplate 提交/回滚语义，零新依赖）。
      */
     private static void inTransaction(Runnable body, boolean commit) {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
         TransactionSynchronizationManager.initSynchronization();
         try {
             body.run();
             if (commit) {
                 TransactionSynchronizationManager.getSynchronizations()
                         .forEach(TransactionSynchronization::afterCommit);
+                TransactionSynchronizationManager.getSynchronizations()
+                        .forEach(synchronization -> synchronization.afterCompletion(TransactionSynchronization.STATUS_COMMITTED));
             } else {
                 TransactionSynchronizationManager.getSynchronizations()
                         .forEach(synchronization ->
@@ -78,6 +81,7 @@ class EgonColaTwoLevelCachePortEvictionIntegrationTest extends CacheRedisTestSup
             }
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
         }
     }
 
@@ -159,7 +163,7 @@ class EgonColaTwoLevelCachePortEvictionIntegrationTest extends CacheRedisTestSup
     }
 
     @Test
-    void commitTriggersOneEvictOneEventAndOneDelayedReplayWithoutRePublish() {
+    void commitTriggersEvictionAndBroadcastsTheDelayedReplay() {
         realWiring();
         manager.getCache(REGION);
         Map<String, Object> value = payload();
@@ -178,10 +182,10 @@ class EgonColaTwoLevelCachePortEvictionIntegrationTest extends CacheRedisTestSup
         verify(manager, times(1)).publish(REGION, EVICT, List.of("41:7"));
         verify(manager, times(1)).applyLocalEviction(eq(REGION), argThat(keys -> keys.equals(List.of("41:7"))));
         assertThat(l2().get("41:7")).isNull();
-        assertEventually(() -> assertThat(eventBodies).hasSize(1));
+        assertEventually(() -> assertThat(eventBodies).isNotEmpty());
         assertThat(eventBodies.get(0)).contains("\"operation\":\"EVICT\"").contains("41:7");
 
-        // 第二拍：延迟到点再本地双级失效一次，且不再发布事件
+        // 第二拍：延迟到点再失效并广播，清理其他节点重新填入的 L1。
         assertEventually(() ->
                 verify(manager, times(2)).applyLocalEviction(eq(REGION), any()));
         try {
@@ -190,8 +194,8 @@ class EgonColaTwoLevelCachePortEvictionIntegrationTest extends CacheRedisTestSup
             Thread.currentThread().interrupt();
         }
         verify(manager, times(2)).applyLocalEviction(eq(REGION), any());
-        verify(manager, times(1)).publish(eq(REGION), any(), any());
-        assertThat(eventBodies).hasSize(1);
+        verify(manager, times(2)).publish(eq(REGION), any(), any());
+        assertEventually(() -> assertThat(eventBodies).hasSize(2));
     }
 
     @Test

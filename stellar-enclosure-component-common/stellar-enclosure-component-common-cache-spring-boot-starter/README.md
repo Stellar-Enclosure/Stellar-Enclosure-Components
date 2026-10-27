@@ -6,7 +6,11 @@ Native Spring Cache annotations + L1 Guava + L2 Redisson `RMapCache`, with the L
 invalidated through one Redis Pub/Sub channel. Targets Java 25 / Spring Boot 4.1.x. mp-sd-ext owns
 persistence only; the caching policy is declared by the business methods of a concrete Repository.
 The starter reuses the Spring Cache SPI and the existing two-level cache implementation, and adds no
-custom cache annotation, no SpEL resolver and no business aspect.
+custom cache annotation, no SpEL resolver and no business aspect. L1 stores codec-backed snapshots and
+returns independent values, so caller mutations do not alter shared entries. Values that cannot be
+round-tripped are not cached; concurrent loads may then run separately. Snapshot encoding adds CPU
+and memory overhead and should be measured with representative values. L2 map values include root type
+information for permitted final types; map key encoding is unchanged and readable older values remain supported.
 
 ## 1. Enablement
 
@@ -209,7 +213,9 @@ reject a non-numeric business segment.
 Whenever a real Spring transaction and transaction synchronizer are present, `put`, `evict` and
 `clear` execute after commit and are discarded on rollback; without a transaction they execute
 immediately. Reads inside a transaction bypass the cache and loaded results are published only after
-commit, so other transactions never observe an uncommitted value. Synchronous loads inside a
+commit, so other transactions never observe an uncommitted value. A value is not republished when the
+same transaction invalidated that key or tenant region, or this node observed a region invalidation
+after the load began. An L2 lookup interrupted by a local invalidation does not refill L1. Synchronous loads inside a
 transaction are not merged across transactions. When a cache write must live in the same transaction,
 the outer service opens that transaction, or the transaction advisor is ordered ahead of the cache
 advisor. `beforeInvocation=true` uses the immediate eviction path and keeps Spring's native behavior.
@@ -242,8 +248,19 @@ L1 of the other nodes nor inherits this component's transaction semantics.
 
 For compatibility with existing manual callers the `egonColaCachePort` bean and common-core's
 `EgonColaCachePort` are retained, although mp-sd-ext and the scaffolding no longer inject it.
-`second-evict-delay` applies only to the delayed post-commit eviction of that legacy port; the
-annotation path uses the Cache SPI semantics described above.
+The legacy port publishes its delayed second eviction to the other nodes as well, and buffers keys per
+transaction and tenant so `REQUIRES_NEW` commits independently of the outer transaction.
+
+For configurable write ordering, wrap the actual database operation with `egonColaCacheMutationExecutor`.
+Set `consistency-strategy` globally, override it in `regions.<name>.consistency-strategy`, or provide a
+strategy name to the executor. Built-ins are `DELETE_BEFORE_WRITE`, `WRITE_BEFORE_DELETE` (default,
+evicts after commit), and `DELAYED_DOUBLE_DELETE` (evicts before writing and again after commit plus
+`second-evict-delay`). Custom Spring beans may implement `EgonColaCacheConsistencyStrategy` with a
+unique name. Spring `@CacheEvict` retains its normal semantics and is not automatically intercepted by
+these policies. See the [usage example](README.zh-CN.md#可配置的写入失效策略).
+
+These policies reduce stale cache windows but do not guarantee strong consistency with asynchronous
+replicas or lost Redis Pub/Sub events. The delayed task is in process and can be lost on shutdown.
 
 ## 7. Configuration
 
@@ -264,7 +281,9 @@ All keys live under `egon.cola.component.cache`:
 | `batch.max-keys`                                 | `1000`                  | Legacy port batch-read limit and batch delete size |
 | `lock.wait-time`                                 | `PT0.5S`                | Maximum distributed-lock wait                |
 | `lock.lease-time`                                | `PT10S`                 | Distributed-lock lease                       |
-| `second-evict-delay`                             | `PT5S`                  | Legacy port delayed second eviction          |
+| `second-evict-delay`                             | `PT5S`                  | Delayed second eviction interval             |
+| `consistency-strategy` | `WRITE_BEFORE_DELETE` | Default explicit mutation strategy |
+| `regions.<name>.consistency-strategy` | Inherits global | Region-specific mutation strategy |
 
 When `node-id` is left empty, the manager generates `node-<UUID>` the first time it is needed and
 reuses it within the process; an explicitly configured value is used verbatim.

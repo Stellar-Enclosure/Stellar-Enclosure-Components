@@ -12,6 +12,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.cache.CacheManager;
 import org.springframework.context.annotation.Bean;
 import top.egon.cola.component.common.cache.core.EgonColaTwoLevelCacheManager;
+import top.egon.cola.component.common.cache.consistency.EgonColaCacheConsistencyStrategy;
+import top.egon.cola.component.common.cache.consistency.EgonColaCacheMutationExecutor;
 import top.egon.cola.component.common.cache.event.EgonColaCacheChangedListener;
 import top.egon.cola.component.common.cache.port.EgonColaTwoLevelCachePort;
 
@@ -49,6 +51,13 @@ public class EgonColaCacheAutoConfiguration {
             @Qualifier("egonColaTwoLevelCacheManager") EgonColaTwoLevelCacheManager manager,
             EgonColaCacheProperties properties) {
         return new EgonColaTwoLevelCachePort(manager, properties);
+    }
+
+    @Bean("egonColaCacheMutationExecutor")
+    public EgonColaCacheMutationExecutor egonColaCacheMutationExecutor(
+            @Qualifier("egonColaTwoLevelCacheManager") EgonColaTwoLevelCacheManager manager,
+            EgonColaCacheProperties properties, ObjectProvider<EgonColaCacheConsistencyStrategy> strategies) {
+        return new EgonColaCacheMutationExecutor(manager, properties, strategies.orderedStream().toList());
     }
 
     private static RedissonClient resolveRedissonClient(ObjectProvider<RedissonClient> clients,
