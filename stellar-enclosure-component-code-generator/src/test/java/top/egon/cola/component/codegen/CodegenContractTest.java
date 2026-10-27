@@ -125,6 +125,22 @@ class CodegenContractTest {
     }
 
     @Test
+    void eventDefinitionsAreDetachedInConfigSnapshots() {
+        Map<String, String> mappings = new LinkedHashMap<>(Map.of("code", "externalCode"));
+        CodegenConfigBO.EventDefinitionBO event = CodegenConfigBO.EventDefinitionBO.builder()
+                .table("orders").name("OrderImportedEvent").action("create").schemaVersion("v1")
+                .idempotencyType("com.example.order.EventGuard").idempotencyBean("eventGuard")
+                .idempotencyMethod("executeOnce").fieldMappings(mappings).build();
+        CodegenConfigBO original = config("web", "command");
+        original.setEvents(CodegenConfigBO.EventsBO.builder().enabled(true)
+                .definitions(new ArrayList<>(List.of(event))).build());
+        CodegenConfigBO copy = original.snapshot();
+        mappings.put("code", "changed");
+        original.getEvents().getDefinitions().clear();
+        assertEquals("externalCode", copy.getEvents().getDefinitions().getFirst().getFieldMappings().get("code"));
+    }
+
+    @Test
     void approvedExternalCoordinateIsOnlyFreeMarker() throws Exception {
         Path modulePom = Path.of("pom.xml").toAbsolutePath().normalize();
         Document document = parse(modulePom);

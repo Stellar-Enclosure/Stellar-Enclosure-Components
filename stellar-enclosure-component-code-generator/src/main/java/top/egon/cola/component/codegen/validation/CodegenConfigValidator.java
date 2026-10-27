@@ -9,6 +9,7 @@ import top.egon.cola.component.codegen.model.CodegenPlanBO;
 import top.egon.cola.component.codegen.model.CodegenProfileEnum;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 
+import javax.lang.model.SourceVersion;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -134,12 +135,80 @@ public class CodegenConfigValidator {
             diagnostics.add(diagnostic(UNSUPPORTED_ARTIFACT, "/artifacts",
                     "service profile does not generate controller"));
         }
+        diagnostics.addAll(checkEvents(config, seen));
         diagnostics.addAll(checkInput(config.getInput()));
         diagnostics.addAll(checkRoots(config));
         diagnostics.addAll(checkTables(config.getTables()));
         diagnostics.addAll(checkExistingTypes(seen, config.getExistingTypes()));
         diagnostics.addAll(checkFieldPolicies(seen, config.getFieldPolicies()));
         diagnostics.addAll(checkApiContract(config.getProfile(), seen, config.getApiContract()));
+        return diagnostics;
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> checkEvents(CodegenConfigBO config, Set<String> artifacts) {
+        CodegenConfigBO.EventsBO events = config.getEvents();
+        if (events == null) {
+            return List.of();
+        }
+        List<CodegenConfigBO.EventDefinitionBO> definitions = events.getDefinitions();
+        if (!events.isEnabled()) {
+            return definitions == null || definitions.isEmpty() ? List.of()
+                    : List.of(diagnostic(CONFIG_REQUIRED, "/events", "event definitions require events.enabled=true"));
+        }
+        if (definitions == null || definitions.isEmpty()) {
+            return List.of(diagnostic(CONFIG_REQUIRED, "/events/definitions",
+                    "enabled events require explicit definitions"));
+        }
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        if (!artifacts.contains("command")) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/artifacts", "event generation requires command executors"));
+        }
+        if (config.getProfile() != CodegenProfileEnum.LIGHT
+                && (config.getRoots() == null || blank(config.getRoots().get("adapter")))) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/modulePaths/adapter", "event generation requires an adapter module path"));
+        }
+        Set<String> names = new LinkedHashSet<>();
+        for (int index = 0; index < definitions.size(); index++) {
+            CodegenConfigBO.EventDefinitionBO event = definitions.get(index);
+            String pointer = "/events/definitions/" + index;
+            if (event == null) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer, "event definition is required"));
+                continue;
+            }
+            if (blank(event.getTable()) || config.getTables() == null || !config.getTables().contains(event.getTable())) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/table", "event table must be selected"));
+            }
+            if (blank(event.getName()) || !event.getName().matches("[A-Z][A-Za-z0-9_]*Event")
+                    || !SourceVersion.isIdentifier(event.getName()) || SourceVersion.isKeyword(event.getName())) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/name", "event name must be a Java type ending in Event"));
+            } else if (!names.add(event.getName().toLowerCase(java.util.Locale.ROOT))) {
+                diagnostics.add(diagnostic(DUPLICATE_PATH, pointer + "/name", "event name must be unique"));
+            }
+            if (blank(event.getAction()) || !Set.of("create", "update", "delete").contains(event.getAction())) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/action", "event action must be create, update or delete"));
+            }
+            if (blank(event.getSchemaVersion()) || !event.getSchemaVersion().matches("[A-Za-z0-9._-]{1,32}")) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/schemaVersion", "an explicit event schema version is required"));
+            }
+            if (blank(event.getIdempotencyType()) || !event.getIdempotencyType().contains(".")
+                    || !SourceVersion.isName(event.getIdempotencyType())) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/idempotencyType", "an existing idempotency type is required"));
+            } else if (!blank(config.getBasePackage()) && List.of("infrastructure", "adapter", "starter", "start").stream()
+                    .anyMatch(layer -> event.getIdempotencyType().startsWith(config.getBasePackage() + "." + layer + "."))) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/idempotencyType",
+                        "idempotency must use an application/domain port or shared contract, not an outer-layer implementation"));
+            }
+            if (blank(event.getIdempotencyBean()) || !event.getIdempotencyBean().matches("[A-Za-z0-9_.-]+")) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/idempotencyBean", "an existing idempotency bean name is required"));
+            }
+            if (blank(event.getIdempotencyMethod()) || !SourceVersion.isIdentifier(event.getIdempotencyMethod())
+                    || SourceVersion.isKeyword(event.getIdempotencyMethod())) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/idempotencyMethod", "an idempotency method name is required"));
+            }
+            if (event.getFieldMappings() == null) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer + "/fieldMappings", "explicit field mappings are required"));
+            }
+        }
         return diagnostics;
     }
 

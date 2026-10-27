@@ -1,12 +1,17 @@
-package [=applicationPackage];
+package [=manageImplPackage];
 
-import [=domainFqn];
-import [=domainQueryFqn];
-import [=domainServiceFqn];
-import [=applicationConverterPackage].[=createConverterType];
-import [=applicationConverterPackage].[=updateConverterType];
-import [=applicationConverterPackage].[=deleteConverterType];
-import [=applicationConverterPackage].[=resultConverterType];
+import [=managePackage].[=manageType];
+import [=commandPackage].[=createCommandType];
+import [=commandPackage].[=updateCommandType];
+import [=commandPackage].[=deleteCommandType];
+import [=queryPackage].[=detailQueryType];
+import [=queryPackage].[=pageQueryType];
+import [=resultPackage].[=resultType];
+import [=commandExecutorPackage].[=createExecutorType];
+import [=commandExecutorPackage].[=updateExecutorType];
+import [=commandExecutorPackage].[=deleteExecutorType];
+import [=queryExecutorPackage].[=detailExecutorType];
+import [=queryExecutorPackage].[=pageExecutorType];
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,59 +28,48 @@ import top.egon.cola.component.common.core.pojo.PageSlice;
 @RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class [=manageImplType] implements [=manageType] {
 
-    @Qualifier("[=domainServiceBean]")
-    private final [=domainServiceType] domainService;
+    @Qualifier("[=createExecutorType?uncap_first]")
+    private final [=createExecutorType] [=createExecutorType?uncap_first];
 
-    @Qualifier("[=createConverterType?uncap_first]Impl")
-    private final [=createConverterType] createConverter;
+    @Qualifier("[=updateExecutorType?uncap_first]")
+    private final [=updateExecutorType] [=updateExecutorType?uncap_first];
 
-    @Qualifier("[=updateConverterType?uncap_first]Impl")
-    private final [=updateConverterType] updateConverter;
+    @Qualifier("[=deleteExecutorType?uncap_first]")
+    private final [=deleteExecutorType] [=deleteExecutorType?uncap_first];
 
-    @Qualifier("[=deleteConverterType?uncap_first]Impl")
-    private final [=deleteConverterType] deleteConverter;
+    @Qualifier("[=detailExecutorType?uncap_first]")
+    private final [=detailExecutorType] [=detailExecutorType?uncap_first];
 
-    @Qualifier("[=resultConverterType?uncap_first]Impl")
-    private final [=resultConverterType] resultConverter;
+    @Qualifier("[=pageExecutorType?uncap_first]")
+    private final [=pageExecutorType] [=pageExecutorType?uncap_first];
 
     @Override
     @Transactional
     public [=resultType] create(@Valid [=createCommandType] command) {
-        log.info("create {}", "[=tableName]");
-        return resultConverter.toTarget(domainService.create(createConverter.toTarget(command)));
+        return [=createExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional
     public [=resultType] update(@Valid [=updateCommandType] command) {
-        [=domainType] domain = updateConverter.toTarget(command);
-        log.info("update {} id={} version={}", "[=tableName]", command.getId(), domain.getVersion());
-        return resultConverter.toTarget(domainService.update(domain));
+        return [=updateExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional
     public void delete(@Valid [=deleteCommandType] command) {
-        [=domainType] domain = deleteConverter.toTarget(command);
-        log.info("delete {} id={} version={}", "[=tableName]", command.getId(), domain.getVersion());
-        domainService.delete(domain.getId(), domain.getVersion());
+        [=deleteExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional(readOnly = true)
     public [=resultType] detail(@Valid [=detailQueryType] query) {
-        return resultConverter.toTarget(domainService.detail(query.getId()));
+        return [=detailExecutorType?uncap_first].execute(query);
     }
 
     @Override
     @Transactional(readOnly = true)
     public PageSlice<[=resultType]> page(@Valid [=pageQueryType] query) {
-        [=domainQueryType] domainQuery = new [=domainQueryType]();
-        domainQuery.setPage(query.getPage());
-[#list filterFields as field]
-        domainQuery.set[=field.javaName?cap_first](query.get[=field.javaName?cap_first]());
-[/#list]
-        PageSlice<[=domainType]> slice = domainService.query(domainQuery);
-        return PageSlice.of(slice.records().stream().map(resultConverter::toTarget).toList(), slice.hasNext());
+        return [=pageExecutorType?uncap_first].execute(query);
     }
 }

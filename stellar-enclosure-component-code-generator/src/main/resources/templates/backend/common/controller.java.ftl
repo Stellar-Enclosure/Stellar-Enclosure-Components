@@ -1,12 +1,15 @@
 package [=controllerPackage];
 
-import [=applicationPackage].[=manageType];
-import [=applicationPackage].[=createCommandType];
-import [=applicationPackage].[=updateCommandType];
-import [=applicationPackage].[=deleteCommandType];
-import [=applicationPackage].[=detailQueryType];
-import [=applicationPackage].[=pageQueryType];
-import [=applicationPackage].[=resultType];
+import [=managePackage].[=manageType];
+import [=commandPackage].[=updateCommandType];
+import [=commandPackage].[=deleteCommandType];
+import [=queryPackage].[=detailQueryType];
+import [=resultPackage].[=resultType];
+import [=adapterDtoPackage].[=createDtoType];
+import [=adapterDtoPackage].[=updateDtoType];
+import [=adapterDtoPackage].[=pageDtoType];
+import [=adapterVoPackage].[=viewType];
+import [=adapterConverterPackage].[=adapterConverterType];
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,26 +35,31 @@ public class [=controllerType] {
     @Qualifier("[=manageBean]")
     private final [=manageType] manage;
 
+    @Qualifier("[=adapterConverterType?uncap_first]Impl")
+    private final [=adapterConverterType] converter;
+
     @PostMapping
-    public [=resultType] create(@Valid @RequestBody [=createCommandType] command) {
+    public [=viewType] create(@Valid @RequestBody [=createDtoType] request) {
         log.info("http create {}", "[=tableName]");
-        return manage.create(command);
+        return converter.toView(manage.create(converter.toTarget(request)));
     }
 
     @GetMapping("/{id}")
-    public [=resultType] detail(@PathVariable String id) {
-        return manage.detail(new [=detailQueryType]().setId(parseId(id)));
+    public [=viewType] detail(@PathVariable String id) {
+        return converter.toView(manage.detail(new [=detailQueryType]().setId(parseId(id))));
     }
 
     @GetMapping
-    public PageSlice<[=resultType]> page(@Valid [=pageQueryType] query) {
-        return manage.page(query);
+    public PageSlice<[=viewType]> page(@Valid [=pageDtoType] request) {
+        PageSlice<[=resultType]> slice = manage.page(converter.toPageQuery(request));
+        return PageSlice.of(slice.records().stream().map(converter::toView).toList(), slice.hasNext());
     }
 
     @PutMapping("/{id}")
-    public [=resultType] update(@PathVariable String id, @Valid @RequestBody [=updateCommandType] command) {
+    public [=viewType] update(@PathVariable String id, @Valid @RequestBody [=updateDtoType] request) {
+        [=updateCommandType] command = converter.toUpdateCommand(request);
         command.setId(parseId(id));
-        return manage.update(command);
+        return converter.toView(manage.update(command));
     }
 
     @DeleteMapping("/{id}")

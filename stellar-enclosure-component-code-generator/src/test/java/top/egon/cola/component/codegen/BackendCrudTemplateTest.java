@@ -1,5 +1,6 @@
 package top.egon.cola.component.codegen;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -80,7 +81,10 @@ class BackendCrudTemplateTest {
         assertFalse(light.get("domain-impl").contains("removeById(id)"));
         assertFalse(light.get("domain-impl").contains("removeById(value.getId())"));
         assertTrue(light.get("domain-impl").contains("zeroRows"));
-        assertTrue(light.get("manage-impl").contains("domain.getVersion()"));
+        assertTrue(light.get("manage-impl").contains("updateOrdersCmdExe.execute(command)"));
+        assertTrue(light.get("update-executor").contains("domain.getVersion()"));
+        assertTrue(light.get("page-executor").contains("pageConverter.toTarget(query)"));
+        assertFalse(light.get("page-executor").contains("domainService.update("));
 
         exerciseManage(light, config(CodegenProfileEnum.LIGHT, withController(true)), output);
     }
@@ -121,17 +125,23 @@ class BackendCrudTemplateTest {
                     }
                 }
                 """);
-        write(sourceRoot, "com/example/order/domain/order/FakeOrdersDomainService.java", """
-                package com.example.order.domain.order;
+        write(sourceRoot, "com/example/order/domain/order/service/FakeOrdersDomainService.java", """
+                package com.example.order.domain.order.service;
+                import com.example.order.domain.order.vos.OrdersBO;
+                import com.example.order.domain.order.vos.OrdersDomainQuery;
                 import top.egon.cola.component.common.core.pojo.PageSlice;
                 public class FakeOrdersDomainService implements OrdersDomainService {
                     public OrdersBO updated;
                     public Long deletedVersion;
+                    public OrdersDomainQuery queried;
                     public OrdersBO create(OrdersBO value) { return value; }
                     public OrdersBO update(OrdersBO value) { this.updated = value; return value; }
                     public void delete(Long id, Long expectedVersion) { this.deletedVersion = expectedVersion; }
                     public OrdersBO detail(Long id) { return new OrdersBO().setId(id); }
-                    public PageSlice<OrdersBO> query(OrdersDomainQuery query) { return PageSlice.of(java.util.List.of(), false); }
+                    public PageSlice<OrdersBO> query(OrdersDomainQuery query) {
+                        queried = query;
+                        return PageSlice.of(java.util.List.of(new OrdersBO().setId(6L).setCode("page")), true);
+                    }
                 }
                 """);
         for (Map.Entry<String, String> source : sources.entrySet()) {
@@ -142,7 +152,12 @@ class BackendCrudTemplateTest {
             String artifact = switch (source.getKey()) {
                 case "create-command", "update-command", "delete-command" -> "command";
                 case "detail-query", "page-query" -> "query";
-                case "create-converter", "update-converter", "delete-converter", "result-converter" -> "application-converter";
+                case "create-executor", "update-executor", "delete-executor" -> "command-executor";
+                case "detail-executor", "page-executor" -> "query-executor";
+                case "create-converter", "update-converter", "delete-converter", "result-converter", "page-converter" -> "application-converter";
+                case "create-dto", "update-dto", "page-dto" -> "adapter-dto";
+                case "view" -> "adapter-vo";
+                case "adapter-converter" -> "adapter-converter";
                 default -> source.getKey();
             };
             String relative = ProjectLayoutStrategy.resolve(config.getProfile()).relativePath(config, artifact, fileName);
@@ -172,19 +187,25 @@ class BackendCrudTemplateTest {
         assertFalse(Files.exists(classes.resolve("com/example/order/infrastructure/order/service/impl/OrdersPersistenceConverterImpl.class")));
 
         try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()}, getClass().getClassLoader())) {
-            Class<?> manageClass = loader.loadClass("com.example.order.application.order.OrdersManageImpl");
-            Object fake = loader.loadClass("com.example.order.domain.order.FakeOrdersDomainService").getConstructor().newInstance();
-            Object createConverter = loader.loadClass("com.example.order.application.order.converter.CreateOrdersCommandConverterImpl").getConstructor().newInstance();
-            Object updateConverter = loader.loadClass("com.example.order.application.order.converter.UpdateOrdersCommandConverterImpl").getConstructor().newInstance();
-            Object deleteConverter = loader.loadClass("com.example.order.application.order.converter.DeleteOrdersCommandConverterImpl").getConstructor().newInstance();
-            Object resultConverter = loader.loadClass("com.example.order.application.order.converter.OrdersResultConverterImpl").getConstructor().newInstance();
+            Class<?> manageClass = loader.loadClass("com.example.order.application.order.manage.impl.OrdersManageImpl");
+            Object fake = loader.loadClass("com.example.order.domain.order.service.FakeOrdersDomainService").getConstructor().newInstance();
+            Object createConverter = loader.loadClass("com.example.order.application.order.pojo.convertor.CreateOrdersCommandConverterImpl").getConstructor().newInstance();
+            Object updateConverter = loader.loadClass("com.example.order.application.order.pojo.convertor.UpdateOrdersCommandConverterImpl").getConstructor().newInstance();
+            Object deleteConverter = loader.loadClass("com.example.order.application.order.pojo.convertor.DeleteOrdersCommandConverterImpl").getConstructor().newInstance();
+            Object resultConverter = loader.loadClass("com.example.order.application.order.pojo.convertor.OrdersResultConverterImpl").getConstructor().newInstance();
+            Object pageConverter = loader.loadClass("com.example.order.application.order.pojo.convertor.OrdersPageQueryConverterImpl").getConstructor().newInstance();
+            Object createExecutor = executor(loader, "command.CreateOrdersCmdExe", fake, createConverter, resultConverter);
+            Object updateExecutor = executor(loader, "command.UpdateOrdersCmdExe", fake, updateConverter, resultConverter);
+            Object deleteExecutor = executor(loader, "command.DeleteOrdersCmdExe", fake, deleteConverter);
+            Object detailExecutor = executor(loader, "query.OrdersDetailQueryExe", fake, resultConverter);
+            Object pageExecutor = executor(loader, "query.OrdersPageQueryExe", fake, resultConverter, pageConverter);
             Constructor<?> constructor = manageClass.getDeclaredConstructors()[0];
             assertTrue(constructor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class));
             for (var parameter : constructor.getParameters()) {
                 assertTrue(parameter.isAnnotationPresent(org.springframework.beans.factory.annotation.Qualifier.class), parameter.toString());
             }
-            Object manage = constructor.newInstance(fake, createConverter, updateConverter, deleteConverter, resultConverter);
-            Class<?> updateCommand = loader.loadClass("com.example.order.application.order.UpdateOrdersCommand");
+            Object manage = constructor.newInstance(createExecutor, updateExecutor, deleteExecutor, detailExecutor, pageExecutor);
+            Class<?> updateCommand = loader.loadClass("com.example.order.application.order.pojo.command.UpdateOrdersCommand");
             Object command = updateCommand.getConstructor().newInstance();
             updateCommand.getMethod("setId", Long.class).invoke(command, 5L);
             updateCommand.getMethod("setExpectedVersion", Long.class).invoke(command, 7L);
@@ -192,13 +213,54 @@ class BackendCrudTemplateTest {
             manageClass.getMethod("update", updateCommand).invoke(manage, command);
             Object updated = fake.getClass().getField("updated").get(fake);
             assertEquals(7L, updated.getClass().getMethod("getVersion").invoke(updated));
-            Class<?> deleteCommand = loader.loadClass("com.example.order.application.order.DeleteOrdersCommand");
+            Class<?> deleteCommand = loader.loadClass("com.example.order.application.order.pojo.command.DeleteOrdersCommand");
             Object deletion = deleteCommand.getConstructor().newInstance();
             deleteCommand.getMethod("setId", Long.class).invoke(deletion, 5L);
             deleteCommand.getMethod("setExpectedVersion", Long.class).invoke(deletion, 9L);
             manageClass.getMethod("delete", deleteCommand).invoke(manage, deletion);
             assertEquals(9L, fake.getClass().getField("deletedVersion").get(fake));
+
+            Class<?> pageQueryType = loader.loadClass("com.example.order.application.order.pojo.query.OrdersPageQuery");
+            Object pageQuery = pageQueryType.getConstructor().newInstance();
+            pageQueryType.getMethod("setCode", String.class).invoke(pageQuery, "filtered");
+            Object slice = manageClass.getMethod("page", pageQueryType).invoke(manage, pageQuery);
+            assertEquals(true, slice.getClass().getMethod("hasNext").invoke(slice));
+            List<?> records = (List<?>) slice.getClass().getMethod("records").invoke(slice);
+            assertEquals(1, records.size());
+            assertEquals("6", records.getFirst().getClass().getMethod("getId").invoke(records.getFirst()));
+            Object domainQuery = fake.getClass().getField("queried").get(fake);
+            assertEquals("filtered", domainQuery.getClass().getMethod("getCode").invoke(domainQuery));
+
+            if (sources.containsKey("adapter-converter")) {
+                ObjectMapper json = new ObjectMapper();
+                Class<?> dtoType = loader.loadClass("com.example.order.adapter.order.pojo.dto.UpdateOrdersDTO");
+                Object dto = dtoType.getConstructor().newInstance();
+                dtoType.getMethod("setId", Long.class).invoke(dto, 5L);
+                dtoType.getMethod("setExpectedVersion", Long.class).invoke(dto, 7L);
+                dtoType.getMethod("setCode", String.class).invoke(dto, "A-1");
+                Class<?> mapperType = loader.loadClass("com.example.order.adapter.order.pojo.convertor.OrdersAdapterConverterImpl");
+                Object adapterMapper = mapperType.getConstructor().newInstance();
+                Object mappedCommand = mapperType.getMethod("toUpdateCommand", dtoType).invoke(adapterMapper, dto);
+                assertEquals(json.valueToTree(command), json.valueToTree(mappedCommand));
+
+                Class<?> resultType = loader.loadClass("com.example.order.application.order.pojo.result.OrdersResult");
+                Object result = resultType.getConstructor().newInstance();
+                resultType.getMethod("setId", String.class).invoke(result, "5");
+                resultType.getMethod("setCode", String.class).invoke(result, "A-1");
+                Object view = mapperType.getMethod("toView", resultType).invoke(adapterMapper, result);
+                assertEquals(json.valueToTree(result), json.valueToTree(view));
+            }
         }
+    }
+
+    private static Object executor(ClassLoader loader, String name, Object... dependencies) throws Exception {
+        Class<?> type = loader.loadClass("com.example.order.application.order.executor." + name);
+        Constructor<?> constructor = type.getDeclaredConstructors()[0];
+        assertTrue(constructor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class));
+        for (var parameter : constructor.getParameters()) {
+            assertTrue(parameter.isAnnotationPresent(org.springframework.beans.factory.annotation.Qualifier.class), parameter.toString());
+        }
+        return constructor.newInstance(dependencies);
     }
 
     private Map<String, String> render(CodegenConfigBO config) {
@@ -216,10 +278,15 @@ class BackendCrudTemplateTest {
                     rendered.put("create-command", text("command", model, "commandKind", "create"));
                     rendered.put("update-command", text("command", model, "commandKind", "update"));
                     rendered.put("delete-command", text("command", model, "commandKind", "delete"));
+                    rendered.put("create-executor", text("command-executor", model, "executorKind", "create"));
+                    rendered.put("update-executor", text("command-executor", model, "executorKind", "update"));
+                    rendered.put("delete-executor", text("command-executor", model, "executorKind", "delete"));
                 }
                 case "query" -> {
                     rendered.put("detail-query", text("query", model, "queryKind", "detail"));
                     rendered.put("page-query", text("query", model, "queryKind", "page"));
+                    rendered.put("detail-executor", text("query-executor", model, "executorKind", "detail"));
+                    rendered.put("page-executor", text("query-executor", model, "executorKind", "page"));
                 }
                 case "converter" -> {
                     rendered.put("persistence-converter", text("converter", model, "converterKind", "persistence"));
@@ -227,6 +294,15 @@ class BackendCrudTemplateTest {
                     rendered.put("update-converter", text("converter", model, "converterKind", "update"));
                     rendered.put("delete-converter", text("converter", model, "converterKind", "delete"));
                     rendered.put("result-converter", text("converter", model, "converterKind", "result"));
+                    rendered.put("page-converter", text("converter", model, "converterKind", "page"));
+                }
+                case "controller" -> {
+                    rendered.put("controller", new String(templates.render("controller", model), StandardCharsets.UTF_8));
+                    rendered.put("create-dto", text("adapter-dto", model, "dtoKind", "create"));
+                    rendered.put("update-dto", text("adapter-dto", model, "dtoKind", "update"));
+                    rendered.put("page-dto", text("adapter-dto", model, "dtoKind", "page"));
+                    rendered.put("view", new String(templates.render("adapter-vo", model), StandardCharsets.UTF_8));
+                    rendered.put("adapter-converter", new String(templates.render("adapter-converter", model), StandardCharsets.UTF_8));
                 }
                 default -> rendered.put(artifact, new String(templates.render(artifact, model), StandardCharsets.UTF_8));
             }

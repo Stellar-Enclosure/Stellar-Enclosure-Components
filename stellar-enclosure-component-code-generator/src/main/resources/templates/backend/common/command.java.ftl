@@ -1,4 +1,4 @@
-package [=applicationPackage];
+package [=commandPackage];
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
@@ -9,14 +9,19 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.experimental.Accessors;
+import top.egon.cola.component.common.core.pojo.BasePojo;
 
 @Data
 @NoArgsConstructor
+[#if commandKind != "create" || createFields?has_content]
 @AllArgsConstructor
+[/#if]
 @Accessors(chain = true)
+[#if commandKind != "create" || createFields?has_content]
 @Builder
+[/#if]
 [#if commandKind == "create"]
-public class [=createCommandType] {
+public class [=createCommandType] implements BasePojo {
 [#list createFields as field]
 [#if field.length?has_content]
     @Size(max = [=field.length])
@@ -28,7 +33,7 @@ public class [=createCommandType] {
 [/#list]
 }
 [#elseif commandKind == "update"]
-public class [=updateCommandType] {
+public class [=updateCommandType] implements BasePojo {
 
     @NotNull
     @Positive
@@ -48,7 +53,7 @@ public class [=updateCommandType] {
 [/#list]
 }
 [#else]
-public class [=deleteCommandType] {
+public class [=deleteCommandType] implements BasePojo {
 
     @NotNull
     @Positive

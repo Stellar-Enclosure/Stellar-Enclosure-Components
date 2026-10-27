@@ -14,8 +14,8 @@ this tool. Generated business projects do not depend on FreeMarker.
 Run from the repository root:
 
 ```bash
-./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator -am install -DskipTests
-./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=/tmp/egon-codegen.cp
+./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am install -DskipTests
+./mvnw -B -ntp -pl stellar-enclosure-component-code-generator dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=/tmp/egon-codegen.cp
 ```
 
 The first command uses `install` instead of `package` so the upstream modules land in the local
@@ -25,10 +25,10 @@ repository; the second one omits `-am`, otherwise every module in the reactor ov
 Prepend this module's `target/classes` to that classpath, then export it:
 
 ```bash
-export EGON_CODEGEN_CLASSPATH="stellar-enclosure-components/stellar-enclosure-component-code-generator/target/classes:$(cat /tmp/egon-codegen.cp)"
+export EGON_CODEGEN_CLASSPATH="stellar-enclosure-component-code-generator/target/classes:$(cat /tmp/egon-codegen.cp)"
 ```
 
-`scripts/egon-codegen.sh` only consumes an `EGON_CODEGEN_CLASSPATH` that has already been provided:
+`scripts/stellar-enclosure-codegen.sh` only consumes an `EGON_CODEGEN_CLASSPATH` that has already been provided:
 it runs no Maven, no curl, and starts no application. The Java executable is selected in the order
 `JAVA`, then `JAVA_HOME/bin/java`, then `java` on `PATH`. Missing Java, an empty
 `EGON_CODEGEN_CLASSPATH`, or any entry of that classpath that does not exist on disk all print
@@ -37,11 +37,12 @@ it runs no Maven, no curl, and starts no application. The Java executable is sel
 ## Commands
 
 ```text
-scripts/egon-codegen.sh templates
-scripts/egon-codegen.sh plan --config codegen.json
-scripts/egon-codegen.sh check --config codegen.json
-scripts/egon-codegen.sh apply --plan <plan-id> --config codegen.json
-scripts/egon-codegen.sh recover --config codegen.json
+scripts/stellar-enclosure-codegen.sh templates
+scripts/stellar-enclosure-codegen.sh plan --config codegen.json
+scripts/stellar-enclosure-codegen.sh check --config codegen.json
+scripts/stellar-enclosure-codegen.sh apply --plan <plan-id> --config codegen.json
+scripts/stellar-enclosure-codegen.sh recover --config codegen.json
+scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths-file reviewed-retirement.json
 ```
 
 On success the JSON object is the last line of standard output. This module ships no logging
@@ -61,14 +62,17 @@ and `RENAME` actions that need explicit acceptance, but `plan` only emits `CONFL
 the current CLI.
 
 `backend-crud` generates the complete base chain: PO, DAO, Mapper XML, Repository, domain model and
-Domain Service/implementation, Command/Query/Result, converters, Manage/implementation; Light and
-Web additionally generate Controllers, and Service generates no HTTP entry point.
+Domain Service/implementation, Command/Query/Result, matching CmdExe/QueryExe classes, converters,
+and Manage/implementation. Light and Web also generate Controller, DTO, VO and Adapter converter;
+Service generates no HTTP entry point. Selecting `command` emits three Command/CmdExe pairs,
+selecting `query` emits two Query/QueryExe pairs, and selecting `controller` includes its DTOs,
+VO and converter. The plan lists every file in the selected group.
 `persistence-crud` expands to only the first four items. `artifacts` can be selected one by one, and
 the aliases `pojo`→`po` and `mapper`→`mapper-xml` are normalized first. When a lower-level artifact
 is omitted, `existingTypeMappings` must declare the type that already exists: a missing `po` or
 `dao` returns `MISSING_TYPE` (exit code 3). The generator enforces only those two; the
-`requiredTypes` of the remaining catalog entries take no part in validation today, and the
-generation scope never widens on its own. Both queries and writes keep Mapper/XML access inside the
+`requiredTypes` of the remaining catalog entries take no part in validation today. Beyond those
+grouped files and explicitly configured events, no additional artifacts are selected. Both queries and writes keep Mapper/XML access inside the
 Repository, and a Domain Service implementation must not call a DAO directly. `logicalTables` must
 be stated explicitly and matched one by one against the logical tables in the DDL; a table name that
 does not exist fails immediately.
@@ -80,6 +84,80 @@ in order, `manifest` reads the `manifest` path below `resourceRoot`. A manifest 
 `{"family":...,"scripts":[{"version":...,"path":...,"sha256":...}]}`; script bytes that do not match
 the recorded `sha256`, or a changed prefix among the already recorded versions, return
 `CHECKSUM_DRIFT`.
+
+## CQERS and inbound events
+
+Generated code uses `domain/<domain>/{vos,service}`,
+`application/<domain>/{pojo,manage,executor}`, and `adapter/<domain>/{controller,pojo,event}`.
+Manage delegates to the matching executor; Commands keep their transaction boundaries and Queries
+remain read-only. HTTP JSON fields preserve the prior Command/Result semantics, but generated
+Controllers do not configure the target service's resource, scope or field authorization. Integrate
+them with the target identity and authorization mechanisms before exposure; resource registration
+alone does not grant roles.
+
+No event class or empty handler is generated without a contract. To generate an inbound event,
+explicitly select `command` or `backend-crud` and provide complete definitions. Multi-module
+projects also need `modulePaths.adapter`. The following shows the event portion of a full configuration:
+
+```json
+{
+  "events": {
+    "enabled": true,
+    "definitions": [{
+      "table": "orders",
+      "name": "OrderImportedEvent",
+      "action": "create",
+      "schemaVersion": "v1",
+      "idempotencyType": "com.example.order.support.EventDedupService",
+      "idempotencyBean": "eventDedupService",
+      "idempotencyMethod": "executeOnce",
+      "fieldMappings": {"code": "externalCode"}
+    }]
+  }
+}
+```
+
+The table must be selected in `logicalTables`; names must be unique Java types ending in `Event`,
+and action is `create`, `update`, or `delete`. Each `fieldMappings` key is a target Command Java
+field and its value is a lowerCamel event field. Create maps all create fields; update maps `id`,
+`expectedVersion` and all update fields; delete maps `id` and `expectedVersion`. The event always
+contains `eventId` and `schemaVersion`, which cannot be mapping sources. The generator emits the
+Event, MapStruct EventConverter, EventExe and an Adapter EventHandler. The handler is an entry point
+for an existing consumer; it does not subscribe to a queue/topic or publish events.
+Changing `schemaVersion` changes what the receiver accepts. Handle in-flight messages and producer
+compatibility during rollout; the generator does not migrate or replay old messages.
+
+The configured existing idempotency bean must provide a method compatible with
+`void executeOnce(String eventType, String eventId, Object event, Runnable action)`; the method name
+is configured by `idempotencyMethod`. Its type must be an Application/Domain port or shared contract,
+not a target-project Infrastructure, Adapter or Starter implementation; Spring injects the
+implementation. It must execute the action synchronously and atomically record
+the result in a transaction compatible with the business write, scoped by trusted tenant, consumer,
+event type and ID. Matching duplicates are skipped, a reused ID with different content is rejected,
+and processing failures propagate as runtime exceptions so the transaction rolls back for retry. Use
+the event to calculate a stable fingerprint without logging sensitive payloads. The caller owns source
+validation, trusted tenant context, retry/dead-letter and
+acknowledgement after commit. The generator creates no idempotency store and does not claim cross-
+database or cross-service exactly-once delivery.
+
+An old flat-layout file, retained ownership record, or previously owned artifact left behind by a
+module-path change triggers `LEGACY_LAYOUT_CONFLICT` (exit 4).
+Removing or renaming a previously generated event triggers `EVENT_SCOPE_CONFLICT` (exit 4); `check`
+returns `DRIFT` and the affected paths. The tool never deletes, moves or adopts those files
+automatically. Review callers and ownership and migrate existing projects separately; do not delete
+the state file or reset hashes to bypass protection. For obsolete owned paths:
+
+1. Run `check` with the intended new configuration. Review `legacyPaths` / `omittedEventPaths` and
+   save the complete nested `retirementReview` JSON object to `reviewed-retirement.json`. It contains
+   only conflicting paths with generator ownership, together with the reviewed fingerprints.
+2. Preserve or migrate the affected source files and update their callers yourself. Each reviewed path
+   must be absent from its original location before retirement; unowned conflicts also need separate review.
+3. Run `retire-legacy --config codegen.json --paths-file reviewed-retirement.json`. Under the output
+   lock it revalidates the current inputs, ownership and absent paths, backs up the original state to
+   `.egon/codegen/state-history/<sha256>.json`, and removes only the reviewed ownership records.
+   It does not move or delete source files. Re-run `plan` and review the new files; existing unmanaged
+   target files still conflict and are never adopted. Changed inputs/state require a new review; previous
+   plans are stale after state changes. Resolve an interrupted generation with `recover` first.
 
 Generation reads only `CREATE TABLE` definitions, including those inside the existing role-scoped
 `DO` branches. Standalone `CREATE INDEX` and seed `INSERT`/`UPDATE`/`DELETE` statements are ignored
@@ -107,14 +185,14 @@ overwritten automatically. `apply` re-checks the fingerprints of the configurati
 tool code and generation state, and preflights every target file under a lock on the same output
 directory. A v1 plan needs a fresh `plan` run.
 
-`plan`, `apply` and `recover` maintain only `.egon/codegen/` below the output root:
+`plan`, `apply`, `recover` and `retire-legacy` maintain only `.egon/codegen/` below the output root:
 `plans/<plan-id>.json` is written by `plan`, `state.json` is updated by `apply`, the journal inside
 it records the interrupted phase so `recover` can roll back, and `apply.lock` is the write lock.
 Deleting that directory strips the generator of every file-ownership record, after which all
 same-named files are judged as conflicts.
 
 Current acceptance covers compiling from source and the isolated tests:
-`./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-code-generator -am test`. It does not
+`./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am test`. It does not
 mean PostgreSQL, ShardingSphere or MQ have run in a real environment.
 
 
@@ -141,7 +219,8 @@ outputs keep their semantic names. Framework and generated protocol types are un
 
 `CLEAN` means the selected files match the current templates; it is not an architecture verdict.
 After upgrading the tool/templates, create a fresh plan. A previously generated, unedited converter
-can be updated in place, with its baseline hash maintained by `apply`. If a Domain Service contains
+whose path is unchanged can be updated in place, with its baseline hash maintained by `apply`.
+The older flat Application converter path requires the legacy-layout review described above. If a Domain Service contains
 business edits, a combined apply stops before any writes. Select only the unedited generated files,
 and review the import change in the edited service separately. Preserve its recorded baseline and
 expected drift; do not reset hashes or delete state to force `CLEAN`. A clean compile regenerates

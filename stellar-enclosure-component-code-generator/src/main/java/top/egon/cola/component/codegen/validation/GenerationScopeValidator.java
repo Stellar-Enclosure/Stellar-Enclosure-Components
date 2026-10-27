@@ -6,6 +6,7 @@ import top.egon.cola.component.codegen.model.CodegenPlanBO;
 import top.egon.cola.component.codegen.model.CodegenSchemaBO;
 import top.egon.cola.component.codegen.profile.ProjectLayoutStrategy;
 
+import javax.lang.model.SourceVersion;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,6 +61,7 @@ public class GenerationScopeValidator {
         }
         for (CodegenSchemaBO.TableBO table : schema.getTables()) {
             diagnostics.addAll(validateTable(config, table));
+            diagnostics.addAll(validateEvents(config, table));
         }
         diagnostics.addAll(existingTypes(config));
         if (!diagnostics.isEmpty()) {
@@ -105,15 +107,31 @@ public class GenerationScopeValidator {
         model.put("domainQueryType", stem + "DomainQuery");
         model.put("domainQueryFqn", domainPackage + "." + stem + "DomainQuery");
         model.put("domainServiceType", stem + "DomainService");
+        model.put("domainServicePackage", layout.packageName(config, "domain-service"));
         model.put("domainServiceFqn", layout.packageName(config, "domain-service") + "." + stem + "DomainService");
         model.put("domainImplType", stem + "DomainServiceImpl");
         model.put("domainImplPackage", layout.packageName(config, "domain-impl"));
         model.put("applicationPackage", layout.packageName(config, "command"));
+        model.put("commandPackage", layout.packageName(config, "command"));
+        model.put("queryPackage", layout.packageName(config, "query"));
+        model.put("resultPackage", layout.packageName(config, "result"));
+        model.put("managePackage", layout.packageName(config, "manage"));
+        model.put("manageImplPackage", layout.packageName(config, "manage-impl"));
+        model.put("commandExecutorPackage", layout.packageName(config, "command-executor"));
+        model.put("queryExecutorPackage", layout.packageName(config, "query-executor"));
+        model.put("adapterDtoPackage", layout.packageName(config, "adapter-dto"));
+        model.put("adapterVoPackage", layout.packageName(config, "adapter-vo"));
+        model.put("adapterConverterPackage", layout.packageName(config, "adapter-converter"));
         model.put("createCommandType", "Create" + stem + "Command");
         model.put("updateCommandType", "Update" + stem + "Command");
         model.put("deleteCommandType", "Delete" + stem + "Command");
         model.put("detailQueryType", stem + "DetailQuery");
         model.put("pageQueryType", stem + "PageQuery");
+        model.put("createExecutorType", "Create" + stem + "CmdExe");
+        model.put("updateExecutorType", "Update" + stem + "CmdExe");
+        model.put("deleteExecutorType", "Delete" + stem + "CmdExe");
+        model.put("detailExecutorType", stem + "DetailQueryExe");
+        model.put("pageExecutorType", stem + "PageQueryExe");
         model.put("resultType", stem + "Result");
         model.put("manageType", stem + "Manage");
         model.put("manageImplType", stem + "ManageImpl");
@@ -122,6 +140,11 @@ public class GenerationScopeValidator {
         model.put("controllerType", stem + "Controller");
         model.put("controllerBean", decapitalize(stem + "Controller"));
         model.put("controllerPackage", layout.packageName(config, "controller"));
+        model.put("createDtoType", "Create" + stem + "DTO");
+        model.put("updateDtoType", "Update" + stem + "DTO");
+        model.put("pageDtoType", stem + "PageDTO");
+        model.put("viewType", stem + "VO");
+        model.put("adapterConverterType", stem + "AdapterConverter");
         model.put("persistenceConverterType", stem + "PersistenceConverter");
         model.put("persistenceConverterPackage", layout.packageName(config, "persistence-converter"));
         model.put("persistenceConverterFqn", layout.packageName(config, "persistence-converter") + "." + stem + "PersistenceConverter");
@@ -130,10 +153,13 @@ public class GenerationScopeValidator {
         model.put("updateConverterType", "Update" + stem + "CommandConverter");
         model.put("deleteConverterType", "Delete" + stem + "CommandConverter");
         model.put("resultConverterType", stem + "ResultConverter");
+        model.put("pageConverterType", stem + "PageQueryConverter");
         model.put("applicationConverterPackage", layout.packageName(config, "application-converter"));
         model.put("domainFields", policyFields(table, unionPolicies(policies)));
         model.put("createFields", policyFields(table, list(policies, "create")));
         model.put("updateFields", policyFields(table, list(policies, "update")));
+        model.put("createColumns", list(policies, "create"));
+        model.put("updateColumns", list(policies, "update"));
         model.put("resultFields", policyFields(table, list(policies, "result")));
         model.put("filterFields", policyFields(table, list(policies, "filter")));
         model.put("sortFields", policyFields(table, list(policies, "sort")));
@@ -144,6 +170,108 @@ public class GenerationScopeValidator {
         model.put("ignoredPoFields", List.of(
                 "tenantId", "createUserId", "createTime", "updateUserId", "updateTime", "deletedAt"));
         return Map.copyOf(model);
+    }
+
+    public Map<String, Object> eventModel(CodegenConfigBO config, CodegenSchemaBO.TableBO table,
+                                          CodegenConfigBO.EventDefinitionBO event) {
+        ProjectLayoutStrategy layout = ProjectLayoutStrategy.resolve(config.getProfile());
+        Map<String, Object> model = new LinkedHashMap<>(renderModel(config, table, "command"));
+        String stem = typeName(table.getLogicalName(), "");
+        String action = event.getAction();
+        model.put("eventPackage", layout.packageName(config, "event"));
+        model.put("eventExecutorPackage", layout.packageName(config, "event-executor"));
+        model.put("eventConverterPackage", layout.packageName(config, "event-converter"));
+        model.put("eventHandlerPackage", layout.packageName(config, "event-handler"));
+        model.put("eventType", event.getName());
+        model.put("eventExecutorType", event.getName() + "Exe");
+        model.put("eventConverterType", event.getName() + "Converter");
+        model.put("eventHandlerType", event.getName() + "Handler");
+        model.put("eventSchemaVersion", event.getSchemaVersion());
+        model.put("eventCommandType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "Command");
+        model.put("eventCommandExecutorType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "CmdExe");
+        model.put("idempotencyType", event.getIdempotencyType());
+        model.put("idempotencyBean", event.getIdempotencyBean());
+        model.put("idempotencyMethod", event.getIdempotencyMethod());
+        List<Map<String, String>> fields = new ArrayList<>();
+        for (Map<String, String> target : eventTargets(config, table, action)) {
+            Map<String, String> field = new LinkedHashMap<>(target);
+            field.put("source", event.getFieldMappings().get(target.get("target")));
+            fields.add(Map.copyOf(field));
+        }
+        model.put("eventFields", List.copyOf(fields));
+        return Map.copyOf(model);
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> validateEvents(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        if (config.getEvents() == null || !config.getEvents().isEnabled()
+                || config.getEvents().getDefinitions() == null) {
+            return List.of();
+        }
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        for (CodegenConfigBO.EventDefinitionBO event : config.getEvents().getDefinitions()) {
+            if (event == null || !table.getLogicalName().equals(event.getTable()) || event.getFieldMappings() == null
+                    || event.getAction() == null || !Set.of("create", "update", "delete").contains(event.getAction())) {
+                continue;
+            }
+            if (!"delete".equals(event.getAction()) && list(config.getFieldPolicies(), event.getAction()).stream()
+                    .anyMatch(name -> name == null || BASE_COLUMNS.contains(name) || column(table, name) == null)) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/fieldPolicies/" + event.getAction(),
+                        "event command fields must be existing business columns"));
+                continue;
+            }
+            List<Map<String, String>> targets = eventTargets(config, table, event.getAction());
+            if (event.getIdempotencyType() != null && event.getName() != null) {
+                String guard = event.getIdempotencyType().substring(event.getIdempotencyType().lastIndexOf('.') + 1);
+                String commandExecutor = Character.toUpperCase(event.getAction().charAt(0))
+                        + event.getAction().substring(1) + typeName(table.getLogicalName(), "") + "CmdExe";
+                if (Set.of(event.getName(), event.getName() + "Converter", event.getName() + "Exe", commandExecutor,
+                        "Valid", "NotNull", "Qualifier", "Service", "Validated", "Transactional",
+                        "RequiredArgsConstructor", "Autowired", "Slf4j").contains(guard)) {
+                    diagnostics.add(diagnostic("CONFIG_REQUIRED", "/events/definitions/idempotencyType",
+                            "idempotency type conflicts with an event executor import"));
+                    continue;
+                }
+            }
+            Set<String> expected = new java.util.LinkedHashSet<>();
+            targets.forEach(field -> expected.add(field.get("target")));
+            if (expected.size() != targets.size()) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/events/definitions/fieldMappings",
+                        "event command fields must be unique"));
+                continue;
+            }
+            if (!expected.equals(event.getFieldMappings().keySet())) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/events/definitions/fieldMappings",
+                        "event mappings must cover exactly the selected command fields: " + expected));
+                continue;
+            }
+            Set<String> sources = new java.util.LinkedHashSet<>();
+            for (String source : event.getFieldMappings().values()) {
+                if (source == null || !source.matches("[a-z][A-Za-z0-9]*")
+                        || !SourceVersion.isIdentifier(source) || SourceVersion.isKeyword(source)
+                        || "eventId".equals(source) || "schemaVersion".equals(source) || !sources.add(source)) {
+                    diagnostics.add(diagnostic("CONFIG_REQUIRED", "/events/definitions/fieldMappings",
+                            "event source fields must be unique Java identifiers other than eventId and schemaVersion"));
+                    break;
+                }
+            }
+        }
+        return diagnostics;
+    }
+
+    private static List<Map<String, String>> eventTargets(CodegenConfigBO config, CodegenSchemaBO.TableBO table,
+                                                           String action) {
+        List<Map<String, String>> targets = new ArrayList<>();
+        if (!"create".equals(action)) {
+            targets.add(Map.of("target", "id", "javaType", "Long", "nullable", "false", "length", "", "constraint", "positive"));
+            targets.add(Map.of("target", "expectedVersion", "javaType", "Long", "nullable", "false", "length", "", "constraint", "nonnegative"));
+        }
+        if (!"delete".equals(action)) {
+            for (Map<String, String> field : policyFields(table, list(config.getFieldPolicies(), action))) {
+                targets.add(Map.of("target", field.get("javaName"), "javaType", field.get("javaType"),
+                        "nullable", field.get("nullable"), "length", field.get("length"), "constraint", ""));
+            }
+        }
+        return targets;
     }
 
     private static List<String> unionPolicies(CodegenConfigBO.FieldPoliciesBO policies) {
@@ -185,7 +313,7 @@ public class GenerationScopeValidator {
             fields.add(Map.of(
                     "column", column.getName(),
                     "javaName", javaName(column.getName()),
-                    "javaType", javaType == null ? "String" : javaType.startsWith("java.time.") ? javaType : simple(javaType),
+                    "javaType", javaType == null ? "String" : javaType.startsWith("java.") ? javaType : simple(javaType),
                     "nullable", String.valueOf(!Boolean.FALSE.equals(column.getNullable())),
                     "length", column.getLength() == null ? "" : column.getLength().toString()));
         }

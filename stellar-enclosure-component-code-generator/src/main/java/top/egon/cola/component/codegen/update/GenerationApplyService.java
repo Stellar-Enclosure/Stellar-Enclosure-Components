@@ -9,6 +9,7 @@ import top.egon.cola.component.codegen.validation.OutputPathValidator;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -161,6 +162,85 @@ public class GenerationApplyService {
         }
     }
 
+    /** Releases explicitly reviewed obsolete ownership records without moving or deleting source files. */
+    public Result retireLegacy(Path outputRoot, RetirementReview review, Supplier<RetirementInputs> currentSupplier) {
+        List<String> requested = review == null ? null : review.paths();
+        if (requested == null || requested.isEmpty() || requested.stream().anyMatch(path -> path == null || path.isBlank())
+                || currentSupplier == null) {
+            return Result.blocked(CONFLICT, "an explicit nonempty path list is required");
+        }
+        paths.checkDistinct(requested);
+        paths.check(outputRoot, ".egon/codegen/apply.lock");
+        paths.check(outputRoot, ".egon/codegen/state.json");
+        paths.check(outputRoot, ".egon/codegen/state.json.tmp");
+        Path lockPath = outputRoot.resolve(".egon/codegen/apply.lock");
+        try {
+            Files.createDirectories(lockPath.getParent());
+            try (FileChannel channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                channel.lock();
+                GenerationStateRepository.StateBO state = stateRepository.load(outputRoot);
+                if (state.getJournal() != null && state.getJournal().getPhase() != null
+                        && !"COMMITTED".equals(state.getJournal().getPhase())) {
+                    return Result.blocked(RECOVERY_REQUIRED, "recover the interrupted generation first");
+                }
+                if (!stateRepository.fingerprint(state).equals(review.stateFingerprint())) {
+                    return Result.blocked(STALE_PLAN, "generation state changed since review");
+                }
+                RetirementInputs current;
+                try {
+                    current = currentSupplier.get();
+                } catch (RuntimeException failure) {
+                    return Result.blocked(STALE_PLAN, "generation inputs could not be revalidated");
+                }
+                if (current == null || current.eligiblePaths() == null
+                        || !java.util.Objects.equals(current.inputFingerprint(), review.inputFingerprint())
+                        || !java.util.Objects.equals(current.configFingerprint(), review.configFingerprint())
+                        || !java.util.Objects.equals(current.templateFingerprint(), review.templateFingerprint())
+                        || !java.util.Objects.equals(current.componentFingerprint(), review.componentFingerprint())) {
+                    return Result.blocked(STALE_PLAN, "generation inputs changed since review");
+                }
+                Set<String> owned = new LinkedHashSet<>();
+                for (CodegenPlanBO.ArtifactStateBO artifact : state.getArtifacts()) {
+                    owned.add(artifact.getPath());
+                }
+                for (String path : requested) {
+                    paths.check(outputRoot, path);
+                    if (!current.eligiblePaths().contains(path) || !owned.contains(path)) {
+                        return Result.blocked(CONFLICT, "path is not an obsolete owned artifact: " + path);
+                    }
+                    if (Files.exists(outputRoot.resolve(path), LinkOption.NOFOLLOW_LINKS)) {
+                        return Result.blocked(CONFLICT, "move or preserve the existing file before retiring: " + path);
+                    }
+                }
+                Path stateFile = GenerationStateRepository.stateFile(outputRoot);
+                if (!stateRepository.fingerprint(stateRepository.load(outputRoot)).equals(review.stateFingerprint())) {
+                    return Result.blocked(STALE_PLAN, "generation state changed during review");
+                }
+                if (Files.exists(stateFile.resolveSibling("state.json.tmp"), LinkOption.NOFOLLOW_LINKS)) {
+                    return Result.blocked(CONFLICT, "state temporary file already exists");
+                }
+                byte[] original = Files.readAllBytes(stateFile);
+                String backupRelative = ".egon/codegen/state-history/" + GenerationPlanService.sha256(original) + ".json";
+                paths.check(outputRoot, backupRelative);
+                Path backup = outputRoot.resolve(backupRelative);
+                Files.createDirectories(backup.getParent());
+                if (Files.exists(backup, LinkOption.NOFOLLOW_LINKS)) {
+                    if (!java.util.Arrays.equals(original, Files.readAllBytes(backup))) {
+                        return Result.blocked(CONFLICT, "state backup differs: " + backupRelative);
+                    }
+                } else {
+                    Files.write(backup, original, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                }
+                Set<String> retired = Set.copyOf(requested);
+                state.getArtifacts().removeIf(artifact -> retired.contains(artifact.getPath()));
+                stateRepository.save(outputRoot, state);
+                return Result.blocked(APPLIED, "retired " + retired.size() + " ownership records; backup: " + backupRelative);
+            }
+        } catch (IOException exception) {
+            throw new IllegalStateException("legacy ownership retirement failed", exception);
+        }
+    }
+
     private Result recoverLocked(Path outputRoot, String mode) {
         if (!"rollback".equals(mode)) {
             return Result.blocked(CONFLICT, "unsupported recovery mode");
@@ -300,5 +380,13 @@ public class GenerationApplyService {
 
     public record CurrentInputs(String inputFingerprint, String configFingerprint, String templateFingerprint,
                                 String componentFingerprint, List<GenerationPlanService.RenderedFile> renderedFiles) {
+    }
+
+    public record RetirementReview(String inputFingerprint, String configFingerprint, String stateFingerprint,
+                                   String templateFingerprint, String componentFingerprint, List<String> paths) {
+    }
+
+    public record RetirementInputs(String inputFingerprint, String configFingerprint, String templateFingerprint,
+                                   String componentFingerprint, Set<String> eligiblePaths) {
     }
 }

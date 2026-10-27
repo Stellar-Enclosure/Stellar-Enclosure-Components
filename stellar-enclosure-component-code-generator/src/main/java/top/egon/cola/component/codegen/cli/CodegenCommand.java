@@ -33,6 +33,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -85,6 +86,7 @@ public class CodegenCommand {
                 case "apply" -> apply(flags, out, err);
                 case "check" -> check(flags, out, err);
                 case "recover" -> recover(flags, out, err);
+                case "retire-legacy" -> retireLegacy(flags, out, err);
                 default -> error(out, err, 2, "CONFIG_REQUIRED", "unknown command");
             };
         } catch (Exception exception) {
@@ -113,6 +115,8 @@ public class CodegenCommand {
         artifacts.sort(String::compareTo);
         body.put("artifacts", artifacts);
         body.put("presets", List.of("persistence-crud", "backend-crud"));
+        body.put("eventConfiguration", "events.definitions");
+        body.put("eventActions", List.of("create", "update", "delete"));
         body.put("planFormatVersion", CodegenPlanBO.FORMAT_VERSION);
         out.println(MAPPER.writeValueAsString(body));
         return 0;
@@ -123,7 +127,18 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
-        CodegenPlanBO plan = buildPlan(loaded.config(), loaded.schema());
+        List<GenerationPlanService.RenderedFile> rendered = render(loaded.config(), loaded.schema());
+        List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), rendered);
+        if (!legacy.isEmpty()) {
+            return error(out, err, 4, "LEGACY_LAYOUT_CONFLICT",
+                    "review and migrate legacy generated paths before planning: " + String.join(", ", legacy));
+        }
+        List<String> omittedEvents = omittedEventPaths(loaded.root(), loaded.config(), rendered);
+        if (!omittedEvents.isEmpty()) {
+            return error(out, err, 4, "EVENT_SCOPE_CONFLICT",
+                    "review previously generated event paths before changing their scope: " + String.join(", ", omittedEvents));
+        }
+        CodegenPlanBO plan = buildPlan(loaded.config(), loaded.schema(), rendered);
         Files.createDirectories(planFile(loaded.root(), plan.getPlanId()).getParent());
         MAPPER.writeValue(planFile(loaded.root(), plan.getPlanId()).toFile(), plan);
         Map<String, Object> body = summary(plan);
@@ -142,6 +157,17 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
+        List<GenerationPlanService.RenderedFile> rendered = render(loaded.config(), loaded.schema());
+        List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), rendered);
+        if (!legacy.isEmpty()) {
+            return error(out, err, 4, "LEGACY_LAYOUT_CONFLICT",
+                    "review and migrate legacy generated paths before applying: " + String.join(", ", legacy));
+        }
+        List<String> omittedEvents = omittedEventPaths(loaded.root(), loaded.config(), rendered);
+        if (!omittedEvents.isEmpty()) {
+            return error(out, err, 4, "EVENT_SCOPE_CONFLICT",
+                    "review previously generated event paths before changing their scope: " + String.join(", ", omittedEvents));
+        }
         Path file = planFile(loaded.root(), flags.get("--plan"));
         if (!Files.exists(file)) {
             return error(out, err, 2, "CONFIG_REQUIRED", "plan was not found");
@@ -156,9 +182,14 @@ public class CodegenCommand {
                 if (fresh.code() != 0) {
                     return null;
                 }
+                List<GenerationPlanService.RenderedFile> freshFiles = render(fresh.config(), fresh.schema());
+                if (!legacyLayoutConflicts(fresh.root(), fresh.config(), freshFiles).isEmpty()
+                        || !omittedEventPaths(fresh.root(), fresh.config(), freshFiles).isEmpty()) {
+                    return null;
+                }
                 return new GenerationApplyService.CurrentInputs(fresh.schema().getInputFingerprint(),
                         configFingerprint(fresh.config()), templates.getTemplateSetDigest(),
-                        componentFingerprint(), render(fresh.config(), fresh.schema()));
+                        componentFingerprint(), freshFiles);
             } catch (Exception failure) {
                 throw new IllegalStateException("generation inputs changed", failure);
             }
@@ -179,15 +210,39 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
-        boolean drift = false;
-        for (GenerationPlanService.RenderedFile rendered : render(loaded.config(), loaded.schema())) {
+        List<GenerationPlanService.RenderedFile> files = render(loaded.config(), loaded.schema());
+        List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), files);
+        List<String> omittedEvents = omittedEventPaths(loaded.root(), loaded.config(), files);
+        boolean drift = !legacy.isEmpty() || !omittedEvents.isEmpty();
+        for (GenerationPlanService.RenderedFile rendered : files) {
             Path target = loaded.root().resolve(rendered.relativePath());
             byte[] disk = Files.exists(target) ? Files.readAllBytes(target) : null;
             if (disk == null || !GenerationPlanService.sha256(disk).equals(GenerationPlanService.sha256(rendered.bytes()))) {
                 drift = true;
             }
         }
-        out.println(MAPPER.writeValueAsString(Map.of("status", drift ? "DRIFT" : "CLEAN")));
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("status", drift ? "DRIFT" : "CLEAN");
+        if (!legacy.isEmpty()) {
+            summary.put("legacyPaths", legacy);
+        }
+        if (!omittedEvents.isEmpty()) {
+            summary.put("omittedEventPaths", omittedEvents);
+        }
+        if (!legacy.isEmpty() || !omittedEvents.isEmpty()) {
+            GenerationStateRepository.StateBO state = states.load(loaded.root());
+            Set<String> owned = new LinkedHashSet<>();
+            state.getArtifacts().forEach(artifact -> owned.add(artifact.getPath()));
+            Set<String> reviewed = new LinkedHashSet<>(legacy);
+            reviewed.addAll(omittedEvents);
+            reviewed.retainAll(owned);
+            if (!reviewed.isEmpty()) {
+                summary.put("retirementReview", new GenerationApplyService.RetirementReview(
+                        loaded.schema().getInputFingerprint(), configFingerprint(loaded.config()), states.fingerprint(state),
+                        templates.getTemplateSetDigest(), componentFingerprint(), reviewed.stream().sorted().toList()));
+            }
+        }
+        out.println(MAPPER.writeValueAsString(summary));
         return drift ? 8 : 0;
     }
 
@@ -201,11 +256,171 @@ public class CodegenCommand {
         return "CONFLICT".equals(result.status()) ? 4 : 0;
     }
 
-    private CodegenPlanBO buildPlan(CodegenConfigBO config, CodegenSchemaBO schema) {
+    private int retireLegacy(Map<String, String> flags, PrintStream out, PrintStream err) throws Exception {
+        if (!flags.containsKey("--config") || !flags.containsKey("--paths-file")) {
+            return error(out, err, 2, "CONFIG_REQUIRED", "retire-legacy requires --config and --paths-file");
+        }
+        GenerationApplyService.RetirementReview review;
+        try {
+            review = MAPPER.readValue(Path.of(flags.get("--paths-file")).toFile(),
+                    GenerationApplyService.RetirementReview.class);
+        } catch (IOException failure) {
+            return error(out, err, 2, "CONFIG_REQUIRED", "paths file must contain the reviewed retirement object");
+        }
+        if (review == null || review.paths() == null || review.paths().isEmpty()
+                || review.inputFingerprint() == null
+                || !review.inputFingerprint().matches("[0-9a-f]{64}(\\n[0-9a-f]{64})*")
+                || !sha256Value(review.configFingerprint())
+                || !sha256Value(review.stateFingerprint()) || !sha256Value(review.templateFingerprint())
+                || !sha256Value(review.componentFingerprint())) {
+            return error(out, err, 2, "CONFIG_REQUIRED", "retirement review must include paths and input fingerprints");
+        }
+        for (String path : review.paths()) {
+            if (path == null || path.isBlank()) {
+                return error(out, err, 2, "CONFIG_REQUIRED", "every retired path must be a nonblank string");
+            }
+        }
+        try {
+            paths.checkDistinct(review.paths());
+        } catch (OutputPathValidator.PathValidationException failure) {
+            return error(out, err, 2, failure.getCode(), failure.getMessage());
+        }
+        Loaded loaded = load(flags, out, err);
+        if (loaded.code() != 0) {
+            return loaded.code();
+        }
+        GenerationApplyService.Result result = applyService.retireLegacy(loaded.root(), review, () -> {
+            try {
+                Loaded fresh = load(flags, out, err);
+                if (fresh.code() != 0 || !fresh.root().toAbsolutePath().normalize()
+                        .equals(loaded.root().toAbsolutePath().normalize())) {
+                    return null;
+                }
+                List<GenerationPlanService.RenderedFile> files = render(fresh.config(), fresh.schema());
+                Set<String> eligible = new LinkedHashSet<>(legacyLayoutConflicts(fresh.root(), fresh.config(), files));
+                eligible.addAll(omittedEventPaths(fresh.root(), fresh.config(), files));
+                return new GenerationApplyService.RetirementInputs(fresh.schema().getInputFingerprint(),
+                        configFingerprint(fresh.config()), templates.getTemplateSetDigest(), componentFingerprint(), eligible);
+            } catch (Exception failure) {
+                throw new IllegalStateException("generation inputs changed", failure);
+            }
+        });
+        out.println(MAPPER.writeValueAsString(Map.of("status", result.status(), "detail", result.detail())));
+        return switch (result.status()) {
+            case "APPLIED", "NO_CHANGE" -> 0;
+            case "CONFLICT" -> 4;
+            case "STALE_PLAN" -> 6;
+            case "RECOVERY_REQUIRED" -> 7;
+            default -> 2;
+        };
+    }
+
+    private static boolean sha256Value(String value) {
+        return value != null && value.matches("[0-9a-f]{64}");
+    }
+
+    private CodegenPlanBO buildPlan(CodegenConfigBO config, CodegenSchemaBO schema,
+                                    List<GenerationPlanService.RenderedFile> rendered) {
         Path root = Path.of(config.getOutputRoot());
-        return plans.plan(root, render(config, schema), config.getProfile(), schema.getInputFingerprint(),
+        return plans.plan(root, rendered, config.getProfile(), schema.getInputFingerprint(),
                 configFingerprint(config), schema.getVersionChecksumPrefix(), templates.getTemplateSetDigest(),
                 componentFingerprint(), List.of());
+    }
+
+    private List<String> legacyLayoutConflicts(Path root, CodegenConfigBO config,
+                                               List<GenerationPlanService.RenderedFile> rendered) {
+        Set<String> owned = new LinkedHashSet<>();
+        List<CodegenPlanBO.ArtifactStateBO> previous = states.load(root).getArtifacts();
+        for (CodegenPlanBO.ArtifactStateBO artifact : previous) {
+            if (artifact.getPath() != null) {
+                paths.check(root, artifact.getPath());
+                owned.add(artifact.getPath());
+            }
+        }
+        Map<ArtifactIdentity, Set<String>> selectedByIdentity = new LinkedHashMap<>();
+        for (GenerationPlanService.RenderedFile file : rendered) {
+            ArtifactIdentity key = artifactIdentity(file.artifact(), file.table(), file.relativePath());
+            selectedByIdentity.computeIfAbsent(key, ignored -> new LinkedHashSet<>()).add(file.relativePath());
+        }
+        Set<String> conflicts = new LinkedHashSet<>();
+        for (GenerationPlanService.RenderedFile file : rendered) {
+            String legacy = legacyPath(config, file.relativePath());
+            if (legacy == null || legacy.equals(file.relativePath())) {
+                continue;
+            }
+            paths.check(root, legacy);
+            if (owned.contains(legacy) || Files.exists(root.resolve(legacy))) {
+                conflicts.add(legacy);
+            }
+        }
+        for (CodegenPlanBO.ArtifactStateBO artifact : previous) {
+            if (artifact.getPath() == null) {
+                continue;
+            }
+            Set<String> current = selectedByIdentity.get(artifactIdentity(
+                    artifact.getArtifact(), artifact.getLogicalTable(), artifact.getPath()));
+            if (current != null && !current.contains(artifact.getPath())) {
+                paths.check(root, artifact.getPath());
+                conflicts.add(artifact.getPath());
+            }
+        }
+        return conflicts.stream().sorted().toList();
+    }
+
+    private static ArtifactIdentity artifactIdentity(String artifact, String table, String path) {
+        return new ArtifactIdentity(artifact, table, Path.of(path).getFileName().toString());
+    }
+
+    private record ArtifactIdentity(String artifact, String table, String fileName) {
+    }
+
+    private List<String> omittedEventPaths(Path root, CodegenConfigBO config,
+                                           List<GenerationPlanService.RenderedFile> rendered) {
+        if (!config.getArtifacts().contains("command")) {
+            return List.of();
+        }
+        Set<String> selected = new LinkedHashSet<>();
+        for (GenerationPlanService.RenderedFile file : rendered) {
+            if ("event".equals(file.artifact())) {
+                selected.add(file.relativePath());
+            }
+        }
+        Set<String> omitted = new LinkedHashSet<>();
+        for (CodegenPlanBO.ArtifactStateBO artifact : states.load(root).getArtifacts()) {
+            if ("event".equals(artifact.getArtifact()) && config.getTables().contains(artifact.getLogicalTable())
+                    && !selected.contains(artifact.getPath())) {
+                omitted.add(artifact.getPath());
+            }
+        }
+        return omitted.stream().sorted().toList();
+    }
+
+    private static String legacyPath(CodegenConfigBO config, String current) {
+        String marker = "src/main/java/" + config.getBasePackage().replace('.', '/') + "/";
+        int start = current.indexOf(marker);
+        if (start < 0) {
+            return null;
+        }
+        String prefix = current.substring(0, start + marker.length());
+        String path = current.substring(start + marker.length());
+        String domain = config.getDomain() + "/";
+        Map<String, String> previous = new LinkedHashMap<>();
+        previous.put("domain/" + domain + "vos/", "domain/" + domain);
+        previous.put("domain/" + domain + "service/", "domain/" + domain);
+        previous.put("application/" + domain + "pojo/convertor/", "application/" + domain + "converter/");
+        for (String part : List.of("pojo/command/", "pojo/query/", "pojo/result/", "pojo/event/", "manage/impl/",
+                "manage/", "executor/command/", "executor/query/", "executor/event/")) {
+            previous.put("application/" + domain + part, "application/" + domain);
+        }
+        for (String part : List.of("controller/", "event/", "pojo/dto/", "pojo/vo/", "pojo/convertor/")) {
+            previous.put("adapter/" + domain + part, "adapter/" + domain);
+        }
+        for (Map.Entry<String, String> entry : previous.entrySet()) {
+            if (path.startsWith(entry.getKey())) {
+                return prefix + entry.getValue() + path.substring(entry.getKey().length());
+            }
+        }
+        return null;
     }
 
     private List<GenerationPlanService.RenderedFile> render(CodegenConfigBO config, CodegenSchemaBO schema) {
@@ -219,10 +434,15 @@ public class CodegenCommand {
                         emit(files, config, layout, table, model, artifact, "command", "create", "createCommandType", "command");
                         emit(files, config, layout, table, model, artifact, "command", "update", "updateCommandType", "command");
                         emit(files, config, layout, table, model, artifact, "command", "delete", "deleteCommandType", "command");
+                        emit(files, config, layout, table, model, artifact, "executor", "create", "createExecutorType", "command-executor");
+                        emit(files, config, layout, table, model, artifact, "executor", "update", "updateExecutorType", "command-executor");
+                        emit(files, config, layout, table, model, artifact, "executor", "delete", "deleteExecutorType", "command-executor");
                     }
                     case "query" -> {
                         emit(files, config, layout, table, model, artifact, "query", "detail", "detailQueryType", "query");
                         emit(files, config, layout, table, model, artifact, "query", "page", "pageQueryType", "query");
+                        emit(files, config, layout, table, model, artifact, "executor", "detail", "detailExecutorType", "query-executor");
+                        emit(files, config, layout, table, model, artifact, "executor", "page", "pageExecutorType", "query-executor");
                     }
                     case "converter" -> {
                         emit(files, config, layout, table, model, artifact, "converter", "persistence", "persistenceConverterType", "persistence-converter");
@@ -230,6 +450,15 @@ public class CodegenCommand {
                         emit(files, config, layout, table, model, artifact, "converter", "update", "updateConverterType", "application-converter");
                         emit(files, config, layout, table, model, artifact, "converter", "delete", "deleteConverterType", "application-converter");
                         emit(files, config, layout, table, model, artifact, "converter", "result", "resultConverterType", "application-converter");
+                        emit(files, config, layout, table, model, artifact, "converter", "page", "pageConverterType", "application-converter");
+                    }
+                    case "controller" -> {
+                        emit(files, config, layout, table, model, artifact, "controller", "main", "controllerType", "controller");
+                        emit(files, config, layout, table, model, artifact, "dto", "create", "createDtoType", "adapter-dto");
+                        emit(files, config, layout, table, model, artifact, "dto", "update", "updateDtoType", "adapter-dto");
+                        emit(files, config, layout, table, model, artifact, "dto", "page", "pageDtoType", "adapter-dto");
+                        emit(files, config, layout, table, model, artifact, "view", "result", "viewType", "adapter-vo");
+                        emit(files, config, layout, table, model, artifact, "adapter", "converter", "adapterConverterType", "adapter-converter");
                     }
                     default -> {
                         String typeKey = switch (artifact) {
@@ -243,13 +472,23 @@ public class CodegenCommand {
                             case "domain-impl" -> "domainImplType";
                             case "manage" -> "manageType";
                             case "manage-impl" -> "manageImplType";
-                            case "controller" -> "controllerType";
                             default -> throw new IllegalArgumentException("unsupported artifact " + artifact);
                         };
                         String suffix = "mapper-xml".equals(artifact) ? ".xml" : ".java";
                         files.add(new GenerationPlanService.RenderedFile(
                                 layout.relativePath(config, artifact, model.get(typeKey) + suffix),
                                 artifact, table.getLogicalName(), templates.render(artifact, model)));
+                    }
+                }
+            }
+            if (config.getEvents() != null && config.getEvents().isEnabled()) {
+                for (CodegenConfigBO.EventDefinitionBO event : config.getEvents().getDefinitions()) {
+                    if (table.getLogicalName().equals(event.getTable())) {
+                        Map<String, Object> model = scope.eventModel(config, table, event);
+                        emit(files, config, layout, table, model, "event", "event", "inbound", "eventType", "event");
+                        emit(files, config, layout, table, model, "event", "event", "inbound", "eventExecutorType", "event-executor");
+                        emit(files, config, layout, table, model, "event", "event", "inbound", "eventConverterType", "event-converter");
+                        emit(files, config, layout, table, model, "event", "event", "inbound", "eventHandlerType", "event-handler");
                     }
                 }
             }
@@ -267,9 +506,14 @@ public class CodegenCommand {
                       String artifact, String variantKey, String variant, String typeKey, String pathArtifact) {
         Map<String, Object> context = new LinkedHashMap<>(model);
         context.put(variantKey + "Kind", variant);
+        String template = switch (pathArtifact) {
+            case "command-executor", "query-executor", "event", "event-executor", "event-converter", "event-handler",
+                    "adapter-dto", "adapter-vo", "adapter-converter" -> pathArtifact;
+            default -> artifact;
+        };
         files.add(new GenerationPlanService.RenderedFile(
                 layout.relativePath(config, pathArtifact, model.get(typeKey) + ".java"),
-                artifact, table.getLogicalName(), templates.render(artifact, context)));
+                artifact, table.getLogicalName(), templates.render(template, context)));
     }
 
     private Loaded load(Map<String, String> flags, PrintStream out, PrintStream err) throws Exception {

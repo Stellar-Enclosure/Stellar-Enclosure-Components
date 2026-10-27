@@ -173,8 +173,49 @@ public class CodegenConfigBO {
 
         private boolean enabled;
 
+        @Builder.Default
+        private List<EventDefinitionBO> definitions = new ArrayList<>();
+
         EventsBO snapshot() {
-            return EventsBO.builder().enabled(enabled).build();
+            List<EventDefinitionBO> copied = new ArrayList<>();
+            if (definitions != null) {
+                for (EventDefinitionBO definition : definitions) {
+                    copied.add(definition == null ? null : definition.snapshot());
+                }
+            }
+            return EventsBO.builder().enabled(enabled).definitions(copied).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class EventDefinitionBO {
+
+        private String table;
+
+        private String name;
+
+        private String action;
+
+        private String schemaVersion;
+
+        private String idempotencyType;
+
+        private String idempotencyBean;
+
+        private String idempotencyMethod;
+
+        private Map<String, String> fieldMappings;
+
+        EventDefinitionBO snapshot() {
+            return EventDefinitionBO.builder().table(table).name(name).action(action).schemaVersion(schemaVersion)
+                    .idempotencyType(idempotencyType).idempotencyBean(idempotencyBean)
+                    .idempotencyMethod(idempotencyMethod).fieldMappings(copyMap(fieldMappings)).build();
         }
     }
 

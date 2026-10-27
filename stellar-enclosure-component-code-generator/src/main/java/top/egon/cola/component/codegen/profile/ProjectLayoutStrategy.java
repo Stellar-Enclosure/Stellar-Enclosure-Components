@@ -15,7 +15,8 @@ public interface ProjectLayoutStrategy {
 
     Set<String> BACKEND = Set.of(
             "domain-model", "domain-query", "command", "query", "result", "converter",
-            "persistence-converter", "application-converter",
+            "persistence-converter", "application-converter", "command-executor", "query-executor",
+            "event", "event-executor", "event-converter",
             "domain-service", "domain-impl", "manage", "manage-impl");
 
     CodegenProfileEnum profile();
@@ -140,15 +141,25 @@ public interface ProjectLayoutStrategy {
         String base = safeSegment(config.getBasePackage(), "basePackage").replace('/', '.');
         String domain = safeSegment(config.getDomain(), "domain");
         return switch (artifact) {
-            case "domain-model", "domain-query", "domain-service" -> base + ".domain." + domain;
+            case "domain-model", "domain-query" -> base + ".domain." + domain + ".vos";
+            case "domain-service" -> base + ".domain." + domain + ".service";
             case "domain-impl" -> base + ".infrastructure." + domain + ".service.impl";
             case "persistence-converter" -> base + ".infrastructure." + domain + ".converter";
             case "po" -> base + ".infrastructure." + domain + ".po";
             case "dao", "mapper-xml" -> base + ".infrastructure." + domain + ".dao";
             case "repo" -> base + ".infrastructure." + domain + ".repo";
-            case "command", "query", "result", "manage", "manage-impl" -> base + ".application." + domain;
-            case "application-converter" -> base + ".application." + domain + ".converter";
-            case "controller" -> base + ".adapter." + domain;
+            case "command", "query", "result", "event" -> base + ".application." + domain + ".pojo." + artifact;
+            case "manage" -> base + ".application." + domain + ".manage";
+            case "manage-impl" -> base + ".application." + domain + ".manage.impl";
+            case "application-converter", "event-converter" -> base + ".application." + domain + ".pojo.convertor";
+            case "command-executor" -> base + ".application." + domain + ".executor.command";
+            case "query-executor" -> base + ".application." + domain + ".executor.query";
+            case "event-executor" -> base + ".application." + domain + ".executor.event";
+            case "controller" -> base + ".adapter." + domain + ".controller";
+            case "adapter-dto" -> base + ".adapter." + domain + ".pojo.dto";
+            case "adapter-vo" -> base + ".adapter." + domain + ".pojo.vo";
+            case "adapter-converter" -> base + ".adapter." + domain + ".pojo.convertor";
+            case "event-handler" -> base + ".adapter." + domain + ".event";
             default -> base + ".infrastructure." + domain + "." + artifact;
         };
     }
@@ -156,8 +167,9 @@ public interface ProjectLayoutStrategy {
     private static String moduleKey(String artifact) {
         return switch (artifact) {
             case "domain-model", "domain-query", "domain-service" -> "domain";
-            case "command", "query", "result", "manage", "manage-impl", "application-converter" -> "application";
-            case "controller" -> "adapter";
+            case "command", "query", "result", "manage", "manage-impl", "application-converter",
+                    "command-executor", "query-executor", "event", "event-executor", "event-converter" -> "application";
+            case "controller", "adapter-dto", "adapter-vo", "adapter-converter", "event-handler" -> "adapter";
             default -> "infrastructure";
         };
     }
