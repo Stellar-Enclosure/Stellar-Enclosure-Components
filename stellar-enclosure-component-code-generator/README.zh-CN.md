@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-离线开发工具。它读取 PostgreSQL DDL 或 MP-SDJ manifest，为 native Light、Web、Service 生成后端 CRUD。它不启动 Spring，不连接数据库，也不修改目标项目的 POM。
+离线开发工具。它读取 PostgreSQL DDL、MP-SDJ manifest 或显式的独立事件定义，为 native Light、Web、Service 生成后端代码。它不启动 Spring，不连接数据库，也不修改目标项目的 POM。
 
 已批准的模板引擎只有 `org.freemarker:freemarker:2.3.35`，并且只存在于本工具。生成出的业务工程不依赖 FreeMarker。
 
@@ -41,73 +41,167 @@ scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths
 
 `check` 不改项目文件，只逐项比较渲染结果与磁盘内容。`apply` 是全有或全无：预检一旦发现 `CONFLICT`，就在写入任何文件之前中止并返回 4；人工改过的文件保持原样，只有磁盘内容仍等于上次生成内容的文件会被替换。退出码 5 `DESTRUCTIVE_ACTION` 对应需要显式受理的 `DELETE`/`RENAME` 动作，但 `plan` 只产出 `CONFLICT`、`NO_CHANGE`、`ADD`、`UPDATE`，命令行也不传受理集合，因此该分支在当前 CLI 下不可达。
 
-`backend-crud` 会生成完整基础链路：PO、DAO、Mapper XML、Repository、领域模型与
-Domain Service/实现、Command/Query/Result、对应的 CmdExe/QueryExe、转换器和 Manage/实现；
-Light 和 Web 还会生成 Controller、DTO、VO 和 Adapter 转换器，Service 不生成 HTTP 入口；
-`persistence-crud` 只展开为前四项。Command、Query 和 Controller 是各自成组的产物：单选
-`command` 同时生成三组 Command/CmdExe，单选 `query` 同时生成两组 Query/QueryExe，
-单选 `controller` 包含其 DTO、VO 与转换器；计划会逐项列出这些文件。
-`artifacts` 可以逐个选择，别名 `pojo`→`po`、`mapper`→`mapper-xml` 会先归一化。
-省略下层产物时必须用 `existingTypeMappings` 声明已有类型：缺 `po` 或缺 `dao` 返回
-`MISSING_TYPE`（退出码 3）。生成器只强制这两项，catalog 里其余条目的 `requiredTypes`
-当前不参与校验；除上述成组文件及显式配置的事件外，不会自动增加其他产物。查询和写入均由 Repository 持有 Mapper/XML 访问，
-Domain Service 实现不能直接调用 DAO。`logicalTables` 必须明确指定，且逐个匹配 DDL 中的逻辑表，
-不存在的表名直接报错。
+`backend-crud` 生成 PO、DAO、Mapper XML、Repository、领域模型与业务端口、Command/Query/Result、对应 CmdExe/QueryExe、转换器和 Manage/实现；Light、Web 还生成带授权边界的 Controller、DTO、VO 和 Adapter 转换器，Service 不生成 HTTP 入口。`persistence-crud` 只生成前四项。单选 `command` / `query` 时仍分别生成全部配对执行器；生成器不会因缺依赖而扩大产物范围。
 
-配置 JSON 的 `configVersion` 必须是 `1`，`projectType` 取 `light`/`web`/`service`，
-未知键一律拒绝（反序列化开启 `FAIL_ON_UNKNOWN_PROPERTIES`）。`input.mode` 只有两种：
-`schema` 按顺序重放 `schemaFiles`，`manifest` 读取 `resourceRoot` 下的 `manifest` 路径。
-manifest 形如 `{"family":...,"scripts":[{"version":...,"path":...,"sha256":...}]}`；
-脚本字节与记录的 `sha256` 不符，或已记录的版本前缀发生变化，都返回 `CHECKSUM_DRIFT`。
+`artifacts` 可以逐项选择，`pojo` 和 `mapper` 分别是 `po` 和 `mapper-xml` 的别名。未选中的依赖必须已存在于规范源码路径，或通过 `existingTypeMappings` 显式声明；PO/DAO 可映射到已有类型，其余类型映射须与生成器引用的完整类名一致，可使用 `orders.domain-service` 等按表声明的键。未声明且找不到源码时返回 `MISSING_TYPE`。映射是调用方对外部类型的声明，生成器不能证明它已在目标工程 classpath 上或具有兼容方法，仍须编译目标工程。
 
-## CQERS 与入站事件
+`configVersion` 为 `1`，`projectType` 为 `light` / `web` / `service`；未知 JSON 属性会被拒绝。`input.mode` 为 `schema`（按顺序读取 `schemaFiles`）、`manifest`（按资源根目录读取带 SHA-256 的清单），或仅用于独立事件的 `event`。DDL 模式必须显式选择 `logicalTables`；每张表使用全局 `fieldPolicies`，也可通过 `tableFieldPolicies.<表名>` 覆盖。无效、重复或冲突的字段在计划前拒绝；筛选字段不能与分页属性 `page`、`pageNo`、`pageSize` 冲突。`sort` 是固定升序列清单，生成 SQL 会追加 `id ASC` 作为稳定的分页顺序；它不是客户端可自由指定的排序参数。HTTP 分页支持 `pageNo` / `pageSize` 和 `page.pageNo` / `page.pageSize`，同一参数的两种写法同时出现且值不一致时拒绝。
 
-新生成的业务代码按 `domain/<业务域>/{vos,service}`、
-`application/<业务域>/{pojo,manage,executor}` 和 `adapter/<业务域>/{controller,pojo,event}`
-组织。Manage 委托对应 Exe；Command 保留事务，Query 保持只读。HTTP 的 JSON 字段与原
-Command/Result 语义一致，但生成的 Controller 不提供目标项目的资源、scope 或字段权限配置；
-接入前须按目标服务的身份和授权机制完成这些配置，资源登记本身不授予角色权限。
+## CQERS、领域端口与 HTTP 授权
 
-不配置事件时不会生成事件类或空处理器。要生成入站事件，显式选择 `command` 或
-`backend-crud`，并提供完整定义；多模块项目还须提供 `modulePaths.adapter`。以下是完整配置中的事件部分：
+新代码按 `domain/<业务域>/{vos,service}`、`application/<业务域>/{pojo,manage,executor}` 和 `adapter/<业务域>/{controller,pojo,event}` 组织。Manage 委托匹配的 Exe；Command 执行器负责写用例，Query 执行器只读。需要生成或引用 Domain Service 的范围必须为每个表显式提供五个互不相同的业务方法名，不能使用裸 `create`、`update`、`delete`、`detail`、`query` 等通用技术方法名。生成器只提供持久化骨架；领域不变量、权限策略和方法名称是否准确表达业务仍须由业务开发者审阅。
+
+生成 `domain-impl` 时，所有 profile 都必须配置目标工程已有的 `apiContract.existingErrorMapper`。Light / Web 生成 Controller 时，还须为每个表配置唯一的原型允许路径、五个操作的 OAuth scope、权限码、API 资源码和本地化键，以及所有返回或可写字段的字段资源。以下是配置中的相关片段（值必须替换为目标工程的真实契约；Web 路径须在 `/api/v1/` 下，Light 在 `/api/` 下）：
 
 ```json
 {
-  "events": {
-    "enabled": true,
-    "definitions": [{
-      "table": "orders",
-      "name": "OrderImportedEvent",
-      "action": "create",
-      "schemaVersion": "v1",
-      "idempotencyType": "com.example.order.support.EventDedupService",
-      "idempotencyBean": "eventDedupService",
-      "idempotencyMethod": "executeOnce",
-      "fieldMappings": {"code": "externalCode"}
-    }]
+  "domainMethods": {
+    "orders": {
+      "create": "createOrders",
+      "update": "changeOrders",
+      "delete": "removeOrders",
+      "detail": "findOrders",
+      "query": "pageOrders"
+    }
+  },
+  "apiContract": {
+    "existingErrorMapper": "com.example.order.support.OrdersErrorMapper",
+    "transportMode": "generate",
+    "permissionReferences": [
+      "fixture:orders:create",
+      "fixture:orders:update",
+      "fixture:orders:delete",
+      "fixture:orders:detail",
+      "fixture:orders:page",
+      "fixture:orders:read",
+      "fixture:orders:field:write"
+    ],
+    "tables": {
+      "orders": {
+        "basePath": "/api/v1/orders",
+        "operations": {
+          "create": {
+            "scope": "fixture:orders:create",
+            "permission": "fixture:orders:create",
+            "resourceCode": "fixture.api.orders.create",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.create"
+          },
+          "update": {
+            "scope": "fixture:orders:update",
+            "permission": "fixture:orders:update",
+            "resourceCode": "fixture.api.orders.update",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.update"
+          },
+          "delete": {
+            "scope": "fixture:orders:delete",
+            "permission": "fixture:orders:delete",
+            "resourceCode": "fixture.api.orders.delete",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.delete"
+          },
+          "detail": {
+            "scope": "fixture:orders:detail",
+            "permission": "fixture:orders:detail",
+            "resourceCode": "fixture.api.orders.detail",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.detail"
+          },
+          "page": {
+            "scope": "fixture:orders:page",
+            "permission": "fixture:orders:page",
+            "resourceCode": "fixture.api.orders.page",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.page"
+          }
+        },
+        "fields": {
+          "id": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.id",
+            "resultKey": "fixture.field.orders.result.id",
+            "createKey": "fixture.field.orders.create.id",
+            "updateKey": "fixture.field.orders.update.id",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "version": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.version",
+            "resultKey": "fixture.field.orders.result.version",
+            "createKey": "fixture.field.orders.create.version",
+            "updateKey": "fixture.field.orders.update.version",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "code": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.code",
+            "resultKey": "fixture.field.orders.result.code",
+            "createKey": "fixture.field.orders.create.code",
+            "updateKey": "fixture.field.orders.update.code",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "expectedVersion": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.expectedVersion",
+            "resultKey": "fixture.field.orders.result.expectedVersion",
+            "createKey": "fixture.field.orders.create.expectedVersion",
+            "updateKey": "fixture.field.orders.update.expectedVersion",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          }
+        }
+      }
+    }
   }
 }
 ```
 
-`table` 必须在 `logicalTables` 中；`name` 必须以 `Event` 结尾且不重复，`action` 为
-`create`、`update` 或 `delete`。`fieldMappings` 的键是目标 Command 的 Java 字段，值是
-事件里的 lowerCamel 字段：create 覆盖全部 create 字段；update 覆盖 `id`、
-`expectedVersion` 和全部 update 字段；delete 覆盖 `id` 与 `expectedVersion`。
-事件模型固定包含 `eventId`、`schemaVersion`，这两个名称不能作为映射来源。生成物包含
-Event、MapStruct EventConverter、EventExe 和 Adapter EventHandler；Handler 是可供现有
-消费者调用的入口，不会自行订阅队列、主题或发布事件。
-修改 `schemaVersion` 会改变接收端接受的版本；部署前须处理在途消息与生产者兼容性，生成器不会迁移或重放旧消息。
+`scope` 填 OAuth scope 本身，不加 `SCOPE_` 前缀。每个操作生成 `@PreAuthorize`、`@PermissionResource` 和 `@RequiresPermissions`；请求 DTO 与结果 VO 的字段分别声明独立资源键和 `@FieldPermissions`。必须明确每个字段的读取、创建或更新权限，`id` 和 `expectedVersion` 也需要更新请求的字段契约。`permissionReferences` 是其他生产者拥有的权限码；`localPermissions` 是目标模块已有 `@PermissionDefinition` 定义的权限码，二者不能重复，全部用到的权限码均须归入其中。`labelPage` / `labelKey` 引用已有本地化资源，不由生成器猜测。
 
-配置必须指向目标项目已有的幂等 Bean，其方法须兼容
-`void executeOnce(String eventType, String eventId, Object event, Runnable action)`；方法名可由
-`idempotencyMethod` 指定。类型应是 Application/Domain 端口或共享契约，不能直接引用目标项目
-的 Infrastructure、Adapter 或 Starter 实现；实现由 Spring 注入。该方法必须同步执行 action，并在与业务写入兼容的同一事务中，
-按可信租户、消费方、事件类型和 ID 原子记录处理结果；重复且内容一致时跳过，ID 相同但
-内容不同时拒绝；处理失败时传播运行时异常，使事务回滚并允许重试。事件对象用于计算稳定的内容指纹，不应记录敏感载荷。
-调用方负责验证消息来源、建立可信租户上下文、配置重试／死信及提交后确认；生成器不会创建
-幂等存储，也不声称跨数据库或跨服务 exactly-once。
+`transportMode: "generate"` 生成一个共享 MVC 配置，将目标工程的 HTTP JSON 转换器接入既有 `PermissionJsonMapperFactory`；它影响该应用所有 HTTP JSON 转换器，须审阅与现有配置的兼容性。如果项目已有同等配置，使用 `transportMode: "existing"` 通过 `transportConfigType` 指向其源码并以 `transportBean` 指定实际配置 Bean 名；若配置在 Starter 等模块，还须在 `modulePaths` 中列出该模块。源码检查只能核对声明与接线线索，仍须在目标部署配置中验证其确实生效；检测到重复配置时计划会停止。目标工程必须配置现有 Permission-as-Code 编译处理器、完整清单及运行时权限目录，并接入可信身份与租户上下文；生成的 Controller 依赖权限守卫、转换工厂和所选配置 Bean；缺失时启动失败，不能声称权限已经生效。清单登记、激活和角色授权是独立步骤，**登记不授予角色**。分页接口保守地同时要求所有允许筛选和固定排序字段（包括 `id`）的读取权限，即使本次未使用该筛选字段。读取 `version` 的权限是调用方进行乐观锁更新的前提。
 
-旧版平铺目录中的同名文件、仍存在的生成记录，或变更模块路径后被遗留的同一产物记录会触发 `LEGACY_LAYOUT_CONFLICT`（退出码 4）；
+旧配置中的 `contextSymbol` 为兼容保留，但不再作为生成的安全保证；HTTP 身份与租户上下文必须由所选原型的现有过滤器建立，事件消费者必须建立可信上下文。 生成的权限资源默认只允许 USER 主体；SERVICE／客户端凭证场景须由目标项目按自身契约扩展并验证。生成的 Repository 默认不启用缓存；需要缓存时应由业务按现有组件配置读写入口、失效和一致性。
+
+Result/VO 总是包含字符串 `id` 与 `version`。更新请求的 `id` 以路径为准，请求体可以省略；若同时提供则必须一致。更新字段为 `null` 时表示不修改，不能用此脚手架将列显式清空为 SQL NULL。更新与创建后重新读取持久化结果，以返回数据库默认值、未修改字段和实际版本；事务及异常映射仍由现有端口实现负责。
+
+## 入站业务事件
+
+业务事件处理只在显式配置时生成；目标工程须提供已有的幂等 Bean，其方法兼容 `void executeOnce(String eventType, String eventId, Object event, Runnable action)`，实现必须同步执行 action，并与业务写入使用兼容的事务。幂等键须覆盖可信租户、消费方、事件类型与 ID；重复载荷跳过、同 ID 不同载荷拒绝，失败传播并允许重试。调用方负责来源校验、可信租户上下文、订阅、重试／死信及提交后确认；生成器不建立幂等存储或自动发布消息。
+
+CRUD 事件可选择 `create`、`update`、`delete`，`table` 指向已选择的逻辑表，`fieldMappings` 把目标 Command 字段映射到事件字段；它必须覆盖该 Command 的全部字段。`fields` 可补充不参与 Command 映射的事件字段，包含 `name`、`javaType`、`required` 和可选字符串 `maxLength`。生成 Event、EventConverter、EventExe 和传输无关的 Adapter EventHandler。
+
+不对应任何 CRUD 的事件使用 `action: "delegate"`，显式指定已有的 Application 业务处理类型、Bean 和 `void` 方法，该方法接收生成的事件对象；Domain 不依赖 Application 事件类型，不会生成空实现，也不会虚构业务逻辑。可单独使用 `artifacts: ["event"]`、`input: {"mode":"event"}` 和空 `logicalTables`，无需 DDL。以下是独立事件的配置片段：
+
+```json
+{
+  "artifacts": ["event"],
+  "input": {"mode": "event"},
+  "logicalTables": [],
+  "events": {"enabled": true, "definitions": [{
+    "name": "PaymentSettledEvent", "action": "delegate", "schemaVersion": "v1",
+    "idempotencyType": "com.example.order.application.order.service.EventGuard",
+    "idempotencyBean": "eventGuard", "idempotencyMethod": "executeOnce",
+    "handlerType": "com.example.order.application.order.service.PaymentEventPort",
+    "handlerBean": "paymentEventPort", "handlerMethod": "acceptPayment",
+    "fields": [
+      {"name": "paymentId", "javaType": "String", "required": true, "maxLength": 64},
+      {"name": "occurredAt", "javaType": "java.time.Instant", "required": true}
+    ]
+  }]}
+}
+```
+
+事件字段支持 `String`、`Long`、`Integer`、`Boolean`、`java.math.BigDecimal`、`java.util.UUID`、`java.time` 的 Instant／LocalDate／LocalDateTime／LocalTime，以及目标工程已有的 Application、Domain 或共享契约完整类名；也可使用 `java.util.List<T>`、`java.util.Set<T>`、`java.util.Map<String,T>` 或数组，容器最多嵌套三层。复杂字段会级联 `@Valid`；类型必须由目标工程提供，不能引用本工程的 Infrastructure、Adapter 或 Starter 实现。`eventId` 和 `schemaVersion` 由生成器提供，不能重复声明。升级版本需要自行处理生产者兼容与在途消息。独立事件生成保留已有 DDL 状态与校验和历史。
+
+旧版平铺目录中的同名文件、仍存在的生成记录，变更模块路径后被遗留的同一产物记录，业务端口方法变更，或切换已生成的 MVC 传输配置时会触发 `LEGACY_LAYOUT_CONFLICT`（退出码 4）；
 已生成事件被移除或改名时会触发 `EVENT_SCOPE_CONFLICT`（退出码 4），`check` 则返回
 `DRIFT` 及相关路径。工具不会自动删除、搬迁或接管这些文件。已有工程须先审阅调用方和
 文件归属，单独完成迁移；不要通过删除状态文件或重置哈希绕过保护。针对不再使用、且已有生成归属记录的路径：
@@ -120,7 +214,9 @@ Event、MapStruct EventConverter、EventExe 和 Adapter EventHandler；Handler �
    不移动或删除源码。之后重新 `plan` 并审阅新文件；目标位置已有但未托管的文件仍会冲突，不会被自动接管。
    输入或状态变化后须重新审阅，状态变化也会使旧计划过期；存在未完成的生成时须先 `recover`。
 
-生成器只读取 `CREATE TABLE` 建表定义（包括现有按角色分支的 `DO` 块）。独立的
+升级现有工程时，旧的后端生成配置需要补齐 `domainMethods`；生成 Controller 还需要补齐权限、字段、本地化和 MVC 传输配置。旧配置或旧计划不会自动推断新契约。变更业务端口前须检查所有手写调用方；未启用 Permission-as-Code 清单处理器或未完成目录激活时，不能把生成接口视为已可上线。
+
+DDL 模式的生成器只读取 `CREATE TABLE` 建表定义（包括现有按角色分支的 `DO` 块）。独立的
 `CREATE INDEX` 和种子 `INSERT`/`UPDATE`/`DELETE` 不参与 Schema 建模；索引及软删除
 唯一性由 agent 另行检查，不能从生成计划推断已校验。`ALTER`、`DROP`、`COMMENT` 等结构变更
 返回 `UNSUPPORTED_DDL`；由 agent 检查 DDL 并显式修改受影响代码，不能用生成器刷新旧产物。
@@ -145,7 +241,14 @@ Update 允许 MP 部分更新省略字段，Persisted 校验已加载行。复�
 中断阶段并供 `recover` 回滚，`apply.lock` 是写入锁。删除该目录等于让生成器失去所有文件的
 归属记录，此后同名文件都会判为冲突。
 
-当前验收覆盖源码编译和隔离测试：`./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am test`。它不代表 PostgreSQL、ShardingSphere 或 MQ 已经在真实环境运行。
+当前验收覆盖源码编译和隔离测试：`./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am test`。真实权限处理器集成测试需要目标工程已提供的处理器及运行时 classpath；未提供时该项会跳过，可显式执行：
+
+```bash
+export EGON_PAC_TEST_CLASSPATH="/path/to/stellar-enclosure-tianquan-jianshen-processor.jar:$(cat /path/to/target-runtime.cp)"
+./mvnw -B -ntp -f stellar-enclosure-component-code-generator/pom.xml -Dtest=PermissionProcessorIntegrationTest "-Dcodegen.permissionProcessorClasspath=$EGON_PAC_TEST_CLASSPATH" test
+```
+
+该测试在临时目录编译生成物并检查权限片段；不会登记、激活权限或授予角色。上述测试不代表 PostgreSQL、ShardingSphere、权限服务或 MQ 已在真实环境运行。
 
 
 ## UTC 时间默认值

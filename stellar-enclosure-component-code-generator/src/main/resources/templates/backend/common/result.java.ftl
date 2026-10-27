@@ -15,6 +15,8 @@ import top.egon.cola.component.common.core.pojo.BasePojo;
 public class [=resultType] implements BasePojo {
 
     private String id;
+
+    private Long version;
 [#list resultFields as field]
 
     private [=field.javaType] [=field.javaName];

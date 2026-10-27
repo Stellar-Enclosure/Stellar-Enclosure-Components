@@ -103,7 +103,7 @@ class CodegenCommandTest {
         Invocation planned = invoke("plan", "--config", config.toString());
         assertEquals(0, planned.code(), planned.err());
         String planId = mapper.readTree(planned.out()).path("planId").asText();
-        assertEquals(33, mapper.readTree(planned.out()).path("fileCount").asInt());
+        assertEquals(34, mapper.readTree(planned.out()).path("fileCount").asInt());
         assertTrue(mapper.readTree(planned.out()).path("files").toString().contains("OrdersManageImpl.java"));
         assertTrue(mapper.readTree(planned.out()).path("files").toString().contains("CreateOrdersCmdExe.java"));
         assertTrue(mapper.readTree(planned.out()).path("files").toString().contains("OrdersPageQueryExe.java"));
@@ -125,7 +125,7 @@ class CodegenCommandTest {
         assertTrue(Files.readString(application.resolve("manage/impl/OrdersManageImpl.java"))
                 .contains("updateOrdersCmdExe.execute(command)"));
         assertTrue(Files.readString(application.resolve("executor/command/UpdateOrdersCmdExe.java"))
-                .contains("domainService.update(domain)"));
+                .contains("domainService.changeOrders(domain)"));
         assertTrue(Files.readString(adapter.resolve("controller/OrdersController.java")).contains("manage.update(command)"));
         assertTrue(Files.exists(adapter.resolve("pojo/dto/CreateOrdersDTO.java")));
         assertTrue(Files.exists(adapter.resolve("pojo/vo/OrdersVO.java")));
@@ -160,6 +160,18 @@ class CodegenCommandTest {
     void selectedCommandsAndQueriesIncludeOnlyTheirMatchingExecutors(@TempDir Path root) throws Exception {
         Path config = writeConfig(root);
         String original = Files.readString(config);
+        Files.writeString(config, original.replace("[\"po\", \"dao\", \"mapper-xml\", \"repo\"]", "[\"command\"]"));
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        Files.writeString(config, original.replace("[\"po\", \"dao\", \"mapper-xml\", \"repo\"]", "[\"backend-crud\"]"));
+        Invocation complete = invoke("plan", "--config", config.toString());
+        assertEquals(0, complete.code(), complete.err());
+        assertEquals(0, invoke("apply", "--config", config.toString(), "--plan", mapper.readTree(complete.out()).path("planId").asText()).code());
+        Path port = root.resolve("order-service-domain/src/main/java/com/example/order/domain/order/service/OrdersDomainService.java");
+        String portSource = Files.readString(port);
+        Files.writeString(port, portSource.replace("createOrders(", "createLegacy("));
+        Files.writeString(config, original.replace("[\"po\", \"dao\", \"mapper-xml\", \"repo\"]", "[\"command\"]"));
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        Files.writeString(port, portSource);
         for (String artifact : List.of("command", "query")) {
             Files.writeString(config, original.replace("[\"po\", \"dao\", \"mapper-xml\", \"repo\"]",
                     "[\"" + artifact + "\"]"));
@@ -171,6 +183,229 @@ class CodegenCommandTest {
             assertFalse(files.toString().contains("OrdersController.java"));
             assertFalse(files.toString().contains("OrdersRepository.java"));
         }
+    }
+
+    @Test
+    void contractsAndFieldPoliciesFailClosedBeforeGeneration(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        ObjectNode original = (ObjectNode) mapper.readTree(config.toFile());
+        original.putArray("artifacts").add("backend-crud");
+        ObjectNode document = original.deepCopy();
+        document.remove("domainMethods");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/domainMethods/orders").put("create", "create");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract").remove("tables");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract").remove("transportMode");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract/tables/orders/fields").remove("version");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract/tables/orders/operations/create").put("permission", "x') or permitAll() or ('x");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract/tables/orders/operations/create").put("permission", "fixture:undeclared");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract/tables/orders/fields/code")
+                .put("resultKey", "fixture.field.orders.result.id");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/fieldPolicies").remove("sort");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/modulePaths").put("adapter", "./order-service-application");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/existingTypeMappings").put("po", "com.example.PO;injected");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.put("domain", "bad-domain");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.put("projectType", "service");
+        document.remove("apiContract");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/apiContract").put("existingErrorMapper", "com.example.order.adapter.ErrorMapper");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/fieldPolicies").putArray("filter").add("codde");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.withObject("/fieldPolicies").putArray("create").addNull();
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+
+        document = original.deepCopy();
+        document.putArray("logicalTables").addNull();
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+
+        Path schema = root.resolve("reserved.sql");
+        Files.writeString(schema, Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64), page VARCHAR(16)"));
+        document = original.deepCopy();
+        document.withObject("/input").putArray("schemaFiles").add(schema.toString());
+        document.withObject("/fieldPolicies").putArray("filter").add("page");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        assertFalse(Files.exists(root.resolve("order-service-infrastructure")));
+
+        Files.writeString(schema, Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64), page_no BIGINT"));
+        document.withObject("/fieldPolicies").putArray("filter").add("page_no");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+    }
+
+    @Test
+    void existingPermissionTransportMustBePresentAndCannotBeDuplicated(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        document.putArray("artifacts").add("backend-crud");
+        ObjectNode api = document.withObject("/apiContract");
+        api.put("transportMode", "existing");
+        api.put("transportConfigType", "com.example.order.adapter.config.ExistingPermissionMvcConfiguration");
+        api.put("transportBean", "existingPermissionMvcConfiguration");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        Path source = writeExistingTransport(root);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        assertEquals(33, mapper.readTree(plan.out()).path("fileCount").asInt());
+        Path duplicate = root.resolve("order-service-application/src/main/java/com/example/order/adapter/config/ExistingPermissionMvcConfiguration.java");
+        Files.createDirectories(duplicate.getParent());
+        Files.copy(source, duplicate);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        Files.delete(duplicate);
+        api.put("transportMode", "generate");
+        api.remove("transportConfigType");
+        api.remove("transportBean");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+    }
+
+    @Test
+    void switchingPermissionTransportRequiresReviewedRetirement(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        document.putArray("artifacts").add("backend-crud");
+        mapper.writeValue(config.toFile(), document);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        assertEquals(0, invoke("apply", "--config", config.toString(), "--plan", mapper.readTree(plan.out()).path("planId").asText()).code());
+        Path old = root.resolve("order-service-adapter/src/main/java/com/example/order/adapter/config/CqersPermissionMvcConfiguration.java");
+        Path existing = writeExistingTransport(root);
+        ObjectNode api = document.withObject("/apiContract");
+        api.put("transportMode", "existing");
+        api.put("transportConfigType", "com.example.order.adapter.config.ExistingPermissionMvcConfiguration");
+        api.put("transportBean", "existingPermissionMvcConfiguration");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(4, invoke("plan", "--config", config.toString()).code());
+        Invocation check = invoke("check", "--config", config.toString());
+        assertEquals(8, check.code());
+        JsonNode review = mapper.readTree(check.out()).path("retirementReview");
+        assertEquals(1, review.path("paths").size());
+        Path reviewFile = root.resolve("reviewed-transport.json");
+        mapper.writeValue(reviewFile.toFile(), review);
+        Path backup = root.resolve("backup/CqersPermissionMvcConfiguration.java");
+        Files.createDirectories(backup.getParent());
+        Files.move(old, backup);
+        Invocation retired = invoke("retire-legacy", "--config", config.toString(), "--paths-file", reviewFile.toString());
+        assertEquals(0, retired.code(), retired.err());
+        assertTrue(Files.exists(backup));
+        assertTrue(Files.exists(existing));
+        assertEquals(0, invoke("plan", "--config", config.toString()).code());
+    }
+
+    @Test
+    void multipleTablesUseExplicitDistinctRoutesPoliciesAndStableSort(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        Path schema = root.resolve("tables.sql");
+        String orders = Files.readString(Path.of("src/test/resources/ddl/schema.sql"));
+        String invoices = orders.replace("orders", "invoices").replace("code", "amount");
+        Files.writeString(schema, orders + "\n" + invoices);
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        document.putArray("artifacts").add("backend-crud");
+        document.putArray("logicalTables").add("orders").add("invoices");
+        document.withObject("/input").putArray("schemaFiles").add(schema.toString());
+        TestContracts.addJson(document, "invoices", "Invoices", "/api/v1/invoices", "amount");
+        ObjectNode policies = document.withObject("/tableFieldPolicies/invoices");
+        for (String key : List.of("create", "update", "result", "filter", "sort")) policies.putArray(key).add("amount");
+        mapper.writeValue(config.toFile(), document);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        assertEquals(67, mapper.readTree(plan.out()).path("fileCount").asInt());
+        assertEquals(0, invoke("apply", "--config", config.toString(), "--plan", mapper.readTree(plan.out()).path("planId").asText()).code());
+        Path controller = root.resolve("order-service-adapter/src/main/java/com/example/order/adapter/order/controller/InvoicesController.java");
+        assertTrue(Files.readString(controller).contains("@RequestMapping(\"/api/v1/invoices\")"));
+        Path mapperFile = root.resolve("order-service-infrastructure/src/main/resources/mybatis/mapper/order/InvoicesDAO.xml");
+        assertTrue(Files.readString(mapperFile).contains("ORDER BY amount ASC, id ASC"));
+        assertTrue(Files.readString(root.resolve("order-service-application/src/main/java/com/example/order/application/order/pojo/result/InvoicesResult.java"))
+                .contains("private Long version;"));
+        document.withObject("/apiContract/tables/invoices").put("basePath", "/api/v1/orders");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, invoke("plan", "--config", config.toString()).code());
+    }
+
+    @Test
+    void pageRequiresReadPermissionForConfiguredSortOnlyField(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        Path schema = root.resolve("sort.sql");
+        Files.writeString(schema, Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64), label VARCHAR(64)"));
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        document.putArray("artifacts").add("backend-crud");
+        document.withObject("/input").putArray("schemaFiles").add(schema.toString());
+        document.withObject("/fieldPolicies").putArray("sort").add("label");
+        TestContracts.addJson(document, "orders", "Orders", "/api/v1/orders", "code", "label");
+        document.withObject("/apiContract/tables/orders/fields/label").put("permission", "fixture:orders:label:read");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(3, invoke("plan", "--config", config.toString()).code());
+        document.withObject("/apiContract").withArray("permissionReferences").add("fixture:orders:label:read");
+        mapper.writeValue(config.toFile(), document);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        assertEquals(0, invoke("apply", "--config", config.toString(), "--plan", mapper.readTree(plan.out()).path("planId").asText()).code());
+        String controller = Files.readString(root.resolve("order-service-adapter/src/main/java/com/example/order/adapter/order/controller/OrdersController.java"));
+        assertTrue(controller.contains("\"fixture:orders:label:read\""));
+        assertTrue(controller.contains("@RequiresPermissions(codes = { \"fixture:orders:page\", \"fixture:orders:read\", \"fixture:orders:label:read\" })"));
     }
 
     @Test
@@ -344,6 +579,34 @@ class CodegenCommandTest {
     }
 
     @Test
+    void changedDomainPortRequiresReviewedMigration(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        Files.writeString(config, Files.readString(config).replace(
+                "[\"po\", \"dao\", \"mapper-xml\", \"repo\"]", "[\"backend-crud\"]"));
+        String oldPath = "order-service-domain/src/main/java/com/example/order/domain/order/service/OrdersDomainService.java";
+        Path oldFile = root.resolve(oldPath);
+        Files.createDirectories(oldFile.getParent());
+        Files.writeString(oldFile, "package com.example.order.domain.order.service; public interface OrdersDomainService { void create(); }");
+        GenerationStateRepository repository = new GenerationStateRepository();
+        repository.save(root, GenerationStateRepository.StateBO.builder().formatVersion(1).artifacts(List.of(
+                CodegenPlanBO.ArtifactStateBO.builder().path(oldPath).artifact("domain-service").logicalTable("orders")
+                        .previousGeneratedHash("old-hash").previousGeneratedHashPresent(true).build())).build());
+        assertEquals(4, invoke("plan", "--config", config.toString()).code());
+        Invocation check = invoke("check", "--config", config.toString());
+        assertEquals(8, check.code());
+        Path reviewed = root.resolve("reviewed-domain-contract.json");
+        mapper.writeValue(reviewed.toFile(), mapper.readTree(check.out()).path("retirementReview"));
+        assertEquals(4, invoke("retire-legacy", "--config", config.toString(), "--paths-file", reviewed.toString()).code());
+        Path backup = root.resolve("backup/OrdersDomainService.java");
+        Files.createDirectories(backup.getParent());
+        Files.move(oldFile, backup);
+        Invocation retired = invoke("retire-legacy", "--config", config.toString(), "--paths-file", reviewed.toString());
+        assertEquals(0, retired.code(), retired.err());
+        assertTrue(Files.exists(backup));
+        assertEquals(0, invoke("plan", "--config", config.toString()).code());
+    }
+
+    @Test
     void enabledEventsRequireExplicitDefinitions(@TempDir Path root) throws Exception {
         Path config = writeConfig(root);
         Files.writeString(config, Files.readString(config).replace("\"enabled\": false", "\"enabled\": true"));
@@ -393,7 +656,7 @@ class CodegenCommandTest {
         Invocation planned = invoke("plan", "--config", config.toString());
         assertEquals(0, planned.code(), planned.err());
         JsonNode plan = mapper.readTree(planned.out());
-        assertEquals(45, plan.path("fileCount").asInt());
+        assertEquals(46, plan.path("fileCount").asInt());
         assertTrue(plan.path("files").toString().contains("OrderImportedEventExe.java"));
         assertTrue(plan.path("files").toString().contains("OrderUpdatedEventExe.java"));
         assertTrue(plan.path("files").toString().contains("OrderRemovedEventExe.java"));
@@ -509,7 +772,7 @@ class CodegenCommandTest {
         mapper.writeValue(config.toFile(), document);
         Invocation unknown = invoke("plan", "--config", config.toString());
         assertEquals(3, unknown.code());
-        assertTrue(unknown.err().contains("existing business columns"));
+        assertTrue(unknown.err().contains("unknown, duplicate or unsupported field"));
         assertFalse(Files.exists(root.resolve("order-service-infrastructure")));
     }
 
@@ -561,6 +824,25 @@ class CodegenCommandTest {
         Path config = root.resolve("codegen.json");
         Files.writeString(config, json);
         return config;
+    }
+
+    private static Path writeExistingTransport(Path root) throws Exception {
+        Path source = root.resolve("order-service-adapter/src/main/java/com/example/order/adapter/config/ExistingPermissionMvcConfiguration.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                package com.example.order.adapter.config;
+                import org.springframework.context.annotation.Configuration;
+                import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+                import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+                import top.egon.cola.platform.tianquan.jianshen.starter.field.PermissionJsonMapperFactory;
+                @Configuration("existingPermissionMvcConfiguration")
+                public class ExistingPermissionMvcConfiguration implements WebMvcConfigurer {
+                    void configure(PermissionJsonMapperFactory factory, MappingJackson2HttpMessageConverter converter) {
+                        converter.setObjectMapper(factory.forTransport(converter.getObjectMapper()));
+                    }
+                }
+                """);
+        return source;
     }
 
     private Invocation invoke(String... args) {

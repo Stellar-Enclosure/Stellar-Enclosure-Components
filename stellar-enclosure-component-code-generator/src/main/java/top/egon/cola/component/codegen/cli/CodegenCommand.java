@@ -90,8 +90,7 @@ public class CodegenCommand {
                 default -> error(out, err, 2, "CONFIG_REQUIRED", "unknown command");
             };
         } catch (Exception exception) {
-            if (exception instanceof OutputPathValidator.PathValidationException failure
-                    && OutputPathValidator.JAVA_SOURCE_MISMATCH.equals(failure.getCode())) {
+            if (exception instanceof OutputPathValidator.PathValidationException failure) {
                 return error(out, err, 2, failure.getCode(), failure.getMessage());
             }
             if (exception instanceof PostgreDdlAdapter.DdlParseException failure) {
@@ -111,12 +110,12 @@ public class CodegenCommand {
         body.put("profiles", List.of("light", "web", "service"));
         List<String> artifacts = new ArrayList<>(List.of("po", "dao", "mapper-xml", "repo",
                 "domain-model", "domain-query", "command", "query", "result", "converter",
-                "domain-service", "domain-impl", "manage", "manage-impl", "controller"));
+                "domain-service", "domain-impl", "manage", "manage-impl", "controller", "event"));
         artifacts.sort(String::compareTo);
         body.put("artifacts", artifacts);
         body.put("presets", List.of("persistence-crud", "backend-crud"));
         body.put("eventConfiguration", "events.definitions");
-        body.put("eventActions", List.of("create", "update", "delete"));
+        body.put("eventActions", List.of("create", "update", "delete", "delegate"));
         body.put("planFormatVersion", CodegenPlanBO.FORMAT_VERSION);
         out.println(MAPPER.writeValueAsString(body));
         return 0;
@@ -344,6 +343,25 @@ public class CodegenCommand {
         }
         Set<String> conflicts = new LinkedHashSet<>();
         for (GenerationPlanService.RenderedFile file : rendered) {
+            if ("domain-service".equals(file.artifact())) {
+                Path target = root.resolve(file.relativePath());
+                CodegenConfigBO.DomainMethodsBO methods = config.getDomainMethods().get(file.table());
+                if (methods != null) {
+                    paths.check(root, file.relativePath());
+                    if (Files.exists(target)) {
+                        try {
+                            String source = Files.readString(target);
+                            if (!GenerationScopeValidator.hasDomainMethods(source, methods)) {
+                                conflicts.add(file.relativePath());
+                            }
+                        } catch (IOException failure) {
+                            throw new IllegalStateException("domain contract could not be reviewed", failure);
+                        }
+                    } else if (owned.contains(file.relativePath())) {
+                        conflicts.add(file.relativePath());
+                    }
+                }
+            }
             String legacy = legacyPath(config, file.relativePath());
             if (legacy == null || legacy.equals(file.relativePath())) {
                 continue;
@@ -356,6 +374,10 @@ public class CodegenCommand {
         for (CodegenPlanBO.ArtifactStateBO artifact : previous) {
             if (artifact.getPath() == null) {
                 continue;
+            }
+            if ("permission-mvc-config".equals(artifact.getArtifact()) && config.getArtifacts().contains("controller")
+                    && rendered.stream().noneMatch(file -> file.relativePath().equals(artifact.getPath()))) {
+                conflicts.add(artifact.getPath());
             }
             Set<String> current = selectedByIdentity.get(artifactIdentity(
                     artifact.getArtifact(), artifact.getLogicalTable(), artifact.getPath()));
@@ -376,7 +398,7 @@ public class CodegenCommand {
 
     private List<String> omittedEventPaths(Path root, CodegenConfigBO config,
                                            List<GenerationPlanService.RenderedFile> rendered) {
-        if (!config.getArtifacts().contains("command")) {
+        if (!config.getArtifacts().contains("command") && !config.getArtifacts().contains("event")) {
             return List.of();
         }
         Set<String> selected = new LinkedHashSet<>();
@@ -387,7 +409,8 @@ public class CodegenCommand {
         }
         Set<String> omitted = new LinkedHashSet<>();
         for (CodegenPlanBO.ArtifactStateBO artifact : states.load(root).getArtifacts()) {
-            if ("event".equals(artifact.getArtifact()) && config.getTables().contains(artifact.getLogicalTable())
+            if ("event".equals(artifact.getArtifact()) && ("__event__".equals(artifact.getLogicalTable())
+                    || config.getTables().contains(artifact.getLogicalTable()))
                     && !selected.contains(artifact.getPath())) {
                 omitted.add(artifact.getPath());
             }
@@ -430,6 +453,7 @@ public class CodegenCommand {
             for (String artifact : config.getArtifacts()) {
                 Map<String, Object> model = scope.renderModel(config, table, artifact);
                 switch (artifact) {
+                    case "event" -> { }
                     case "command" -> {
                         emit(files, config, layout, table, model, artifact, "command", "create", "createCommandType", "command");
                         emit(files, config, layout, table, model, artifact, "command", "update", "updateCommandType", "command");
@@ -487,11 +511,32 @@ public class CodegenCommand {
                         Map<String, Object> model = scope.eventModel(config, table, event);
                         emit(files, config, layout, table, model, "event", "event", "inbound", "eventType", "event");
                         emit(files, config, layout, table, model, "event", "event", "inbound", "eventExecutorType", "event-executor");
-                        emit(files, config, layout, table, model, "event", "event", "inbound", "eventConverterType", "event-converter");
+                        if (!"delegate".equals(event.getAction())) {
+                            emit(files, config, layout, table, model, "event", "event", "inbound", "eventConverterType", "event-converter");
+                        }
                         emit(files, config, layout, table, model, "event", "event", "inbound", "eventHandlerType", "event-handler");
                     }
                 }
             }
+        }
+        if (config.getEvents() != null && config.getEvents().isEnabled()) {
+            for (CodegenConfigBO.EventDefinitionBO event : config.getEvents().getDefinitions()) {
+                if ("delegate".equals(event.getAction()) && (event.getTable() == null || event.getTable().isBlank())) {
+                    Map<String, Object> model = scope.eventModel(config, null, event);
+                    CodegenSchemaBO.TableBO eventScope = CodegenSchemaBO.TableBO.builder().logicalName("__event__").build();
+                    emit(files, config, layout, eventScope, model, "event", "event", "inbound", "eventType", "event");
+                    emit(files, config, layout, eventScope, model, "event", "event", "inbound", "eventExecutorType", "event-executor");
+                    emit(files, config, layout, eventScope, model, "event", "event", "inbound", "eventHandlerType", "event-handler");
+                }
+            }
+        }
+        if (config.getArtifacts().contains("controller") && config.getApiContract() != null
+                && "generate".equals(config.getApiContract().getTransportMode())) {
+            String type = "CqersPermissionMvcConfiguration";
+            Map<String, Object> model = Map.of("permissionMvcPackage", layout.packageName(config, "permission-mvc-config"));
+            files.add(new GenerationPlanService.RenderedFile(
+                    layout.relativePath(config, "permission-mvc-config", type + ".java"),
+                    "permission-mvc-config", "__security__", templates.render("permission-mvc-config", model)));
         }
         for (GenerationPlanService.RenderedFile file : files) {
             if (file.relativePath().endsWith(".java")) {
@@ -536,8 +581,13 @@ public class CodegenCommand {
                 observedPrefix.add(entry.substring(entry.indexOf(':') + 1));
             }
         }
-        CodegenSchemaBO schema = schemas.read(config, Map.of(), observedPrefix);
-        if (config.getTables() == null || config.getTables().isEmpty()) {
+        boolean eventOnly = config.getInput() != null && "event".equals(config.getInput().getMode());
+        CodegenSchemaBO schema = eventOnly ? CodegenSchemaBO.builder()
+                .inputFingerprint(state.getLatestObservedSchema() == null
+                        ? GenerationPlanService.sha256("event-only".getBytes(StandardCharsets.UTF_8)) : state.getLatestObservedSchema())
+                .versionChecksumPrefix(state.getVersionChecksumPrefix()).build()
+                : schemas.read(config, Map.of(), observedPrefix);
+        if (!eventOnly && (config.getTables() == null || config.getTables().isEmpty())) {
             return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logicalTables is required"), null, null, null);
         }
         List<CodegenSchemaBO.TableBO> selected = new ArrayList<>();

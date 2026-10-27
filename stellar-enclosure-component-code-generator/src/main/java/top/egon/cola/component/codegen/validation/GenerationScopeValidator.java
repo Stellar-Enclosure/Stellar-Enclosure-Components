@@ -56,18 +56,72 @@ public class GenerationScopeValidator {
             }
         }
         if (schema == null || schema.getTables() == null || schema.getTables().isEmpty()) {
+            if (schema != null && config.getInput() != null && "event".equals(config.getInput().getMode())
+                    && config.getArtifacts().equals(List.of("event"))) return List.copyOf(diagnostics);
             diagnostics.add(diagnostic("CONFIG_REQUIRED", "/logicalTables", "schema has no tables"));
             return diagnostics;
         }
         for (CodegenSchemaBO.TableBO table : schema.getTables()) {
             diagnostics.addAll(validateTable(config, table));
+            diagnostics.addAll(validatePolicies(config, table));
+            diagnostics.addAll(validateApiFields(config, table));
             diagnostics.addAll(validateEvents(config, table));
         }
         diagnostics.addAll(existingTypes(config));
+        diagnostics.addAll(validateTransport(config));
+        if (diagnostics.isEmpty()) {
+            for (CodegenSchemaBO.TableBO table : schema.getTables()) diagnostics.addAll(validateDependencies(config, table));
+        }
         if (!diagnostics.isEmpty()) {
             log.warn("generation scope rejected: {}", diagnostics.stream().map(CodegenPlanBO.DiagnosticBO::getCode).distinct().toList());
         }
         return List.copyOf(diagnostics);
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> validateTransport(CodegenConfigBO config) {
+        if (!config.getArtifacts().contains("controller") || config.getApiContract() == null) return List.of();
+        String mode = config.getApiContract().getTransportMode();
+        if (!"generate".equals(mode) && !"existing".equals(mode)) return List.of();
+        java.nio.file.Path root = java.nio.file.Path.of(config.getOutputRoot());
+        Set<java.nio.file.Path> sources = new java.util.LinkedHashSet<>();
+        if (config.getProfile() == top.egon.cola.component.codegen.model.CodegenProfileEnum.LIGHT) {
+            sources.add(root.resolve("src/main/java"));
+        } else if (config.getRoots() != null) {
+            config.getRoots().values().forEach(module -> sources.add(root.resolve(module).resolve("src/main/java")));
+        }
+        String expectedType = "existing".equals(mode) ? config.getApiContract().getTransportConfigType()
+                : config.getBasePackage() + ".adapter.config.CqersPermissionMvcConfiguration";
+        String expectedPath = expectedType.replace('.', '/') + ".java";
+        int found = 0;
+        for (java.nio.file.Path sourceRoot : sources) {
+            if (!java.nio.file.Files.isDirectory(sourceRoot, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+            try (var files = java.nio.file.Files.walk(sourceRoot)) {
+                for (java.nio.file.Path file : files.filter(path -> path.toString().endsWith(".java"))
+                        .filter(path -> java.nio.file.Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)).toList()) {
+                    String relative = sourceRoot.relativize(file).toString().replace('\\', '/');
+                    String source = java.nio.file.Files.readString(file);
+                    boolean configurer = source.contains("WebMvcConfigurer") && source.contains("PermissionJsonMapperFactory")
+                            && source.matches("(?s).*\\bforTransport\\s*\\(.*") && source.contains("MappingJackson2HttpMessageConverter");
+                    boolean configuration = source.matches("(?s).*@(?:[A-Za-z_][A-Za-z0-9_]*\\.)*Configuration\\b.*");
+                    if ("existing".equals(mode) && relative.equals(expectedPath) && configurer && configuration) {
+                        new OutputPathValidator().checkJavaSource("src/main/java/" + relative,
+                                source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        found++;
+                        if (found > 1) {
+                            return List.of(diagnostic("DUPLICATE_PATH", "/apiContract/transportConfigType", "transport configuration type exists in multiple modules"));
+                        }
+                    } else if ("generate".equals(mode) && configurer && !relative.equals(expectedPath)) {
+                        return List.of(diagnostic("CONFIG_REQUIRED", "/apiContract/transportMode",
+                                "an existing permission-aware MVC configuration must be reused instead of duplicated"));
+                    }
+                }
+            } catch (java.io.IOException | OutputPathValidator.PathValidationException failure) {
+                return List.of(diagnostic("CONFIG_REQUIRED", "/apiContract/transportConfigType", "MVC transport configuration could not be inspected"));
+            }
+        }
+        return "existing".equals(mode) && found == 0
+                ? List.of(diagnostic(MISSING_TYPE, "/apiContract/transportConfigType", "existing permission-aware MVC configuration source is required"))
+                : List.of();
     }
 
     public Map<String, Object> renderModel(CodegenConfigBO config, CodegenSchemaBO.TableBO table, String artifact) {
@@ -96,7 +150,8 @@ public class GenerationScopeValidator {
         String stem = typeName(table.getLogicalName(), "");
         String domainType = stem + "BO";
         String domainPackage = layout.packageName(config, "domain-model");
-        CodegenConfigBO.FieldPoliciesBO policies = config.getFieldPolicies();
+        CodegenConfigBO.FieldPoliciesBO policies = CodegenConfigValidator.policies(config, table.getLogicalName());
+        CodegenConfigBO.DomainMethodsBO methods = config.getDomainMethods() == null ? null : config.getDomainMethods().get(table.getLogicalName());
         model.put("daoBean", decapitalize(daoType));
         model.put("repoBean", decapitalize(repoType));
         model.put("propertiesBean", PROPERTIES_BEAN);
@@ -137,6 +192,11 @@ public class GenerationScopeValidator {
         model.put("manageImplType", stem + "ManageImpl");
         model.put("manageBean", decapitalize(stem + "Manage"));
         model.put("domainServiceBean", decapitalize(stem + "DomainService"));
+        model.put("createMethod", methods == null || methods.getCreate() == null ? "create" : methods.getCreate());
+        model.put("updateMethod", methods == null || methods.getUpdate() == null ? "update" : methods.getUpdate());
+        model.put("deleteMethod", methods == null || methods.getDelete() == null ? "delete" : methods.getDelete());
+        model.put("detailMethod", methods == null || methods.getDetail() == null ? "detail" : methods.getDetail());
+        model.put("queryMethod", methods == null || methods.getQuery() == null ? "query" : methods.getQuery());
         model.put("controllerType", stem + "Controller");
         model.put("controllerBean", decapitalize(stem + "Controller"));
         model.put("controllerPackage", layout.packageName(config, "controller"));
@@ -163,21 +223,141 @@ public class GenerationScopeValidator {
         model.put("resultFields", policyFields(table, list(policies, "result")));
         model.put("filterFields", policyFields(table, list(policies, "filter")));
         model.put("sortFields", policyFields(table, list(policies, "sort")));
-        model.put("includeQuery", config.getArtifacts() != null && config.getArtifacts().contains("domain-query"));
-        model.put("errorMapper", config.getApiContract() == null ? "" : config.getApiContract().getExistingErrorMapper());
-        model.put("apiBasePath", config.getApiContract() == null || config.getApiContract().getBasePath() == null
-                ? "" : config.getApiContract().getBasePath());
+        List<String> sortColumns = new ArrayList<>(list(policies, "sort"));
+        if (!sortColumns.contains("id")) sortColumns.add("id");
+        model.put("sortColumns", List.copyOf(sortColumns));
+        model.put("includeQuery", config.getArtifacts() != null
+                && (config.getArtifacts().contains("domain-query") || config.getArtifacts().contains("domain-impl")));
+        model.put("errorMapper", config.getApiContract() == null || config.getApiContract().getExistingErrorMapper() == null
+                ? "" : config.getApiContract().getExistingErrorMapper());
+        CodegenConfigBO.ApiContractBO api = config.getApiContract();
+        CodegenConfigBO.ApiTableBO apiTable = api == null || api.getTables() == null ? null : api.getTables().get(table.getLogicalName());
+        model.put("apiBasePath", apiTable != null && !blank(apiTable.getBasePath()) ? apiTable.getBasePath()
+                : api == null || api.getBasePath() == null ? "" : api.getBasePath());
+        Map<String, Map<String, String>> apiOperations = new LinkedHashMap<>();
+        if (apiTable != null && apiTable.getOperations() != null) apiTable.getOperations().forEach((key, value) -> {
+            if (value != null) apiOperations.put(key, Map.of("scope", empty(value.getScope()), "permission", empty(value.getPermission()),
+                    "resourceCode", empty(value.getResourceCode()),
+                    "labelPage", empty(value.getLabelPage()), "labelKey", empty(value.getLabelKey())));
+        });
+        Map<String, Map<String, String>> apiFields = new LinkedHashMap<>();
+        if (apiTable != null && apiTable.getFields() != null) apiTable.getFields().forEach((key, value) -> {
+            if (value != null) {
+                Map<String, String> metadata = new LinkedHashMap<>();
+                metadata.put("permission", empty(value.getPermission()));
+                metadata.put("labelPage", empty(value.getLabelPage()));
+                metadata.put("labelKey", empty(value.getLabelKey()));
+                metadata.put("resultKey", empty(value.getResultKey()));
+                metadata.put("createKey", empty(value.getCreateKey()));
+                metadata.put("updateKey", empty(value.getUpdateKey()));
+                metadata.put("createPermission", empty(value.getCreatePermission()));
+                metadata.put("updatePermission", empty(value.getUpdatePermission()));
+                apiFields.put(key, Map.copyOf(metadata));
+            }
+        });
+        model.put("apiOperations", apiOperations);
+        model.put("apiFields", apiFields);
+        model.put("permissionReferences", api == null || api.getPermissionReferences() == null ? List.of()
+                : api.getPermissionReferences().stream().sorted().toList());
+        model.put("permissionTransportBean", api != null && "existing".equals(api.getTransportMode())
+                ? empty(api.getTransportBean()) : "cqersPermissionMvcConfiguration");
+        Set<String> pagePermissions = new java.util.LinkedHashSet<>();
+        if (apiOperations.containsKey("page") && !blank(apiOperations.get("page").get("permission"))) {
+            pagePermissions.add(apiOperations.get("page").get("permission"));
+        }
+        if (apiFields.containsKey("id") && !blank(apiFields.get("id").get("permission"))) {
+            pagePermissions.add(apiFields.get("id").get("permission"));
+        }
+        for (String kind : List.of("filter", "sort")) {
+            for (Map<String, String> field : policyFields(table, list(policies, kind))) {
+                Map<String, String> permission = apiFields.get(field.get("javaName"));
+                if (permission != null && !blank(permission.get("permission"))) pagePermissions.add(permission.get("permission"));
+            }
+        }
+        model.put("pagePermissions", List.copyOf(pagePermissions));
         model.put("ignoredPoFields", List.of(
                 "tenantId", "createUserId", "createTime", "updateUserId", "updateTime", "deletedAt"));
         return Map.copyOf(model);
     }
 
+    private static List<CodegenPlanBO.DiagnosticBO> validatePolicies(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        CodegenConfigBO.FieldPoliciesBO policies = CodegenConfigValidator.policies(config, table.getLogicalName());
+        if (policies == null) return List.of();
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        Set<String> allNames = new java.util.LinkedHashSet<>();
+        for (CodegenSchemaBO.ColumnBO value : table.getColumns()) {
+            if (value.getName() == null || BASE_COLUMNS.contains(value.getName())) continue;
+            String name = javaName(value.getName());
+            if (!SourceVersion.isIdentifier(name) || SourceVersion.isKeyword(name) || !allNames.add(name)
+                    || Set.of("id", "version").contains(name)) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/" + table.getLogicalName() + "/" + value.getName(),
+                        "business columns must map to unique non-reserved Java field names"));
+            }
+        }
+        for (String kind : List.of("create", "update", "result", "filter", "sort")) {
+            Set<String> seen = new java.util.LinkedHashSet<>();
+            for (String name : list(policies, kind)) {
+                boolean allowedBase = name != null && (("result".equals(kind) && Set.of("id", "version").contains(name))
+                        || ("sort".equals(kind) && "id".equals(name)));
+                CodegenSchemaBO.ColumnBO value = name == null ? null : column(table, name);
+                if (name == null || !seen.add(name) || value == null || (BASE_COLUMNS.contains(name) && !allowedBase)) {
+                    diagnostics.add(diagnostic("CONFIG_REQUIRED", "/fieldPolicies/" + kind,
+                            "unknown, duplicate or unsupported field for " + table.getLogicalName() + ": " + name));
+                    continue;
+                }
+                String javaName = javaName(name);
+                if (("filter".equals(kind) && Set.of("page", "pageNo", "pageSize").contains(javaName))
+                        || ("update".equals(kind) && "expectedVersion".equals(javaName))) {
+                    diagnostics.add(diagnostic("CONFIG_REQUIRED", "/fieldPolicies/" + kind,
+                            "field collides with generated request property: " + javaName));
+                }
+            }
+        }
+        return diagnostics;
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> validateApiFields(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        if (!config.getArtifacts().contains("controller")) return List.of();
+        CodegenConfigBO.ApiContractBO api = config.getApiContract();
+        CodegenConfigBO.ApiTableBO entry = api == null || api.getTables() == null ? null : api.getTables().get(table.getLogicalName());
+        if (entry == null || entry.getFields() == null) return List.of();
+        CodegenConfigBO.FieldPoliciesBO policies = CodegenConfigValidator.policies(config, table.getLogicalName());
+        Set<String> output = new java.util.LinkedHashSet<>(List.of("id", "version"));
+        Set<String> create = new java.util.LinkedHashSet<>();
+        Set<String> update = new java.util.LinkedHashSet<>(List.of("id", "expectedVersion"));
+        Set<String> filter = new java.util.LinkedHashSet<>();
+        policyFields(table, list(policies, "result")).forEach(field -> output.add(field.get("javaName")));
+        policyFields(table, list(policies, "create")).forEach(field -> create.add(field.get("javaName")));
+        policyFields(table, list(policies, "update")).forEach(field -> update.add(field.get("javaName")));
+        policyFields(table, list(policies, "filter")).forEach(field -> filter.add(field.get("javaName")));
+        policyFields(table, list(policies, "sort")).forEach(field -> filter.add(field.get("javaName")));
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        Set<String> required = new java.util.LinkedHashSet<>(output);
+        required.addAll(create);
+        required.addAll(update);
+        required.addAll(filter);
+        Set<String> declared = new java.util.LinkedHashSet<>();
+        if (api.getPermissionReferences() != null) declared.addAll(api.getPermissionReferences());
+        if (api.getLocalPermissions() != null) declared.addAll(api.getLocalPermissions());
+        for (String field : required) {
+            CodegenConfigBO.ApiFieldBO value = entry.getFields().get(field);
+            if (value == null || (output.contains(field) && (blank(value.getResultKey()) || !declared.contains(value.getPermission())))
+                    || (create.contains(field) && (blank(value.getCreateKey()) || !declared.contains(value.getCreatePermission())))
+                    || (update.contains(field) && (blank(value.getUpdateKey()) || !declared.contains(value.getUpdatePermission())))
+                    || (filter.contains(field) && !declared.contains(value.getPermission()))) {
+                diagnostics.add(diagnostic("CONFIG_REQUIRED", "/apiContract/tables/" + table.getLogicalName() + "/fields/" + field,
+                        "every returned or writable field requires its own resource key and declared permission"));
+            }
+        }
+        return diagnostics;
+    }
+
     public Map<String, Object> eventModel(CodegenConfigBO config, CodegenSchemaBO.TableBO table,
                                           CodegenConfigBO.EventDefinitionBO event) {
         ProjectLayoutStrategy layout = ProjectLayoutStrategy.resolve(config.getProfile());
-        Map<String, Object> model = new LinkedHashMap<>(renderModel(config, table, "command"));
-        String stem = typeName(table.getLogicalName(), "");
         String action = event.getAction();
+        Map<String, Object> model = "delegate".equals(action) ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(renderModel(config, table, "command"));
         model.put("eventPackage", layout.packageName(config, "event"));
         model.put("eventExecutorPackage", layout.packageName(config, "event-executor"));
         model.put("eventConverterPackage", layout.packageName(config, "event-converter"));
@@ -187,19 +367,55 @@ public class GenerationScopeValidator {
         model.put("eventConverterType", event.getName() + "Converter");
         model.put("eventHandlerType", event.getName() + "Handler");
         model.put("eventSchemaVersion", event.getSchemaVersion());
-        model.put("eventCommandType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "Command");
-        model.put("eventCommandExecutorType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "CmdExe");
+        model.put("eventAction", action);
+        if ("delegate".equals(action)) {
+            model.put("handlerType", event.getHandlerType());
+            model.put("handlerBean", event.getHandlerBean());
+            model.put("handlerMethod", event.getHandlerMethod());
+        } else {
+            String stem = typeName(table.getLogicalName(), "");
+            model.put("eventCommandType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "Command");
+            model.put("eventCommandExecutorType", Character.toUpperCase(action.charAt(0)) + action.substring(1) + stem + "CmdExe");
+        }
         model.put("idempotencyType", event.getIdempotencyType());
         model.put("idempotencyBean", event.getIdempotencyBean());
         model.put("idempotencyMethod", event.getIdempotencyMethod());
         List<Map<String, String>> fields = new ArrayList<>();
-        for (Map<String, String> target : eventTargets(config, table, action)) {
-            Map<String, String> field = new LinkedHashMap<>(target);
-            field.put("source", event.getFieldMappings().get(target.get("target")));
-            fields.add(Map.copyOf(field));
+        if (!"delegate".equals(action)) {
+            for (Map<String, String> target : eventTargets(config, table, action)) {
+                Map<String, String> field = new LinkedHashMap<>(target);
+                field.put("source", event.getFieldMappings().get(target.get("target")));
+                field.put("cascade", "false");
+                fields.add(Map.copyOf(field));
+            }
+        }
+        if (event.getFields() != null) {
+            for (CodegenConfigBO.EventFieldBO field : event.getFields()) {
+                boolean container = eventContainer(field.getJavaType());
+                fields.add(Map.of("source", field.getName(), "javaType", container ? cascadeEventType(field.getJavaType(), false) : field.getJavaType(),
+                        "nullable", String.valueOf(!field.isRequired()), "length", field.getMaxLength() == null ? "" : field.getMaxLength().toString(),
+                        "constraint", "", "target", "", "cascade", String.valueOf(!container && !CodegenConfigValidator.scalarEventType(field.getJavaType()))));
+            }
         }
         model.put("eventFields", List.copyOf(fields));
         return Map.copyOf(model);
+    }
+
+    private static boolean eventContainer(String type) {
+        return type.startsWith("java.util.List<") || type.startsWith("java.util.Set<") || type.startsWith("java.util.Map<String,");
+    }
+
+    private static String cascadeEventType(String type, boolean nested) {
+        for (String prefix : List.of("java.util.List<", "java.util.Set<", "java.util.Map<String,")) {
+            if (type.startsWith(prefix) && type.endsWith(">")) {
+                return prefix + cascadeEventType(type.substring(prefix.length(), type.length() - 1), true) + ">";
+            }
+        }
+        String base = type;
+        while (base.endsWith("[]")) base = base.substring(0, base.length() - 2);
+        if (!nested || CodegenConfigValidator.scalarEventType(base)) return type;
+        int dot = base.lastIndexOf('.');
+        return dot < 0 ? "@Valid " + type : type.substring(0, dot + 1) + "@Valid " + type.substring(dot + 1);
     }
 
     private static List<CodegenPlanBO.DiagnosticBO> validateEvents(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
@@ -213,7 +429,7 @@ public class GenerationScopeValidator {
                     || event.getAction() == null || !Set.of("create", "update", "delete").contains(event.getAction())) {
                 continue;
             }
-            if (!"delete".equals(event.getAction()) && list(config.getFieldPolicies(), event.getAction()).stream()
+            if (!"delete".equals(event.getAction()) && list(CodegenConfigValidator.policies(config, table.getLogicalName()), event.getAction()).stream()
                     .anyMatch(name -> name == null || BASE_COLUMNS.contains(name) || column(table, name) == null)) {
                 diagnostics.add(diagnostic("CONFIG_REQUIRED", "/fieldPolicies/" + event.getAction(),
                         "event command fields must be existing business columns"));
@@ -266,9 +482,10 @@ public class GenerationScopeValidator {
             targets.add(Map.of("target", "expectedVersion", "javaType", "Long", "nullable", "false", "length", "", "constraint", "nonnegative"));
         }
         if (!"delete".equals(action)) {
-            for (Map<String, String> field : policyFields(table, list(config.getFieldPolicies(), action))) {
+            for (Map<String, String> field : policyFields(table, list(CodegenConfigValidator.policies(config, table.getLogicalName()), action))) {
                 targets.add(Map.of("target", field.get("javaName"), "javaType", field.get("javaType"),
-                        "nullable", field.get("nullable"), "length", field.get("length"), "constraint", ""));
+                        "nullable", "update".equals(action) ? "true" : field.get("nullable"),
+                        "length", field.get("length"), "constraint", ""));
             }
         }
         return targets;
@@ -302,7 +519,7 @@ public class GenerationScopeValidator {
     private static List<Map<String, String>> policyFields(CodegenSchemaBO.TableBO table, List<String> names) {
         List<Map<String, String>> fields = new ArrayList<>();
         for (String name : names) {
-            if (BASE_COLUMNS.contains(name)) {
+            if (name == null || BASE_COLUMNS.contains(name)) {
                 continue;
             }
             CodegenSchemaBO.ColumnBO column = column(table, name);
@@ -314,10 +531,17 @@ public class GenerationScopeValidator {
                     "column", column.getName(),
                     "javaName", javaName(column.getName()),
                     "javaType", javaType == null ? "String" : javaType.startsWith("java.") ? javaType : simple(javaType),
+                    "jsonType", jsonType(javaType),
                     "nullable", String.valueOf(!Boolean.FALSE.equals(column.getNullable())),
                     "length", column.getLength() == null ? "" : column.getLength().toString()));
         }
         return List.copyOf(fields);
+    }
+
+    private static String jsonType(String javaType) {
+        if ("Boolean".equals(javaType)) return "BOOLEAN";
+        if (javaType != null && Set.of("Long", "Integer", "java.math.BigDecimal").contains(javaType)) return "NUMBER";
+        return "STRING";
     }
 
     private static String simple(String javaType) {
@@ -384,6 +608,113 @@ public class GenerationScopeValidator {
             diagnostics.add(missing("dao"));
         }
         return diagnostics;
+    }
+
+    private List<CodegenPlanBO.DiagnosticBO> validateDependencies(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        Map<String, Object> model = renderModel(config, table, "dependency-check");
+        Set<String> artifacts = Set.copyOf(config.getArtifacts());
+        Map<String, Dependency> dependencies = new LinkedHashMap<>();
+        if (artifacts.contains("command")) {
+            add(dependencies, "domain-service", "domain-model", "result", "create-converter", "update-converter", "delete-converter", "result-converter");
+        }
+        if (artifacts.contains("query")) {
+            add(dependencies, "domain-service", "domain-model", "domain-query", "result", "result-converter", "page-converter");
+        }
+        if (artifacts.contains("domain-service")) add(dependencies, "domain-model", "domain-query");
+        if (artifacts.contains("domain-impl")) add(dependencies, "domain-service", "domain-model", "domain-query", "repo", "persistence-converter", "po");
+        if (artifacts.contains("converter")) {
+            add(dependencies, "po", "domain-model", "domain-query", "create-command", "update-command", "delete-command", "page-query", "result");
+        }
+        if (artifacts.contains("manage")) add(dependencies, "create-command", "update-command", "delete-command", "detail-query", "page-query", "result");
+        if (artifacts.contains("manage-impl")) {
+            add(dependencies, "manage", "create-command", "update-command", "delete-command", "detail-query", "page-query", "result",
+                    "create-executor", "update-executor", "delete-executor", "detail-executor", "page-executor");
+        }
+        if (artifacts.contains("controller")) add(dependencies, "manage", "create-command", "update-command", "delete-command", "detail-query", "page-query", "result");
+        List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        ProjectLayoutStrategy layout = ProjectLayoutStrategy.resolve(config.getProfile());
+        for (Dependency dependency : dependencies.values()) {
+            if (artifacts.contains(dependency.provider())) continue;
+            String type = (String) model.get(dependency.typeKey());
+            String pkg = (String) model.get(dependency.packageKey());
+            String expected = pkg + "." + type;
+            String declared = mapping(config, table.getLogicalName() + "." + dependency.key());
+            if (declared == null) declared = mapping(config, dependency.key());
+            if (declared != null) {
+                if ("po".equals(dependency.key()) || declared.equals(expected)) continue;
+                diagnostics.add(diagnostic(MISSING_TYPE, "/existingTypeMappings/" + dependency.key(),
+                        "declared type must match the generated reference: " + expected));
+                continue;
+            }
+            boolean exists = false;
+            try {
+                String relative = layout.relativePath(config, dependency.pathKind(), type + ".java");
+                new OutputPathValidator().check(java.nio.file.Path.of(config.getOutputRoot()), relative);
+                java.nio.file.Path source = java.nio.file.Path.of(config.getOutputRoot()).resolve(relative);
+                if (java.nio.file.Files.isRegularFile(source)) {
+                    byte[] bytes = java.nio.file.Files.readAllBytes(source);
+                    new OutputPathValidator().checkJavaSource(relative, bytes);
+                    exists = true;
+                    if ("domain-service".equals(dependency.key())) {
+                        String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                        CodegenConfigBO.DomainMethodsBO methods = config.getDomainMethods().get(table.getLogicalName());
+                        exists = hasDomainMethods(text, methods);
+                    }
+                }
+            } catch (IllegalArgumentException | java.io.IOException | OutputPathValidator.PathValidationException ignored) {
+                exists = false;
+            }
+            if (!exists) diagnostics.add(diagnostic(MISSING_TYPE, "/existingTypeMappings/" + dependency.key(),
+                    "missing referenced type " + expected + " for " + table.getLogicalName()));
+        }
+        return diagnostics;
+    }
+
+    private static void add(Map<String, Dependency> target, String... keys) {
+        for (String key : keys) target.putIfAbsent(key, dependency(key));
+    }
+
+    private static Dependency dependency(String key) {
+        return switch (key) {
+            case "po" -> new Dependency(key, "po", "po", "poType", "poPackage");
+            case "repo" -> new Dependency(key, "repo", "repo", "repoType", "repoPackage");
+            case "domain-model" -> new Dependency(key, "domain-model", "domain-model", "domainType", "domainPackage");
+            case "domain-query" -> new Dependency(key, "domain-query", "domain-query", "domainQueryType", "domainPackage");
+            case "domain-service" -> new Dependency(key, "domain-service", "domain-service", "domainServiceType", "domainServicePackage");
+            case "result" -> new Dependency(key, "result", "result", "resultType", "resultPackage");
+            case "manage" -> new Dependency(key, "manage", "manage", "manageType", "managePackage");
+            case "create-command" -> new Dependency(key, "command", "command", "createCommandType", "commandPackage");
+            case "update-command" -> new Dependency(key, "command", "command", "updateCommandType", "commandPackage");
+            case "delete-command" -> new Dependency(key, "command", "command", "deleteCommandType", "commandPackage");
+            case "detail-query" -> new Dependency(key, "query", "query", "detailQueryType", "queryPackage");
+            case "page-query" -> new Dependency(key, "query", "query", "pageQueryType", "queryPackage");
+            case "create-executor" -> new Dependency(key, "command", "command-executor", "createExecutorType", "commandExecutorPackage");
+            case "update-executor" -> new Dependency(key, "command", "command-executor", "updateExecutorType", "commandExecutorPackage");
+            case "delete-executor" -> new Dependency(key, "command", "command-executor", "deleteExecutorType", "commandExecutorPackage");
+            case "detail-executor" -> new Dependency(key, "query", "query-executor", "detailExecutorType", "queryExecutorPackage");
+            case "page-executor" -> new Dependency(key, "query", "query-executor", "pageExecutorType", "queryExecutorPackage");
+            case "persistence-converter" -> new Dependency(key, "converter", "persistence-converter", "persistenceConverterType", "persistenceConverterPackage");
+            case "create-converter" -> new Dependency(key, "converter", "application-converter", "createConverterType", "applicationConverterPackage");
+            case "update-converter" -> new Dependency(key, "converter", "application-converter", "updateConverterType", "applicationConverterPackage");
+            case "delete-converter" -> new Dependency(key, "converter", "application-converter", "deleteConverterType", "applicationConverterPackage");
+            case "result-converter" -> new Dependency(key, "converter", "application-converter", "resultConverterType", "applicationConverterPackage");
+            case "page-converter" -> new Dependency(key, "converter", "application-converter", "pageConverterType", "applicationConverterPackage");
+            default -> throw new IllegalArgumentException("unknown dependency " + key);
+        };
+    }
+
+    private record Dependency(String key, String provider, String pathKind, String typeKey, String packageKey) {
+    }
+
+    public static boolean hasDomainMethods(String source, CodegenConfigBO.DomainMethodsBO methods) {
+        if (source == null || methods == null) return false;
+        for (String method : java.util.Arrays.asList(methods.getCreate(), methods.getUpdate(), methods.getDelete(), methods.getDetail(), methods.getQuery())) {
+            if (blank(method)) return false;
+            String declaration = "(?m)^[ \\t]*(?:@[\\w.]+(?:\\([^\\n]*?\\))?\\s+)*(?:public\\s+)?[\\w.<>?, \\t\\[\\]]+\\s+"
+                    + java.util.regex.Pattern.quote(method) + "\\s*\\(";
+            if (!java.util.regex.Pattern.compile(declaration).matcher(source).find()) return false;
+        }
+        return true;
     }
 
     private static void requireBase(
@@ -627,6 +958,10 @@ public class GenerationScopeValidator {
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static String empty(String value) {
+        return value == null ? "" : value;
     }
 
     private static boolean isBigint(String sqlType) {

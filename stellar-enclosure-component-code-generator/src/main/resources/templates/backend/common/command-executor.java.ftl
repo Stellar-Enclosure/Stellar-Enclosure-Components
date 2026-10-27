@@ -18,6 +18,7 @@ import [=applicationConverterPackage].[=deleteConverterType];
 import [=domainFqn];
 [/#if]
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,21 +66,21 @@ public class [=deleteExecutorType] {
 
     @Transactional
 [#if executorKind == "create"]
-    public [=resultType] execute(@Valid [=createCommandType] command) {
+    public [=resultType] execute(@NotNull @Valid [=createCommandType] command) {
         log.info("create {}", "[=tableName]");
-        return resultConverter.toTarget(domainService.create(converter.toTarget(command)));
+        return resultConverter.toTarget(domainService.[=createMethod](converter.toTarget(command)));
     }
 [#elseif executorKind == "update"]
-    public [=resultType] execute(@Valid [=updateCommandType] command) {
+    public [=resultType] execute(@NotNull @Valid [=updateCommandType] command) {
         [=domainType] domain = converter.toTarget(command);
         log.info("update {} id={} version={}", "[=tableName]", command.getId(), domain.getVersion());
-        return resultConverter.toTarget(domainService.update(domain));
+        return resultConverter.toTarget(domainService.[=updateMethod](domain));
     }
 [#else]
-    public void execute(@Valid [=deleteCommandType] command) {
+    public void execute(@NotNull @Valid [=deleteCommandType] command) {
         [=domainType] domain = converter.toTarget(command);
         log.info("delete {} id={} version={}", "[=tableName]", command.getId(), domain.getVersion());
-        domainService.delete(domain.getId(), domain.getVersion());
+        domainService.[=deleteMethod](domain.getId(), domain.getVersion());
     }
 [/#if]
 }

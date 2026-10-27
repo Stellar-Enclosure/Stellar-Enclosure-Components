@@ -130,14 +130,28 @@ class CodegenContractTest {
         CodegenConfigBO.EventDefinitionBO event = CodegenConfigBO.EventDefinitionBO.builder()
                 .table("orders").name("OrderImportedEvent").action("create").schemaVersion("v1")
                 .idempotencyType("com.example.order.EventGuard").idempotencyBean("eventGuard")
-                .idempotencyMethod("executeOnce").fieldMappings(mappings).build();
+                .idempotencyMethod("executeOnce").fieldMappings(mappings)
+                .fields(new ArrayList<>(List.of(CodegenConfigBO.EventFieldBO.builder().name("source").javaType("String").build()))).build();
         CodegenConfigBO original = config("web", "command");
+        original.setDomainMethods(new LinkedHashMap<>(Map.of("orders", TestContracts.methods("Orders"))));
+        original.setTableFieldPolicies(new LinkedHashMap<>(Map.of("orders", CodegenConfigBO.FieldPoliciesBO.builder()
+                .create(new ArrayList<>(List.of("code"))).update(List.of()).result(List.of()).filter(List.of()).sort(List.of()).build())));
+        original.setApiContract(CodegenConfigBO.ApiContractBO.builder().tables(new LinkedHashMap<>(
+                Map.of("orders", TestContracts.apiTable("orders", "/api/v1/orders", "code")))).build());
         original.setEvents(CodegenConfigBO.EventsBO.builder().enabled(true)
                 .definitions(new ArrayList<>(List.of(event))).build());
         CodegenConfigBO copy = original.snapshot();
         mappings.put("code", "changed");
+        event.getFields().getFirst().setName("changed");
+        original.getDomainMethods().get("orders").setCreate("changed");
+        original.getTableFieldPolicies().get("orders").getCreate().clear();
+        original.getApiContract().getTables().get("orders").getFields().get("code").setResultKey("changed");
         original.getEvents().getDefinitions().clear();
         assertEquals("externalCode", copy.getEvents().getDefinitions().getFirst().getFieldMappings().get("code"));
+        assertEquals("source", copy.getEvents().getDefinitions().getFirst().getFields().getFirst().getName());
+        assertEquals("createOrders", copy.getDomainMethods().get("orders").getCreate());
+        assertEquals(List.of("code"), copy.getTableFieldPolicies().get("orders").getCreate());
+        assertEquals("fixture.field.orders.result.code", copy.getApiContract().getTables().get("orders").getFields().get("code").getResultKey());
     }
 
     @Test

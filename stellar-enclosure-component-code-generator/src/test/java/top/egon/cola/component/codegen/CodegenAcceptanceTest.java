@@ -73,6 +73,7 @@ class CodegenAcceptanceTest {
             assertTrue(Files.exists(project.resolve("classes/" + converter + "Impl.class")));
             assertTrue(Files.exists(project.resolve("annotations/" + converter + "Impl.java")));
             assertFalse(Files.exists(project.resolve("classes/com/example/codegenfixture/infrastructure/codegenfixture/service/impl/OrdersPersistenceConverterImpl.class")));
+            if (!"service".equals(profile)) verifyPermissionTransport(project);
             assertEquals(0, run("check", "--config", config.toString()), lastErr);
         }
         String launcher = Files.readString(Path.of("src/main/java/top/egon/cola/component/codegen/cli/CodegenCommand.java"));
@@ -80,12 +81,44 @@ class CodegenAcceptanceTest {
         assertFalse(launcher.contains("DriverManager"));
     }
 
+    private static void verifyPermissionTransport(Path project) throws Exception {
+        Path mvc = jar("org/springframework/spring-webmvc/" + org.springframework.core.SpringVersion.getVersion()
+                + "/spring-webmvc-" + org.springframework.core.SpringVersion.getVersion() + ".jar");
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{project.resolve("classes").toUri().toURL(), mvc.toUri().toURL()},
+                CodegenAcceptanceTest.class.getClassLoader())) {
+            Class<?> factoryType = loader.loadClass("top.egon.cola.platform.tianquan.jianshen.starter.field.PermissionJsonMapperFactory");
+            Object factory = factoryType.getConstructor().newInstance();
+            ObjectMapper shared = new ObjectMapper();
+            Class<?> configType = loader.loadClass("com.example.codegenfixture.adapter.config.CqersPermissionMvcConfiguration");
+            Object config = configType.getDeclaredConstructors()[0].newInstance(factory, shared);
+            Object bytes = loader.loadClass("org.springframework.http.converter.ByteArrayHttpMessageConverter").getConstructor().newInstance();
+            List<Object> converters = new ArrayList<>();
+            converters.add(bytes);
+            configType.getMethod("extendMessageConverters", List.class).invoke(config, converters);
+            assertEquals(bytes, converters.getFirst());
+            Object json = converters.stream().filter(value -> value.getClass().getName().endsWith("MappingJackson2HttpMessageConverter"))
+                    .findFirst().orElseThrow();
+            ObjectMapper secured = (ObjectMapper) json.getClass().getMethod("getObjectMapper").invoke(json);
+            assertTrue(secured.getRegisteredModuleIds().contains("fixture-field-guard"));
+            assertFalse(shared.getRegisteredModuleIds().contains("fixture-field-guard"));
+            Object existing = loader.loadClass("org.springframework.http.converter.json.MappingJackson2HttpMessageConverter")
+                    .getConstructor(ObjectMapper.class).newInstance(shared);
+            List<Object> existingConverters = new ArrayList<>(List.of(bytes, existing));
+            configType.getMethod("extendMessageConverters", List.class).invoke(config, existingConverters);
+            assertEquals(existing, existingConverters.get(1));
+            ObjectMapper wrapped = (ObjectMapper) existing.getClass().getMethod("getObjectMapper").invoke(existing);
+            assertTrue(wrapped.getRegisteredModuleIds().contains("fixture-field-guard"));
+            assertFalse(shared.getRegisteredModuleIds().contains("fixture-field-guard"));
+        }
+    }
+
     @Test
     void emptyCreateAndUpdateFieldPoliciesStillCompile(@TempDir Path root) throws Exception {
         Path config = root.resolve("codegen.json");
-        Files.writeString(config, config("web", root)
-                .replace("\"create\": [\"code\"]", "\"create\": []")
-                .replace("\"update\": [\"code\"]", "\"update\": []"));
+        ObjectNode document = (ObjectNode) mapper.readTree(config("web", root));
+        document.withObject("/fieldPolicies").putArray("create");
+        document.withObject("/fieldPolicies").putArray("update");
+        mapper.writeValue(config.toFile(), document);
         assertEquals(0, run("plan", "--config", config.toString()), lastErr);
         String planId = mapper.readTree(lastOut).get("planId").asText();
         assertEquals(0, run("apply", "--config", config.toString(), "--plan", planId), lastErr);
@@ -118,6 +151,7 @@ class CodegenAcceptanceTest {
         for (String policy : List.of("create", "update", "result", "filter")) {
             policies.putArray(policy).add("code").add("amount").add("due_date");
         }
+        TestContracts.addJson(document, "orders", "Orders", "/api/v1/codegenfixture", "code", "amount", "dueDate");
         ObjectNode event = document.putObject("events").put("enabled", true).putArray("definitions").addObject();
         event.put("table", "orders");
         event.put("name", "OrderImportedEvent");
@@ -128,6 +162,8 @@ class CodegenAcceptanceTest {
         event.put("idempotencyMethod", "executeOnce");
         event.putObject("fieldMappings").put("code", "externalCode")
                 .put("amount", "externalAmount").put("dueDate", "externalDueDate");
+        event.putArray("fields").addObject().put("name", "sourceSystem").put("javaType", "String")
+                .put("required", true).put("maxLength", 32);
         mapper.writeValue(config.toFile(), document);
         assertEquals(0, run("plan", "--config", config.toString()), lastErr);
         String planId = mapper.readTree(lastOut).get("planId").asText();
@@ -154,6 +190,75 @@ class CodegenAcceptanceTest {
                 + "com/example/codegenfixture/application/codegenfixture/pojo/event/OrderImportedEvent.java"));
         assertTrue(eventSource.contains("java.math.BigDecimal externalAmount"));
         assertTrue(eventSource.contains("java.time.LocalDate externalDueDate"));
+        assertTrue(eventSource.contains("String sourceSystem"));
+    }
+
+    @Test
+    void partialUpdateReturnsPersistedFieldsAndNewVersion(@TempDir Path root) throws Exception {
+        Path schema = root.resolve("schema.sql");
+        Files.writeString(schema, Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64) NOT NULL, label VARCHAR(64) NOT NULL"));
+        Path config = root.resolve("codegen.json");
+        ObjectNode document = (ObjectNode) mapper.readTree(config("web", root));
+        document.withObject("/input").putArray("schemaFiles").add(schema.toString());
+        ObjectNode policies = document.withObject("/fieldPolicies");
+        policies.putArray("create").add("code").add("label");
+        policies.putArray("update").add("code");
+        policies.putArray("result").add("code").add("label");
+        TestContracts.addJson(document, "orders", "Orders", "/api/v1/codegenfixture", "code", "label");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(0, run("plan", "--config", config.toString()), lastErr);
+        assertEquals(0, run("apply", "--config", config.toString(), "--plan", mapper.readTree(lastOut).path("planId").asText()), lastErr);
+        Path infrastructure = root.resolve("stellar-enclosure-source-web-infrastructure/src/main/java/com/example/codegenfixture");
+        Path repo = infrastructure.resolve("infrastructure/codegenfixture/repo/OrdersRepository.java");
+        Files.writeString(repo, """
+                package com.example.codegenfixture.infrastructure.codegenfixture.repo;
+                import com.example.codegenfixture.domain.codegenfixture.vos.OrdersDomainQuery;
+                import com.example.codegenfixture.infrastructure.codegenfixture.po.OrdersPO;
+                public class OrdersRepository {
+                    private final OrdersPO stored = new OrdersPO();
+                    public OrdersRepository() { stored.setId(1L); stored.setVersion(3L); stored.setCode("old"); stored.setLabel("unchanged"); }
+                    public OrdersPO getById(Long id) { return stored; }
+                    public boolean updateById(OrdersPO patch) {
+                        if (patch.getCode() != null) stored.setCode(patch.getCode());
+                        if (patch.getLabel() != null) stored.setLabel(patch.getLabel());
+                        stored.setVersion(4L); return true;
+                    }
+                    public boolean save(OrdersPO value) { return true; }
+                    public boolean removeById(OrdersPO value) { return true; }
+                    public java.util.List<OrdersPO> selectByQuery(OrdersDomainQuery query, int limit, long offset) { return java.util.List.of(); }
+                }
+                """);
+        Path support = infrastructure.resolve("support/FixtureErrorMapper.java");
+        Files.createDirectories(support.getParent());
+        Files.writeString(support, """
+                package com.example.codegenfixture.support;
+                public final class FixtureErrorMapper {
+                    public static RuntimeException missing(Long id) { return new IllegalStateException(); }
+                    public static RuntimeException zeroRows(String operation, Long id, Long version) { return new IllegalStateException(); }
+                }
+                """);
+        Path classes = root.resolve("classes");
+        compile(root, classes);
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()}, getClass().getClassLoader())) {
+            Object repository = loader.loadClass("com.example.codegenfixture.infrastructure.codegenfixture.repo.OrdersRepository").getConstructor().newInstance();
+            Object converter = loader.loadClass("com.example.codegenfixture.infrastructure.codegenfixture.converter.OrdersPersistenceConverterImpl").getConstructor().newInstance();
+            Class<?> serviceType = loader.loadClass("com.example.codegenfixture.infrastructure.codegenfixture.service.impl.OrdersDomainServiceImpl");
+            Object service = serviceType.getDeclaredConstructors()[0].newInstance(repository, converter);
+            Class<?> boType = loader.loadClass("com.example.codegenfixture.domain.codegenfixture.vos.OrdersBO");
+            Object patch = boType.getConstructor().newInstance();
+            boType.getMethod("setId", Long.class).invoke(patch, 1L);
+            boType.getMethod("setVersion", Long.class).invoke(patch, 3L);
+            boType.getMethod("setCode", String.class).invoke(patch, "new");
+            Object result = serviceType.getMethod("changeOrders", boType).invoke(service, patch);
+            assertEquals("unchanged", boType.getMethod("getLabel").invoke(result));
+            assertEquals(4L, boType.getMethod("getVersion").invoke(result));
+            Class<?> commandType = loader.loadClass("com.example.codegenfixture.application.codegenfixture.pojo.command.UpdateOrdersCommand");
+            Object command = commandType.getConstructor().newInstance();
+            commandType.getMethod("setId", Long.class).invoke(command, 1L);
+            commandType.getMethod("setExpectedVersion", Long.class).invoke(command, 3L);
+            assertTrue(jakarta.validation.Validation.buildDefaultValidatorFactory().getValidator().validate(command).isEmpty());
+        }
     }
 
     @Test
@@ -227,16 +332,16 @@ class CodegenAcceptanceTest {
                     public boolean fail;
                     public Long updatedVersion;
                     public Long deletedVersion;
-                    public OrdersBO create(OrdersBO value) {
+                    public OrdersBO createOrders(OrdersBO value) {
                         requireTransaction();
                         if (fail) throw new IllegalStateException("retry");
                         created++;
                         return value.setId(1L);
                     }
-                    public OrdersBO update(OrdersBO value) { requireTransaction(); updatedVersion = value.getVersion(); return value; }
-                    public void delete(Long id, Long version) { requireTransaction(); deletedVersion = version; }
-                    public OrdersBO detail(Long id) { return new OrdersBO().setId(id); }
-                    public PageSlice<OrdersBO> query(OrdersDomainQuery query) { return PageSlice.of(java.util.List.of(), false); }
+                    public OrdersBO changeOrders(OrdersBO value) { requireTransaction(); updatedVersion = value.getVersion(); return value; }
+                    public void removeOrders(Long id, Long version) { requireTransaction(); deletedVersion = version; }
+                    public OrdersBO findOrders(Long id) { return new OrdersBO().setId(id); }
+                    public PageSlice<OrdersBO> pageOrders(OrdersDomainQuery query) { return PageSlice.of(java.util.List.of(), false); }
                     private static void requireTransaction() {
                         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
                             throw new IllegalStateException("missing transaction");
@@ -333,6 +438,123 @@ class CodegenAcceptanceTest {
         }
     }
 
+    @Test
+    void standaloneBusinessEventDelegatesExplicitFieldsToExistingPort(@TempDir Path root) throws Exception {
+        Path config = root.resolve("codegen.json");
+        ObjectNode document = (ObjectNode) mapper.readTree(config("web", root));
+        document.putArray("artifacts").add("event");
+        document.putObject("input").put("mode", "event");
+        document.putArray("logicalTables");
+        ObjectNode event = document.putObject("events").put("enabled", true).putArray("definitions").addObject();
+        event.put("name", "PaymentSettledEvent");
+        event.put("action", "delegate");
+        event.put("schemaVersion", "v1");
+        event.put("idempotencyType", "com.example.codegenfixture.support.FixtureEventGuard");
+        event.put("idempotencyBean", "fixtureEventGuard");
+        event.put("idempotencyMethod", "executeOnce");
+        event.put("handlerType", "com.example.codegenfixture.application.codegenfixture.service.PaymentProcessor");
+        event.put("handlerBean", "paymentProcessor");
+        event.put("handlerMethod", "acceptPayment");
+        event.putArray("fields").addObject().put("name", "paymentId").put("javaType", "String").put("required", true).put("maxLength", 64);
+        event.withArray("fields").addObject().put("name", "occurredAt").put("javaType", "java.time.Instant").put("required", true);
+        event.withArray("fields").addObject().put("name", "items")
+                .put("javaType", "java.util.List<com.example.codegenfixture.domain.codegenfixture.vos.PaymentItem>").put("required", true);
+        event.withArray("fields").addObject().put("name", "groups")
+                .put("javaType", "java.util.Map<String,java.util.List<com.example.codegenfixture.domain.codegenfixture.vos.PaymentItem>>").put("required", true);
+        ObjectNode items = (ObjectNode) event.withArray("fields").get(2);
+        items.put("javaType", "java.util.List<com.example.codegenfixture.infrastructure.PaymentItem>");
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(2, run("plan", "--config", config.toString()));
+        items.put("javaType", "java.util.List<com.example.codegenfixture.domain.codegenfixture.vos.PaymentItem>");
+        mapper.writeValue(config.toFile(), document);
+        var states = new top.egon.cola.component.codegen.update.GenerationStateRepository();
+        String oldInput = "a".repeat(64);
+        String oldPrefix = "V1:" + "b".repeat(64);
+        states.save(root, top.egon.cola.component.codegen.update.GenerationStateRepository.StateBO.builder()
+                .formatVersion(1).latestObservedSchema(oldInput).versionChecksumPrefix(oldPrefix).build());
+        assertEquals(0, run("plan", "--config", config.toString()), lastErr);
+        assertEquals(3, mapper.readTree(lastOut).path("fileCount").asInt());
+        String plan = mapper.readTree(lastOut).path("planId").asText();
+        assertEquals(0, run("apply", "--config", config.toString(), "--plan", plan), lastErr);
+        assertEquals(oldInput, states.load(root).getLatestObservedSchema());
+        assertEquals(oldPrefix, states.load(root).getVersionChecksumPrefix());
+        Path support = root.resolve("stellar-enclosure-source-web-application/src/main/java/com/example/codegenfixture/support");
+        Files.createDirectories(support);
+        Files.writeString(support.resolve("FixtureEventGuard.java"), """
+                package com.example.codegenfixture.support;
+                public class FixtureEventGuard {
+                    private final java.util.Set<String> processed = new java.util.HashSet<>();
+                    public void executeOnce(String type, String id, Object event, Runnable action) {
+                        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+                            throw new IllegalStateException("missing transaction");
+                        if (!processed.contains(id)) { action.run(); processed.add(id); }
+                    }
+                }
+                """);
+        Path processorSource = root.resolve("stellar-enclosure-source-web-application/src/main/java/com/example/codegenfixture/application/codegenfixture/service/PaymentProcessor.java");
+        Files.createDirectories(processorSource.getParent());
+        Files.writeString(processorSource, """
+                package com.example.codegenfixture.application.codegenfixture.service;
+                import com.example.codegenfixture.application.codegenfixture.pojo.event.PaymentSettledEvent;
+                public class PaymentProcessor {
+                    public int calls;
+                    public void acceptPayment(PaymentSettledEvent event) { calls++; }
+                }
+                """);
+        Path itemSource = root.resolve("stellar-enclosure-source-web-domain/src/main/java/com/example/codegenfixture/domain/codegenfixture/vos/PaymentItem.java");
+        Files.createDirectories(itemSource.getParent());
+        Files.writeString(itemSource, """
+                package com.example.codegenfixture.domain.codegenfixture.vos;
+                public class PaymentItem { @jakarta.validation.constraints.NotBlank public String sku; }
+                """);
+        Path classes = root.resolve("classes");
+        compile(root, classes);
+        try (URLClassLoader loader = new URLClassLoader(new URL[]{classes.toUri().toURL()}, getClass().getClassLoader())) {
+            String app = "com.example.codegenfixture.application.codegenfixture.";
+            Class<?> eventType = loader.loadClass(app + "pojo.event.PaymentSettledEvent");
+            Object payload = eventType.getConstructor().newInstance();
+            eventType.getMethod("setEventId", String.class).invoke(payload, "id-1");
+            eventType.getMethod("setSchemaVersion", String.class).invoke(payload, "v1");
+            var validator = jakarta.validation.Validation.buildDefaultValidatorFactory().getValidator();
+            assertEquals(4, validator.validate(payload).size());
+            eventType.getMethod("setPaymentId", String.class).invoke(payload, "p-1");
+            eventType.getMethod("setOccurredAt", java.time.Instant.class).invoke(payload, java.time.Instant.EPOCH);
+            Object item = loader.loadClass("com.example.codegenfixture.domain.codegenfixture.vos.PaymentItem").getConstructor().newInstance();
+            eventType.getMethod("setItems", List.class).invoke(payload, List.of(item));
+            eventType.getMethod("setGroups", java.util.Map.class).invoke(payload, java.util.Map.of("g", List.of(item)));
+            assertEquals(2, validator.validate(payload).size());
+            item.getClass().getField("sku").set(item, "sku-1");
+            assertTrue(validator.validate(payload).isEmpty());
+            Object guard = loader.loadClass("com.example.codegenfixture.support.FixtureEventGuard").getConstructor().newInstance();
+            Object processor = loader.loadClass("com.example.codegenfixture.application.codegenfixture.service.PaymentProcessor").getConstructor().newInstance();
+            Class<?> executorType = loader.loadClass(app + "executor.event.PaymentSettledEventExe");
+            Object executor = transactional(executorType.getDeclaredConstructors()[0].newInstance(guard, processor),
+                    new RecordingTransactionManager(), loader);
+            Class<?> handlerType = loader.loadClass("com.example.codegenfixture.adapter.codegenfixture.event.PaymentSettledEventHandler");
+            Object handler = handlerType.getDeclaredConstructors()[0].newInstance(executor);
+            handlerType.getMethod("handle", eventType).invoke(handler, payload);
+            handlerType.getMethod("handle", eventType).invoke(handler, payload);
+            assertEquals(1, processor.getClass().getField("calls").getInt(processor));
+        }
+        document.putObject("events").put("enabled", false);
+        mapper.writeValue(config.toFile(), document);
+        assertEquals(8, run("check", "--config", config.toString()), lastErr);
+        var review = mapper.readTree(lastOut).path("retirementReview");
+        assertEquals(3, review.path("paths").size());
+        Path reviewFile = root.resolve("reviewed-event-retirement.json");
+        mapper.writeValue(reviewFile.toFile(), review);
+        for (var path : review.path("paths")) {
+            Path source = root.resolve(path.asText());
+            Path backup = root.resolve("preserved-events").resolve(path.asText());
+            Files.createDirectories(backup.getParent());
+            Files.move(source, backup);
+        }
+        assertEquals(0, run("retire-legacy", "--config", config.toString(), "--paths-file", reviewFile.toString()), lastErr);
+        assertEquals(oldInput, states.load(root).getLatestObservedSchema());
+        assertEquals(oldPrefix, states.load(root).getVersionChecksumPrefix());
+        assertEquals(0, run("plan", "--config", config.toString()), lastErr);
+    }
+
     private static Object transactional(Object target, RecordingTransactionManager manager, ClassLoader loader) {
         ProxyFactory factory = new ProxyFactory(target);
         factory.setProxyTargetClass(true);
@@ -388,6 +610,7 @@ class CodegenAcceptanceTest {
     }
 
     private static void compile(Path sourceRoot, Path classes) throws Exception {
+        TestContracts.writeSecurityStubs(sourceRoot.resolve("security-fixture/src/main/java"));
         Files.createDirectories(classes);
         List<Path> files;
         try (var paths = Files.walk(sourceRoot)) {
@@ -403,6 +626,9 @@ class CodegenAcceptanceTest {
                 + java.io.File.pathSeparator + jar("org/mapstruct/mapstruct/1.6.3/mapstruct-1.6.3.jar")
                 + java.io.File.pathSeparator + jar("org/springframework/spring-web/"
                 + org.springframework.core.SpringVersion.getVersion() + "/spring-web-"
+                + org.springframework.core.SpringVersion.getVersion() + ".jar")
+                + java.io.File.pathSeparator + jar("org/springframework/spring-webmvc/"
+                + org.springframework.core.SpringVersion.getVersion() + "/spring-webmvc-"
                 + org.springframework.core.SpringVersion.getVersion() + ".jar"));
         arguments.add("-processorpath");
         arguments.add(lombok + java.io.File.pathSeparator
@@ -416,7 +642,7 @@ class CodegenAcceptanceTest {
         assertEquals(0, compiler.run(null, log, log, arguments.toArray(String[]::new)), log.toString(StandardCharsets.UTF_8));
     }
 
-    private static String config(String profile, Path output) {
+    static String config(String profile, Path output) throws Exception {
         String modules = profile.equals("light") ? "" : """
                   "modulePaths": {
                     "domain": "stellar-enclosure-source-%s-domain",
@@ -425,7 +651,7 @@ class CodegenAcceptanceTest {
                     "adapter": "stellar-enclosure-source-%s-adapter"
                   },
                 """.formatted(profile, profile, profile, profile);
-        return """
+        String raw = """
                 {
                   "configVersion": 1,
                   "projectType": "%s",
@@ -441,12 +667,16 @@ class CodegenAcceptanceTest {
                   "apiContract": {
                     "existingErrorMapper": "com.example.codegenfixture.support.FixtureErrorMapper",
                     "contextSymbol": "com.example.codegenfixture.support.FixtureContext",
-                    "basePath": "/api/codegenfixture"
+                    "basePath": "/api/v1/codegenfixture"
                   },
                   "events": {"enabled": false}
                 }
                 """.formatted(profile, output, modules,
                 Path.of("src/test/resources/ddl/schema.sql").toAbsolutePath());
+        var mapper = new ObjectMapper();
+        ObjectNode document = (ObjectNode) mapper.readTree(raw);
+        TestContracts.addJson(document, "orders", "Orders", "/api/v1/codegenfixture", "code");
+        return mapper.writeValueAsString(document);
     }
 
     private static Path jar(String relative) {

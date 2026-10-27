@@ -10,13 +10,13 @@ import top.egon.cola.component.common.core.pojo.PageSlice;
 
 public interface [=domainServiceType] {
 
-    [=domainType] create(@Valid [=domainType] value);
+    [=domainType] [=createMethod](@NotNull @Valid [=domainType] value);
 
-    [=domainType] update(@Valid [=domainType] value);
+    [=domainType] [=updateMethod](@NotNull @Valid [=domainType] value);
 
-    void delete(@NotNull @Positive Long id, @NotNull @Min(0) Long expectedVersion);
+    void [=deleteMethod](@NotNull @Positive Long id, @NotNull @Min(0) Long expectedVersion);
 
-    [=domainType] detail(@NotNull @Positive Long id);
+    [=domainType] [=detailMethod](@NotNull @Positive Long id);
 
-    PageSlice<[=domainType]> query(@Valid [=domainQueryType] query);
+    PageSlice<[=domainType]> [=queryMethod](@NotNull @Valid [=domainQueryType] query);
 }

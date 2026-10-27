@@ -12,6 +12,7 @@ import [=applicationConverterPackage].[=pageConverterType];
 import top.egon.cola.component.common.core.pojo.PageSlice;
 [/#if]
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,12 +48,12 @@ public class [=pageExecutorType] {
 
     @Transactional(readOnly = true)
 [#if executorKind == "detail"]
-    public [=resultType] execute(@Valid [=detailQueryType] query) {
-        return resultConverter.toTarget(domainService.detail(query.getId()));
+    public [=resultType] execute(@NotNull @Valid [=detailQueryType] query) {
+        return resultConverter.toTarget(domainService.[=detailMethod](query.getId()));
     }
 [#else]
-    public PageSlice<[=resultType]> execute(@Valid [=pageQueryType] query) {
-        PageSlice<[=domainType]> slice = domainService.query(pageConverter.toTarget(query));
+    public PageSlice<[=resultType]> execute(@NotNull @Valid [=pageQueryType] query) {
+        PageSlice<[=domainType]> slice = domainService.[=queryMethod](pageConverter.toTarget(query));
         return PageSlice.of(slice.records().stream().map(resultConverter::toTarget).toList(), slice.hasNext());
     }
 [/#if]

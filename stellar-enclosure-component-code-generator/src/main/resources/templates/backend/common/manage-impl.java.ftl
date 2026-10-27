@@ -12,7 +12,6 @@ import [=commandExecutorPackage].[=updateExecutorType];
 import [=commandExecutorPackage].[=deleteExecutorType];
 import [=queryExecutorPackage].[=detailExecutorType];
 import [=queryExecutorPackage].[=pageExecutorType];
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,31 +44,31 @@ public class [=manageImplType] implements [=manageType] {
 
     @Override
     @Transactional
-    public [=resultType] create(@Valid [=createCommandType] command) {
+    public [=resultType] create([=createCommandType] command) {
         return [=createExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional
-    public [=resultType] update(@Valid [=updateCommandType] command) {
+    public [=resultType] update([=updateCommandType] command) {
         return [=updateExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional
-    public void delete(@Valid [=deleteCommandType] command) {
+    public void delete([=deleteCommandType] command) {
         [=deleteExecutorType?uncap_first].execute(command);
     }
 
     @Override
     @Transactional(readOnly = true)
-    public [=resultType] detail(@Valid [=detailQueryType] query) {
+    public [=resultType] detail([=detailQueryType] query) {
         return [=detailExecutorType?uncap_first].execute(query);
     }
 
     @Override
     @Transactional(readOnly = true)
-    public PageSlice<[=resultType]> page(@Valid [=pageQueryType] query) {
+    public PageSlice<[=resultType]> page([=pageQueryType] query) {
         return [=pageExecutorType?uncap_first].execute(query);
     }
 }

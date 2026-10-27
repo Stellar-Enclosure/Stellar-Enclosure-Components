@@ -38,8 +38,10 @@ public class CodegenConfigBO {
     @JsonProperty("projectType")
     private CodegenProfileEnum profile;
 
+    @NotBlank(groups = CodegenGroups.Plan.class)
     private String basePackage;
 
+    @NotBlank(groups = CodegenGroups.Plan.class)
     private String domain;
 
     @NotBlank(groups = {CodegenGroups.Plan.class, CodegenGroups.Apply.class})
@@ -67,6 +69,12 @@ public class CodegenConfigBO {
 
     @Valid
     private FieldPoliciesBO fieldPolicies;
+
+    @Builder.Default
+    private Map<String, FieldPoliciesBO> tableFieldPolicies = new LinkedHashMap<>();
+
+    @Builder.Default
+    private Map<String, DomainMethodsBO> domainMethods = new LinkedHashMap<>();
 
     @Valid
     private ApiContractBO apiContract;
@@ -112,20 +120,15 @@ public class CodegenConfigBO {
     @JsonPropertyOrder(alphabetic = true)
     public static class FieldPoliciesBO {
 
-        @Builder.Default
-        private List<String> create = new ArrayList<>();
+        private List<String> create;
 
-        @Builder.Default
-        private List<String> update = new ArrayList<>();
+        private List<String> update;
 
-        @Builder.Default
-        private List<String> result = new ArrayList<>();
+        private List<String> result;
 
-        @Builder.Default
-        private List<String> filter = new ArrayList<>();
+        private List<String> filter;
 
-        @Builder.Default
-        private List<String> sort = new ArrayList<>();
+        private List<String> sort;
 
         FieldPoliciesBO snapshot() {
             return FieldPoliciesBO.builder()
@@ -153,12 +156,119 @@ public class CodegenConfigBO {
 
         private String basePath;
 
+        private String transportMode;
+
+        private String transportConfigType;
+
+        private String transportBean;
+
+        @Builder.Default
+        private List<String> permissionReferences = new ArrayList<>();
+
+        @Builder.Default
+        private List<String> localPermissions = new ArrayList<>();
+
+        @Builder.Default
+        private Map<String, ApiTableBO> tables = new LinkedHashMap<>();
+
         ApiContractBO snapshot() {
             return ApiContractBO.builder()
                     .existingErrorMapper(existingErrorMapper)
                     .contextSymbol(contextSymbol)
                     .basePath(basePath)
+                    .transportMode(transportMode)
+                    .transportConfigType(transportConfigType)
+                    .transportBean(transportBean)
+                    .permissionReferences(copyList(permissionReferences))
+                    .localPermissions(copyList(localPermissions))
+                    .tables(copyApiTables(tables))
                     .build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class ApiTableBO {
+        private String basePath;
+        @Builder.Default
+        private Map<String, ApiOperationBO> operations = new LinkedHashMap<>();
+        @Builder.Default
+        private Map<String, ApiFieldBO> fields = new LinkedHashMap<>();
+
+        ApiTableBO snapshot() {
+            Map<String, ApiOperationBO> operationCopy = new LinkedHashMap<>();
+            if (operations != null) operations.forEach((key, value) -> operationCopy.put(key, value == null ? null : value.snapshot()));
+            Map<String, ApiFieldBO> fieldCopy = new LinkedHashMap<>();
+            if (fields != null) fields.forEach((key, value) -> fieldCopy.put(key, value == null ? null : value.snapshot()));
+            return ApiTableBO.builder().basePath(basePath).operations(operationCopy).fields(fieldCopy).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class ApiOperationBO {
+        private String scope;
+        private String permission;
+        private String resourceCode;
+        private String labelPage;
+        private String labelKey;
+
+        ApiOperationBO snapshot() {
+            return ApiOperationBO.builder().scope(scope).permission(permission).resourceCode(resourceCode)
+                    .labelPage(labelPage).labelKey(labelKey).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class ApiFieldBO {
+        private String permission;
+        private String labelPage;
+        private String labelKey;
+        private String resultKey;
+        private String createKey;
+        private String updateKey;
+        private String createPermission;
+        private String updatePermission;
+
+        ApiFieldBO snapshot() {
+            return ApiFieldBO.builder().permission(permission)
+                    .labelPage(labelPage).labelKey(labelKey).resultKey(resultKey).createKey(createKey).updateKey(updateKey)
+                    .createPermission(createPermission).updatePermission(updatePermission).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class DomainMethodsBO {
+        private String create;
+        private String update;
+        private String delete;
+        private String detail;
+        private String query;
+
+        DomainMethodsBO snapshot() {
+            return DomainMethodsBO.builder().create(create).update(update).delete(delete).detail(detail).query(query).build();
         }
     }
 
@@ -212,10 +322,39 @@ public class CodegenConfigBO {
 
         private Map<String, String> fieldMappings;
 
+        private String handlerType;
+
+        private String handlerBean;
+
+        private String handlerMethod;
+
+        @Builder.Default
+        private List<EventFieldBO> fields = new ArrayList<>();
+
         EventDefinitionBO snapshot() {
             return EventDefinitionBO.builder().table(table).name(name).action(action).schemaVersion(schemaVersion)
                     .idempotencyType(idempotencyType).idempotencyBean(idempotencyBean)
-                    .idempotencyMethod(idempotencyMethod).fieldMappings(copyMap(fieldMappings)).build();
+                    .idempotencyMethod(idempotencyMethod).fieldMappings(copyMap(fieldMappings))
+                    .handlerType(handlerType).handlerBean(handlerBean).handlerMethod(handlerMethod)
+                    .fields(copyEventFields(fields)).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class EventFieldBO {
+        private String name;
+        private String javaType;
+        private boolean required;
+        private Integer maxLength;
+
+        EventFieldBO snapshot() {
+            return EventFieldBO.builder().name(name).javaType(javaType).required(required).maxLength(maxLength).build();
         }
     }
 
@@ -237,9 +376,35 @@ public class CodegenConfigBO {
                 .artifacts(copyList(artifacts))
                 .existingTypes(copyMap(existingTypes))
                 .fieldPolicies(fieldPolicies == null ? null : fieldPolicies.snapshot())
+                .tableFieldPolicies(copyPolicies(tableFieldPolicies))
+                .domainMethods(copyDomainMethods(domainMethods))
                 .apiContract(apiContract == null ? null : apiContract.snapshot())
                 .events(events == null ? null : events.snapshot())
                 .build();
+    }
+
+    private static Map<String, FieldPoliciesBO> copyPolicies(Map<String, FieldPoliciesBO> values) {
+        Map<String, FieldPoliciesBO> copy = new LinkedHashMap<>();
+        if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+        return copy;
+    }
+
+    private static Map<String, DomainMethodsBO> copyDomainMethods(Map<String, DomainMethodsBO> values) {
+        Map<String, DomainMethodsBO> copy = new LinkedHashMap<>();
+        if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+        return copy;
+    }
+
+    private static Map<String, ApiTableBO> copyApiTables(Map<String, ApiTableBO> values) {
+        Map<String, ApiTableBO> copy = new LinkedHashMap<>();
+        if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+        return copy;
+    }
+
+    private static List<EventFieldBO> copyEventFields(List<EventFieldBO> values) {
+        List<EventFieldBO> copy = new ArrayList<>();
+        if (values != null) values.forEach(value -> copy.add(value == null ? null : value.snapshot()));
+        return copy;
     }
 
     static <T> List<T> copyList(List<T> source) {

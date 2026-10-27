@@ -1,5 +1,6 @@
 package [=eventPackage];
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -28,6 +29,9 @@ public class [=eventType] implements BasePojo {
     private String schemaVersion;
 [#list eventFields as field]
 
+[#if field.cascade == "true"]
+    @Valid
+[/#if]
 [#if field.nullable == "false"]
     @NotNull
 [/#if]

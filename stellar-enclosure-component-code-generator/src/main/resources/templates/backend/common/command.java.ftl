@@ -46,9 +46,6 @@ public class [=updateCommandType] implements BasePojo {
 [#if field.length?has_content]
     @Size(max = [=field.length])
 [/#if]
-[#if field.nullable == "false"]
-    @NotNull
-[/#if]
     private [=field.javaType] [=field.javaName];
 [/#list]
 }

@@ -160,6 +160,7 @@ public interface ProjectLayoutStrategy {
             case "adapter-vo" -> base + ".adapter." + domain + ".pojo.vo";
             case "adapter-converter" -> base + ".adapter." + domain + ".pojo.convertor";
             case "event-handler" -> base + ".adapter." + domain + ".event";
+            case "permission-mvc-config" -> base + ".adapter.config";
             default -> base + ".infrastructure." + domain + "." + artifact;
         };
     }
@@ -169,7 +170,7 @@ public interface ProjectLayoutStrategy {
             case "domain-model", "domain-query", "domain-service" -> "domain";
             case "command", "query", "result", "manage", "manage-impl", "application-converter",
                     "command-executor", "query-executor", "event", "event-executor", "event-converter" -> "application";
-            case "controller", "adapter-dto", "adapter-vo", "adapter-converter", "event-handler" -> "adapter";
+            case "controller", "adapter-dto", "adapter-vo", "adapter-converter", "event-handler", "permission-mvc-config" -> "adapter";
             default -> "infrastructure";
         };
     }

@@ -2,8 +2,8 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-An offline development tool. It reads PostgreSQL DDL or an MP-SDJ manifest and generates the backend
-CRUD for the native Light, Web and Service project types. It does not start Spring, does not connect
+An offline development tool. It reads PostgreSQL DDL, an MP-SDJ manifest or explicit standalone
+event definitions and generates backend code for native Light, Web and Service. It does not start Spring, does not connect
 to a database, and does not modify the target project's POM.
 
 `org.freemarker:freemarker:2.3.35` is the only approved template engine, and it exists only inside
@@ -61,87 +61,166 @@ and `RENAME` actions that need explicit acceptance, but `plan` only emits `CONFL
 `ADD` and `UPDATE`, and the command line passes no acceptance set, so that branch is unreachable in
 the current CLI.
 
-`backend-crud` generates the complete base chain: PO, DAO, Mapper XML, Repository, domain model and
-Domain Service/implementation, Command/Query/Result, matching CmdExe/QueryExe classes, converters,
-and Manage/implementation. Light and Web also generate Controller, DTO, VO and Adapter converter;
-Service generates no HTTP entry point. Selecting `command` emits three Command/CmdExe pairs,
-selecting `query` emits two Query/QueryExe pairs, and selecting `controller` includes its DTOs,
-VO and converter. The plan lists every file in the selected group.
-`persistence-crud` expands to only the first four items. `artifacts` can be selected one by one, and
-the aliases `pojo`→`po` and `mapper`→`mapper-xml` are normalized first. When a lower-level artifact
-is omitted, `existingTypeMappings` must declare the type that already exists: a missing `po` or
-`dao` returns `MISSING_TYPE` (exit code 3). The generator enforces only those two; the
-`requiredTypes` of the remaining catalog entries take no part in validation today. Beyond those
-grouped files and explicitly configured events, no additional artifacts are selected. Both queries and writes keep Mapper/XML access inside the
-Repository, and a Domain Service implementation must not call a DAO directly. `logicalTables` must
-be stated explicitly and matched one by one against the logical tables in the DDL; a table name that
-does not exist fails immediately.
+`backend-crud` generates PO, DAO, Mapper XML, Repository, domain model and business port, Command/Query/Result, matching CmdExe/QueryExe, converters and Manage. Native Light/Web also generate an authorized Controller with DTO/VO; Service has no HTTP entry point. `persistence-crud` selects only the first four. Selecting `command` or `query` also selects its matching executors, without silently expanding the rest of the scope.
 
-In the configuration JSON, `configVersion` must be `1`, `projectType` is one of
-`light`/`web`/`service`, and unknown keys are always rejected (deserialization enables
-`FAIL_ON_UNKNOWN_PROPERTIES`). `input.mode` has exactly two values: `schema` replays `schemaFiles`
-in order, `manifest` reads the `manifest` path below `resourceRoot`. A manifest looks like
-`{"family":...,"scripts":[{"version":...,"path":...,"sha256":...}]}`; script bytes that do not match
-the recorded `sha256`, or a changed prefix among the already recorded versions, return
-`CHECKSUM_DRIFT`.
+Dependencies outside the selection must exist at their canonical source paths or be explicitly declared in `existingTypeMappings`; PO/DAO may use an existing mapped type, while other mappings must match the fully qualified type used by generated code. Table-qualified keys such as `orders.domain-service` are supported. Missing dependencies return `MISSING_TYPE`; an explicit external mapping is a caller assertion, so compile the target project to check its actual classpath and signatures.
 
-## CQERS and inbound events
+`configVersion` is `1`; profiles are native `light`, `web`, and `service`. Unknown JSON keys are rejected. Input mode is `schema`, `manifest`, or `event` for standalone events only. DDL modes require explicit `logicalTables`. Global `fieldPolicies` may be overridden per table with `tableFieldPolicies`; invalid, duplicate or colliding fields are rejected before planning, including filter properties named `page`, `pageNo` or `pageSize`. `sort` defines fixed ascending columns; `id ASC` is appended for stable pagination. It is not a client-supplied sort parameter. HTTP paging accepts `pageNo` / `pageSize` or `page.pageNo` / `page.pageSize`; conflicting aliases are rejected.
 
-Generated code uses `domain/<domain>/{vos,service}`,
-`application/<domain>/{pojo,manage,executor}`, and `adapter/<domain>/{controller,pojo,event}`.
-Manage delegates to the matching executor; Commands keep their transaction boundaries and Queries
-remain read-only. HTTP JSON fields preserve the prior Command/Result semantics, but generated
-Controllers do not configure the target service's resource, scope or field authorization. Integrate
-them with the target identity and authorization mechanisms before exposure; resource registration
-alone does not grant roles.
+## CQERS, business ports and HTTP authorization
 
-No event class or empty handler is generated without a contract. To generate an inbound event,
-explicitly select `command` or `backend-crud` and provide complete definitions. Multi-module
-projects also need `modulePaths.adapter`. The following shows the event portion of a full configuration:
+Generated packages follow `domain/<domain>/{vos,service}`, `application/<domain>/{pojo,manage,executor}`, and `adapter/<domain>/{controller,pojo,event}`. Manage delegates to matching executors. For every table whose Domain Service is generated or referenced, `domainMethods` must explicitly name five distinct business methods; bare generic names such as `create`, `update`, `delete`, `detail`, and `query` are rejected. DDL cannot define domain invariants or prove the business meaning of a name; the generated persistence implementation remains a scaffold for business review.
+
+Every `domain-impl`, including Service, requires the existing target `apiContract.existingErrorMapper`. A Light/Web Controller additionally requires a unique native API path, explicit OAuth scope, permission, API resource code and localization keys for each operation, and field-resource metadata for every returned or writable field. Supply the real target contracts; do not infer or fabricate permissions. This example shows the relevant fragment for Web (Light paths start with `/api/`):
 
 ```json
 {
-  "events": {
-    "enabled": true,
-    "definitions": [{
-      "table": "orders",
-      "name": "OrderImportedEvent",
-      "action": "create",
-      "schemaVersion": "v1",
-      "idempotencyType": "com.example.order.support.EventDedupService",
-      "idempotencyBean": "eventDedupService",
-      "idempotencyMethod": "executeOnce",
-      "fieldMappings": {"code": "externalCode"}
-    }]
+  "domainMethods": {
+    "orders": {
+      "create": "createOrders",
+      "update": "changeOrders",
+      "delete": "removeOrders",
+      "detail": "findOrders",
+      "query": "pageOrders"
+    }
+  },
+  "apiContract": {
+    "existingErrorMapper": "com.example.order.support.OrdersErrorMapper",
+    "transportMode": "generate",
+    "permissionReferences": [
+      "fixture:orders:create",
+      "fixture:orders:update",
+      "fixture:orders:delete",
+      "fixture:orders:detail",
+      "fixture:orders:page",
+      "fixture:orders:read",
+      "fixture:orders:field:write"
+    ],
+    "tables": {
+      "orders": {
+        "basePath": "/api/v1/orders",
+        "operations": {
+          "create": {
+            "scope": "fixture:orders:create",
+            "permission": "fixture:orders:create",
+            "resourceCode": "fixture.api.orders.create",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.create"
+          },
+          "update": {
+            "scope": "fixture:orders:update",
+            "permission": "fixture:orders:update",
+            "resourceCode": "fixture.api.orders.update",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.update"
+          },
+          "delete": {
+            "scope": "fixture:orders:delete",
+            "permission": "fixture:orders:delete",
+            "resourceCode": "fixture.api.orders.delete",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.delete"
+          },
+          "detail": {
+            "scope": "fixture:orders:detail",
+            "permission": "fixture:orders:detail",
+            "resourceCode": "fixture.api.orders.detail",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.detail"
+          },
+          "page": {
+            "scope": "fixture:orders:page",
+            "permission": "fixture:orders:page",
+            "resourceCode": "fixture.api.orders.page",
+            "labelPage": "fixture.orders",
+            "labelKey": "api.page"
+          }
+        },
+        "fields": {
+          "id": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.id",
+            "resultKey": "fixture.field.orders.result.id",
+            "createKey": "fixture.field.orders.create.id",
+            "updateKey": "fixture.field.orders.update.id",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "version": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.version",
+            "resultKey": "fixture.field.orders.result.version",
+            "createKey": "fixture.field.orders.create.version",
+            "updateKey": "fixture.field.orders.update.version",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "code": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.code",
+            "resultKey": "fixture.field.orders.result.code",
+            "createKey": "fixture.field.orders.create.code",
+            "updateKey": "fixture.field.orders.update.code",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          },
+          "expectedVersion": {
+            "permission": "fixture:orders:read",
+            "labelPage": "fixture.orders",
+            "labelKey": "field.expectedVersion",
+            "resultKey": "fixture.field.orders.result.expectedVersion",
+            "createKey": "fixture.field.orders.create.expectedVersion",
+            "updateKey": "fixture.field.orders.update.expectedVersion",
+            "createPermission": "fixture:orders:field:write",
+            "updatePermission": "fixture:orders:field:write"
+          }
+        }
+      }
+    }
   }
 }
 ```
 
-The table must be selected in `logicalTables`; names must be unique Java types ending in `Event`,
-and action is `create`, `update`, or `delete`. Each `fieldMappings` key is a target Command Java
-field and its value is a lowerCamel event field. Create maps all create fields; update maps `id`,
-`expectedVersion` and all update fields; delete maps `id` and `expectedVersion`. The event always
-contains `eventId` and `schemaVersion`, which cannot be mapping sources. The generator emits the
-Event, MapStruct EventConverter, EventExe and an Adapter EventHandler. The handler is an entry point
-for an existing consumer; it does not subscribe to a queue/topic or publish events.
-Changing `schemaVersion` changes what the receiver accepts. Handle in-flight messages and producer
-compatibility during rollout; the generator does not migrate or replay old messages.
+Supply the OAuth scope without the `SCOPE_` prefix. Each operation declares `@PreAuthorize`, `@PermissionResource` and `@RequiresPermissions`; request DTO and response VO fields each declare distinct resource keys and `@FieldPermissions`. Configure read, create and update permissions explicitly, including update input resources for `id` and `expectedVersion`. `permissionReferences` lists codes owned by other producers; `localPermissions` lists codes already declared with `@PermissionDefinition` in this module. They must be disjoint and cover all used permissions. `labelPage` / `labelKey` refer to existing localization sources.
 
-The configured existing idempotency bean must provide a method compatible with
-`void executeOnce(String eventType, String eventId, Object event, Runnable action)`; the method name
-is configured by `idempotencyMethod`. Its type must be an Application/Domain port or shared contract,
-not a target-project Infrastructure, Adapter or Starter implementation; Spring injects the
-implementation. It must execute the action synchronously and atomically record
-the result in a transaction compatible with the business write, scoped by trusted tenant, consumer,
-event type and ID. Matching duplicates are skipped, a reused ID with different content is rejected,
-and processing failures propagate as runtime exceptions so the transaction rolls back for retry. Use
-the event to calculate a stable fingerprint without logging sensitive payloads. The caller owns source
-validation, trusted tenant context, retry/dead-letter and
-acknowledgement after commit. The generator creates no idempotency store and does not claim cross-
-database or cross-service exactly-once delivery.
+`transportMode: "generate"` emits one shared MVC configuration that applies the existing `PermissionJsonMapperFactory` to HTTP JSON converters; this affects all HTTP JSON converters in the target application and requires compatibility review. If an equivalent configuration already exists, choose `transportMode: "existing"` and provide its source type in `transportConfigType` and actual bean name in `transportBean`; include its module in `modulePaths` when necessary. Source inspection checks the declaration and wiring evidence, not whether the configuration is active in a deployment profile. A detected duplicate configuration blocks the plan. The target must configure its existing Permission-as-Code processor, complete manifest and runtime catalog, and establish trusted identity/tenant context. Generated Controllers depend on the permission guard, mapper factory and selected configuration bean, so missing beans fail startup. Registration, activation and role grants are separate; registration never grants roles. Page access conservatively requires read permissions for all configured filter and fixed-sort fields, including `id`, even when a filter is omitted. Read access to `version` is required for optimistic updates.
 
-An old flat-layout file, retained ownership record, or previously owned artifact left behind by a
-module-path change triggers `LEGACY_LAYOUT_CONFLICT` (exit 4).
+The legacy `contextSymbol` remains accepted for compatibility but does not establish a security context. Existing native HTTP filters must provide trusted identity/tenant context, and event consumers must establish their own trusted context. Generated permission resources allow USER principals by default; SERVICE/client-credentials cases require target-specific extension and verification. Generated repositories do not enable caching; add cache read/write and consistency policy through existing components when the business requires it.
+
+Result/VO always include a string `id` and `version`. A request-body update ID is optional but must match the path when present. A null update field means omitted, not an explicit SQL NULL. Create and update reread the persisted record to return database defaults, unchanged fields and the actual version; the existing transaction and error contracts still apply.
+
+## Inbound events
+
+Events are generated only from explicit definitions. The target must provide an existing synchronous transaction-compatible idempotency bean with a method compatible with `void executeOnce(String eventType, String eventId, Object event, Runnable action)`. Its scope must include trusted tenant, consumer, type, ID and a payload fingerprint: identical duplicates are skipped, conflicting reuse is rejected, and failures propagate for retry. The caller owns source authentication, trusted tenant context, transport, retry/dead-letter and acknowledgement after commit; generation does not create a store, subscribe or publish.
+
+CRUD actions `create`, `update`, and `delete` require a selected `table` and `fieldMappings` covering the generated Command fields. Optional `fields` add event-specific payload that is not mapped to the Command. For an event with independent business handling, use `action: "delegate"` and specify an existing Application-layer handler type, bean and `void` method accepting the generated event. EventExe invokes that port under the idempotency guard; no empty implementation is generated. An event-only run can use `artifacts: ["event"]`, `input: {"mode":"event"}` and empty `logicalTables`, with no DDL:
+
+```json
+{
+  "artifacts": ["event"],
+  "input": {"mode": "event"},
+  "logicalTables": [],
+  "events": {"enabled": true, "definitions": [{
+    "name": "PaymentSettledEvent", "action": "delegate", "schemaVersion": "v1",
+    "idempotencyType": "com.example.order.application.order.service.EventGuard",
+    "idempotencyBean": "eventGuard", "idempotencyMethod": "executeOnce",
+    "handlerType": "com.example.order.application.order.service.PaymentEventPort",
+    "handlerBean": "paymentEventPort", "handlerMethod": "acceptPayment",
+    "fields": [
+      {"name": "paymentId", "javaType": "String", "required": true, "maxLength": 64},
+      {"name": "occurredAt", "javaType": "java.time.Instant", "required": true}
+    ]
+  }]}
+}
+```
+
+Fields support `String`, `Long`, `Integer`, `Boolean`, `java.math.BigDecimal`, `java.util.UUID`, fully qualified `java.time` Instant/LocalDate/LocalDateTime/LocalTime, and existing Application, Domain or shared contract types. `java.util.List<T>`, `java.util.Set<T>`, `java.util.Map<String,T>` and arrays may nest up to three levels. Complex fields cascade `@Valid`; the target must provide those types and may not reference its Infrastructure, Adapter or Starter implementation. `eventId` and `schemaVersion` are always present and cannot be redefined. Version changes require producer and in-flight-message migration planning. Event-only generation preserves existing DDL state and checksum history.
+
+An old flat-layout file, retained ownership record, previously owned artifact left behind by a
+module-path change, an existing Domain Service with different business method names, or switching away from a generated MVC transport triggers `LEGACY_LAYOUT_CONFLICT` (exit 4).
 Removing or renaming a previously generated event triggers `EVENT_SCOPE_CONFLICT` (exit 4); `check`
 returns `DRIFT` and the affected paths. The tool never deletes, moves or adopts those files
 automatically. Review callers and ownership and migrate existing projects separately; do not delete
@@ -159,7 +238,12 @@ the state file or reset hashes to bypass protection. For obsolete owned paths:
    target files still conflict and are never adopted. Changed inputs/state require a new review; previous
    plans are stale after state changes. Resolve an interrupted generation with `recover` first.
 
-Generation reads only `CREATE TABLE` definitions, including those inside the existing role-scoped
+Existing backend configurations must add `domainMethods`; Controller generation also needs explicit
+permissions, fields, localization and MVC transport configuration. Old configurations and plans do
+not infer the new contracts. Review handwritten port consumers before changing business methods; a
+generated API is not ready for exposure until its Permission-as-Code processor and catalog are active.
+
+DDL generation reads only `CREATE TABLE` definitions, including those inside the existing role-scoped
 `DO` branches. Standalone `CREATE INDEX` and seed `INSERT`/`UPDATE`/`DELETE` statements are ignored
 for schema modeling. Indexes and soft-delete uniqueness must be reviewed separately by the agent;
 the generator cannot certify them. `ALTER`, `DROP`, `COMMENT` and other structural changes return `UNSUPPORTED_DDL`;
@@ -191,9 +275,18 @@ it records the interrupted phase so `recover` can roll back, and `apply.lock` is
 Deleting that directory strips the generator of every file-ownership record, after which all
 same-named files are judged as conflicts.
 
-Current acceptance covers compiling from source and the isolated tests:
-`./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am test`. It does not
-mean PostgreSQL, ShardingSphere or MQ have run in a real environment.
+Current acceptance covers compiling from source and isolated tests:
+`./mvnw -B -ntp -pl stellar-enclosure-component-code-generator -am test`. The real permission-processor
+integration test is skipped unless the existing processor and target runtime classpath are supplied:
+
+```bash
+export EGON_PAC_TEST_CLASSPATH="/path/to/stellar-enclosure-tianquan-jianshen-processor.jar:$(cat /path/to/target-runtime.cp)"
+./mvnw -B -ntp -f stellar-enclosure-component-code-generator/pom.xml -Dtest=PermissionProcessorIntegrationTest "-Dcodegen.permissionProcessorClasspath=$EGON_PAC_TEST_CLASSPATH" test
+```
+
+It compiles in a temporary directory and inspects the permission fragment; it does not register or
+activate permissions or grant roles. These tests do not establish real PostgreSQL, ShardingSphere,
+permission-service or MQ readiness.
 
 
 ## UTC temporal defaults

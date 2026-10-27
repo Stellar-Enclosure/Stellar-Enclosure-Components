@@ -84,7 +84,7 @@ class BackendCrudTemplateTest {
         assertTrue(light.get("manage-impl").contains("updateOrdersCmdExe.execute(command)"));
         assertTrue(light.get("update-executor").contains("domain.getVersion()"));
         assertTrue(light.get("page-executor").contains("pageConverter.toTarget(query)"));
-        assertFalse(light.get("page-executor").contains("domainService.update("));
+        assertFalse(light.get("page-executor").contains("domainService.changeOrders("));
 
         exerciseManage(light, config(CodegenProfileEnum.LIGHT, withController(true)), output);
     }
@@ -113,6 +113,7 @@ class BackendCrudTemplateTest {
         Files.createDirectories(sourceRoot);
         Files.writeString(output.resolve("lombok.config"),
                 "lombok.copyableAnnotations += org.springframework.beans.factory.annotation.Qualifier\n");
+        TestContracts.writeSecurityStubs(sourceRoot);
         write(sourceRoot, "com/example/order/support/OrdersErrorMapper.java", """
                 package com.example.order.support;
                 public final class OrdersErrorMapper {
@@ -134,18 +135,18 @@ class BackendCrudTemplateTest {
                     public OrdersBO updated;
                     public Long deletedVersion;
                     public OrdersDomainQuery queried;
-                    public OrdersBO create(OrdersBO value) { return value; }
-                    public OrdersBO update(OrdersBO value) { this.updated = value; return value; }
-                    public void delete(Long id, Long expectedVersion) { this.deletedVersion = expectedVersion; }
-                    public OrdersBO detail(Long id) { return new OrdersBO().setId(id); }
-                    public PageSlice<OrdersBO> query(OrdersDomainQuery query) {
+                    public OrdersBO createOrders(OrdersBO value) { return value; }
+                    public OrdersBO changeOrders(OrdersBO value) { this.updated = value; return value; }
+                    public void removeOrders(Long id, Long expectedVersion) { this.deletedVersion = expectedVersion; }
+                    public OrdersBO findOrders(Long id) { return new OrdersBO().setId(id); }
+                    public PageSlice<OrdersBO> pageOrders(OrdersDomainQuery query) {
                         queried = query;
                         return PageSlice.of(java.util.List.of(new OrdersBO().setId(6L).setCode("page")), true);
                     }
                 }
                 """);
         for (Map.Entry<String, String> source : sources.entrySet()) {
-            if (source.getKey().endsWith("-xml") || "mapper-xml".equals(source.getKey()) || "controller".equals(source.getKey())) {
+            if (source.getKey().endsWith("-xml") || "mapper-xml".equals(source.getKey())) {
                 continue;
             }
             String fileName = fileName(source.getKey(), source.getValue());
@@ -171,7 +172,8 @@ class BackendCrudTemplateTest {
         }
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         String classpath = System.getProperty("java.class.path") + java.io.File.pathSeparator + lombokJar()
-                + java.io.File.pathSeparator + mapstructJar();
+                + java.io.File.pathSeparator + mapstructJar() + java.io.File.pathSeparator + jar("org/springframework/spring-web/"
+                + org.springframework.core.SpringVersion.getVersion() + "/spring-web-" + org.springframework.core.SpringVersion.getVersion() + ".jar");
         List<String> arguments = new ArrayList<>();
         arguments.add("-classpath");
         arguments.add(classpath);
@@ -205,7 +207,17 @@ class BackendCrudTemplateTest {
                 assertTrue(parameter.isAnnotationPresent(org.springframework.beans.factory.annotation.Qualifier.class), parameter.toString());
             }
             Object manage = constructor.newInstance(createExecutor, updateExecutor, deleteExecutor, detailExecutor, pageExecutor);
+            var validator = jakarta.validation.Validation.buildDefaultValidatorFactory().getValidator();
             Class<?> updateCommand = loader.loadClass("com.example.order.application.order.pojo.command.UpdateOrdersCommand");
+            assertEquals(1, validator.forExecutables().validateParameters(manage,
+                    manageClass.getMethod("update", updateCommand), new Object[]{null}).size());
+            assertEquals(1, validator.forExecutables().validateParameters(updateExecutor,
+                    updateExecutor.getClass().getMethod("execute", updateCommand), new Object[]{null}).size());
+            Class<?> implementationType = loader.loadClass("com.example.order.infrastructure.order.service.impl.OrdersDomainServiceImpl");
+            Object implementation = implementationType.getDeclaredConstructors()[0].newInstance(null, null);
+            Class<?> domainType = loader.loadClass("com.example.order.domain.order.vos.OrdersBO");
+            assertEquals(1, validator.forExecutables().validateParameters(implementation,
+                    implementationType.getMethod("createOrders", domainType), new Object[]{null}).size());
             Object command = updateCommand.getConstructor().newInstance();
             updateCommand.getMethod("setId", Long.class).invoke(command, 5L);
             updateCommand.getMethod("setExpectedVersion", Long.class).invoke(command, 7L);
@@ -249,6 +261,52 @@ class BackendCrudTemplateTest {
                 resultType.getMethod("setCode", String.class).invoke(result, "A-1");
                 Object view = mapperType.getMethod("toView", resultType).invoke(adapterMapper, result);
                 assertEquals(json.valueToTree(result), json.valueToTree(view));
+                resultType.getMethod("setVersion", Long.class).invoke(result, 8L);
+                view = mapperType.getMethod("toView", resultType).invoke(adapterMapper, result);
+                assertEquals(8L, view.getClass().getMethod("getVersion").invoke(view));
+
+                Class<?> controllerType = loader.loadClass("com.example.order.adapter.order.controller.OrdersController");
+                assertEquals(java.util.Set.of("permissionExecutionGuard", "permissionJsonMapperFactory", "cqersPermissionMvcConfiguration"),
+                        java.util.Set.of(controllerType.getAnnotation(org.springframework.context.annotation.DependsOn.class).value()));
+                Object controller = controllerType.getDeclaredConstructors()[0].newInstance(manage, adapterMapper);
+                Object noBodyId = dtoType.getConstructor().newInstance();
+                dtoType.getMethod("setExpectedVersion", Long.class).invoke(noBodyId, 7L);
+                dtoType.getMethod("setCode", String.class).invoke(noBodyId, "changed");
+                assertTrue(validator.validate(noBodyId).isEmpty());
+                Method update = controllerType.getMethod("update", String.class, dtoType);
+                Object updateView = update.invoke(controller, "5", noBodyId);
+                assertEquals(7L, updateView.getClass().getMethod("getVersion").invoke(updateView));
+                assertTrue(java.util.Arrays.stream(update.getAnnotations())
+                        .anyMatch(annotation -> annotation.annotationType().getName().endsWith(".PreAuthorize")));
+                assertTrue(java.util.Arrays.stream(update.getAnnotations())
+                        .anyMatch(annotation -> annotation.annotationType().getName().endsWith(".PermissionResource")));
+                assertTrue(java.util.Arrays.stream(update.getAnnotations())
+                        .anyMatch(annotation -> annotation.annotationType().getName().endsWith(".RequiresPermissions")));
+                assertTrue(java.util.Arrays.stream(view.getClass().getDeclaredField("version").getAnnotations())
+                        .anyMatch(annotation -> annotation.annotationType().getName().endsWith(".FieldPermissions")));
+                var write = java.util.Arrays.stream(dtoType.getDeclaredField("code").getAnnotations())
+                        .filter(annotation -> annotation.annotationType().getName().endsWith(".FieldPermissions")).findFirst().orElseThrow();
+                Object writeGroup = write.annotationType().getMethod("write").invoke(write);
+                assertEquals(List.of("fixture:orders:field:write"),
+                        List.of((String[]) loader.loadClass("top.egon.cola.platform.tianquan.jianshen.contract.permission.annotation.PermissionGroup")
+                                .getMethod("codes").invoke(writeGroup)));
+                dtoType.getMethod("setId", Long.class).invoke(noBodyId, 6L);
+                assertTrue(org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                        () -> update.invoke(controller, "5", noBodyId)).getCause() instanceof IllegalArgumentException);
+                Class<?> pageDtoType = loader.loadClass("com.example.order.adapter.order.pojo.dto.OrdersPageDTO");
+                Object pageRequest = pageDtoType.getConstructor().newInstance();
+                var binder = new org.springframework.validation.DataBinder(pageRequest);
+                binder.bind(new org.springframework.beans.MutablePropertyValues(Map.of(
+                        "page.pageNo", "2", "page.pageSize", "3", "code", "filtered")));
+                assertFalse(binder.getBindingResult().hasErrors());
+                Method page = controllerType.getMethod("page", pageDtoType, Integer.class, Integer.class, Integer.class, Integer.class);
+                page.invoke(controller, pageRequest, null, null, 2, 3);
+                Object reboundQuery = fake.getClass().getField("queried").get(fake);
+                Object reboundPage = reboundQuery.getClass().getMethod("getPage").invoke(reboundQuery);
+                assertEquals(2, reboundPage.getClass().getMethod("pageNo").invoke(reboundPage));
+                assertEquals(3, reboundPage.getClass().getMethod("pageSize").invoke(reboundPage));
+                assertTrue(org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                        () -> page.invoke(controller, pageRequest, 2, null, 4, null)).getCause() instanceof IllegalArgumentException);
             }
         }
     }
@@ -328,10 +386,14 @@ class BackendCrudTemplateTest {
                 .fieldPolicies(CodegenConfigBO.FieldPoliciesBO.builder()
                         .create(List.of("code")).update(List.of("code")).result(List.of("code"))
                         .filter(List.of("code")).sort(List.of("id")).build())
+                .domainMethods(Map.of("orders", TestContracts.methods("Orders")))
                 .apiContract(CodegenConfigBO.ApiContractBO.builder()
                         .existingErrorMapper("com.example.order.support.OrdersErrorMapper")
                         .contextSymbol("com.example.order.support.OrdersContext")
-                        .basePath("/api/orders").build())
+                        .basePath("/api/v1/orders")
+                        .transportMode("generate")
+                        .permissionReferences(TestContracts.permissions("orders"))
+                        .tables(Map.of("orders", TestContracts.apiTable("orders", "/api/v1/orders", "code"))).build())
                 .roots(profile == CodegenProfileEnum.LIGHT ? null : new LinkedHashMap<>(Map.of(
                         "infrastructure", "order-service-infrastructure",
                         "domain", "order-service-domain",

@@ -6,7 +6,6 @@ import [=domainServiceFqn];
 import [=poFqn];
 import [=repoPackage].[=repoType];
 import [=persistenceConverterFqn];
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,18 +32,22 @@ public class [=domainImplType] implements [=domainServiceType] {
 
     @Override
     @Transactional
-    public [=domainType] create(@Valid [=domainType] value) {
+    public [=domainType] [=createMethod]([=domainType] value) {
         [=poType] po = converter.toSource(value);
         if (!repository.save(po)) {
             throw [=errorMapper].zeroRows("create", po.getId(), po.getVersion());
         }
         log.info("created {} id={}", "[=tableName]", po.getId());
-        return converter.toTarget(po);
+        [=poType] saved = repository.getById(po.getId());
+        if (saved == null) {
+            throw [=errorMapper].missing(po.getId());
+        }
+        return converter.toTarget(saved);
     }
 
     @Override
     @Transactional
-    public [=domainType] update(@Valid [=domainType] value) {
+    public [=domainType] [=updateMethod]([=domainType] value) {
         [=poType] current = repository.getById(value.getId());
         if (current == null) {
             throw [=errorMapper].missing(value.getId());
@@ -59,12 +62,16 @@ public class [=domainImplType] implements [=domainServiceType] {
             throw [=errorMapper].zeroRows("update", po.getId(), po.getVersion());
         }
         log.info("updated {} id={} version={}", "[=tableName]", po.getId(), po.getVersion());
-        return converter.toTarget(po);
+        [=poType] saved = repository.getById(po.getId());
+        if (saved == null) {
+            throw [=errorMapper].missing(po.getId());
+        }
+        return converter.toTarget(saved);
     }
 
     @Override
     @Transactional
-    public void delete(Long id, Long expectedVersion) {
+    public void [=deleteMethod](Long id, Long expectedVersion) {
         [=poType] po = new [=poType]();
         po.setId(id);
         po.setVersion(expectedVersion);
@@ -76,7 +83,7 @@ public class [=domainImplType] implements [=domainServiceType] {
 
     @Override
     @Transactional(readOnly = true)
-    public [=domainType] detail(Long id) {
+    public [=domainType] [=detailMethod](Long id) {
         [=poType] po = repository.getById(id);
         if (po == null) {
             throw [=errorMapper].missing(id);
@@ -86,7 +93,7 @@ public class [=domainImplType] implements [=domainServiceType] {
 
     @Override
     @Transactional(readOnly = true)
-    public PageSlice<[=domainType]> query(@Valid [=domainQueryType] query) {
+    public PageSlice<[=domainType]> [=queryMethod]([=domainQueryType] query) {
         int limit = query.getPage().pageSize();
         List<[=poType]> rows = new ArrayList<>(repository.selectByQuery(query, limit + 1, query.getPage().offset()));
         boolean hasNext = rows.size() > limit;

@@ -15,7 +15,9 @@ public interface [=eventConverterType] extends BaseForwardConverter<[=eventType]
 
     @Override
 [#list eventFields as field]
+[#if field.target?has_content]
     @Mapping(target = "[=field.target]", source = "[=field.source]")
+[/#if]
 [/#list]
     [=eventCommandType] toTarget([=eventType] source);
 }

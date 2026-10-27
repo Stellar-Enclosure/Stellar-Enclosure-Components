@@ -7,19 +7,20 @@ import [=queryPackage].[=detailQueryType];
 import [=queryPackage].[=pageQueryType];
 import [=resultPackage].[=resultType];
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.core.pojo.PageSlice;
 
 @Validated
 public interface [=manageType] {
 
-    [=resultType] create(@Valid [=createCommandType] command);
+    [=resultType] create(@NotNull @Valid [=createCommandType] command);
 
-    [=resultType] update(@Valid [=updateCommandType] command);
+    [=resultType] update(@NotNull @Valid [=updateCommandType] command);
 
-    void delete(@Valid [=deleteCommandType] command);
+    void delete(@NotNull @Valid [=deleteCommandType] command);
 
-    [=resultType] detail(@Valid [=detailQueryType] query);
+    [=resultType] detail(@NotNull @Valid [=detailQueryType] query);
 
-    PageSlice<[=resultType]> page(@Valid [=pageQueryType] query);
+    PageSlice<[=resultType]> page(@NotNull @Valid [=pageQueryType] query);
 }

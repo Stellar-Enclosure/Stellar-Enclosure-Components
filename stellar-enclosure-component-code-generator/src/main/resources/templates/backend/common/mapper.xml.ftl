@@ -43,7 +43,7 @@
 [#list filterFields as field]
         <if test="query.[=field.javaName] != null">AND [=field.column] = #{query.[=field.javaName]}</if>
 [/#list]
-        ORDER BY id ASC
+        ORDER BY [#list sortColumns as column][=column] ASC[#if column?has_next], [/#if][/#list]
         LIMIT #{limit} OFFSET #{offset}
     </select>
 [/#if]
