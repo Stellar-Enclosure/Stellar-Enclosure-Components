@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
+import org.springframework.scheduling.config.TaskManagementConfigUtils;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.dtp.context.DtpTaskContextManager;
 import top.egon.cola.component.dtp.context.DtpTaskDecorator;
@@ -59,7 +60,7 @@ public class DtpTaskContextAutoConfiguration {
     }
 
     @Configuration(proxyBeanMethods = false)
-    @ConditionalOnBean(name = "org.springframework.context.annotation.internalAsyncAnnotationProcessor")
+    @ConditionalOnBean(name = TaskManagementConfigUtils.ASYNC_ANNOTATION_PROCESSOR_BEAN_NAME)
     static class EnabledAsyncConfiguration {
         @Bean("dtpAsyncConfigurer")
         @ConditionalOnMissingBean(AsyncConfigurer.class)

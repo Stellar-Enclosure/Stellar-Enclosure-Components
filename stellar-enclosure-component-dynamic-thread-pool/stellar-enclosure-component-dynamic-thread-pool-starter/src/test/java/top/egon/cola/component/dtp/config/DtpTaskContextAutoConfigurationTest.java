@@ -3,6 +3,7 @@ package top.egon.cola.component.dtp.config;
 import io.micrometer.context.ThreadLocalAccessor;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
+import org.springframework.aop.interceptor.AsyncUncaughtExceptionHandler;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.task.TaskExecutionAutoConfiguration;
@@ -12,9 +13,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskDecorator;
 import org.springframework.scheduling.annotation.AsyncConfigurer;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.config.TaskManagementConfigUtils;
 import top.egon.cola.component.dtp.context.DtpTaskContextManager;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -29,7 +32,7 @@ class DtpTaskContextAutoConfigurationTest {
         runner.run(context -> {
             assertThat(context).hasSingleBean(TaskDecorator.class);
             assertThat(context).doesNotHaveBean("dtpAsyncConfigurer");
-            assertThat(context).doesNotHaveBean("org.springframework.context.annotation.internalAsyncAnnotationProcessor");
+            assertThat(context).doesNotHaveBean(TaskManagementConfigUtils.ASYNC_ANNOTATION_PROCESSOR_BEAN_NAME);
             USER.set("request");
             MDC.put("traceId", "request-trace");
             try {
@@ -69,16 +72,47 @@ class DtpTaskContextAutoConfigurationTest {
     }
 
     @Test
+    void enabledAsyncUsesDtpConfigurerWithoutChangingSpringExecutorSelection() {
+        runner.withUserConfiguration(EnabledAsync.class).run(context -> {
+            assertThat(context).hasSingleBean(AsyncConfigurer.class).hasSingleBean(DtpAsyncConfigurer.class);
+            assertThat(context).hasBean(TaskManagementConfigUtils.ASYNC_ANNOTATION_PROCESSOR_BEAN_NAME);
+            assertThat(context.getBean(AsyncConfigurer.class).getAsyncExecutor()).isNull();
+            assertThat(context.getBean(AsyncConfigurer.class).getAsyncUncaughtExceptionHandler()).isNotNull();
+        });
+    }
+
+    @Test
     void forcedBootExecutorSelectionAndExistingConfigurerArePreserved() {
         runner.withUserConfiguration(EnabledAsync.class)
                 .withPropertyValues("spring.task.execution.mode=force")
                 .run(context -> {
-                    assertThat(context).hasSingleBean(AsyncConfigurer.class);
+                    assertThat(context).hasSingleBean(AsyncConfigurer.class).hasBean("dtpAsyncConfigurer");
                     assertThat(context.getBean(AsyncConfigurer.class).getAsyncExecutor())
                             .isSameAs(context.getBean("applicationTaskExecutor"));
+                    assertThat(context.getBean(AsyncConfigurer.class).getAsyncUncaughtExceptionHandler()).isNotNull();
                 });
-        runner.withUserConfiguration(UserAsyncConfigurer.class)
-                .run(context -> assertThat(context).hasSingleBean(AsyncConfigurer.class).doesNotHaveBean("dtpAsyncConfigurer"));
+        for (String mode : java.util.List.of("auto", "force")) {
+            runner.withUserConfiguration(UserAsyncConfigurer.class)
+                    .withPropertyValues("spring.task.execution.mode=" + mode)
+                    .run(context -> {
+                        assertThat(context).hasSingleBean(AsyncConfigurer.class).doesNotHaveBean("dtpAsyncConfigurer");
+                        assertThat(context).hasBean(TaskManagementConfigUtils.ASYNC_ANNOTATION_PROCESSOR_BEAN_NAME);
+                        AsyncConfigurer configurer = context.getBean(AsyncConfigurer.class);
+                        assertThat(configurer.getAsyncExecutor()).isSameAs(UserAsyncConfigurer.EXECUTOR);
+                        assertThat(configurer.getAsyncUncaughtExceptionHandler()).isSameAs(UserAsyncConfigurer.HANDLER);
+                    });
+        }
+    }
+
+    @Test
+    void disabledComponentDoesNotContributeAnAsyncConfigurer() {
+        runner.withUserConfiguration(EnabledAsync.class)
+                .withPropertyValues("egon.cola.component.dtp.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasBean(TaskManagementConfigUtils.ASYNC_ANNOTATION_PROCESSOR_BEAN_NAME);
+                    assertThat(context).doesNotHaveBean("dtpAsyncConfigurer").doesNotHaveBean("dtpTaskDecorator")
+                            .doesNotHaveBean("dtpAsyncUncaughtExceptionHandler");
+                });
     }
 
     @Test
@@ -123,7 +157,16 @@ class DtpTaskContextAutoConfigurationTest {
 
     @Configuration(proxyBeanMethods = false)
     @org.springframework.scheduling.annotation.EnableAsync
-    static class UserAsyncConfigurer implements AsyncConfigurer { }
+    static class UserAsyncConfigurer implements AsyncConfigurer {
+        private static final Executor EXECUTOR = new org.springframework.core.task.SyncTaskExecutor();
+        private static final AsyncUncaughtExceptionHandler HANDLER = (failure, method, parameters) -> { };
+
+        @Override
+        public Executor getAsyncExecutor() { return EXECUTOR; }
+
+        @Override
+        public AsyncUncaughtExceptionHandler getAsyncUncaughtExceptionHandler() { return HANDLER; }
+    }
 
     @Configuration(proxyBeanMethods = false)
     static class AccessorConfiguration {

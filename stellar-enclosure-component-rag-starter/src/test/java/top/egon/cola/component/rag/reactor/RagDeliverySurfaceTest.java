@@ -34,7 +34,8 @@ class RagDeliverySurfaceTest {
             "stellar-enclosure-component-access-guard-starter",
             "stellar-enclosure-component-method-extension",
             "stellar-enclosure-component-transactional-outbox-starter",
-            "stellar-enclosure-component-bytecode");
+            "stellar-enclosure-component-bytecode",
+            "stellar-enclosure-component-code-generator");
 
     private static final Path COMPONENTS = Path.of("..");
 

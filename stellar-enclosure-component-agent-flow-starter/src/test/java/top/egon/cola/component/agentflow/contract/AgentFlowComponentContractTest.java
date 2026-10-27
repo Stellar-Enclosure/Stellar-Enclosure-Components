@@ -25,7 +25,7 @@ class AgentFlowComponentContractTest {
     private static final Path BOM_README_ZH = COMPONENTS_ROOT.resolve("stellar-enclosure-components-bom/README.zh-CN.md");
     private static final Path COMPONENTS_README = COMPONENTS_ROOT.resolve("README.md");
     private static final Path COMPONENTS_README_ZH = COMPONENTS_ROOT.resolve("README.zh-CN.md");
-    private static final Path ARCHITECTURE = COMPONENTS_ROOT.resolve("stellar-enclosure-components-architecture.md");
+    private static final Path ARCHITECTURE = COMPONENTS_ROOT.resolve("egon-cola-components-architecture.md");
     private static final Path MODULE_POM = Path.of("pom.xml").toAbsolutePath().normalize();
     private static final Path SOURCE_ROOT = Path.of("src/main/java").toAbsolutePath().normalize();
     private static final Path MODULE_README = Path.of("README.md").toAbsolutePath().normalize();

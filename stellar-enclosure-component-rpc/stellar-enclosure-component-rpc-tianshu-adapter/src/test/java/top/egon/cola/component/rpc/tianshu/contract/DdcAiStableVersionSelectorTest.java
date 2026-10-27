@@ -37,12 +37,20 @@ class DdcAiStableVersionSelectorTest {
     }
 
     @Test
-    void supportsCurrentLookupAndFixedRootCurrentOrVersionedLookup() {
+    void currentLookupRequiresTheResourceIdentity() {
         DdcAiResourceQuery current = new DdcAiResourceQuery("dev-space", "review-order", null, null);
+
+        assertThat(validator.validate(current, DdcAiValidationGroups.Read.class))
+                .anyMatch(violation -> violation.getPropertyPath().toString().equals("resourceId")
+                        && violation.getConstraintDescriptor().getAnnotation()
+                        .annotationType().equals(jakarta.validation.constraints.NotNull.class));
+    }
+
+    @Test
+    void supportsFixedRootCurrentOrVersionedLookup() {
         DdcAiResourceQuery rootCurrent = new DdcAiResourceQuery("dev-space", "review-order", null, 41L);
         DdcAiResourceQuery fixedVersion = new DdcAiResourceQuery("dev-space", "review-order", 3L, 41L);
 
-        assertThat(validator.validate(current, DdcAiValidationGroups.Read.class)).isEmpty();
         assertThat(validator.validate(rootCurrent, DdcAiValidationGroups.Read.class)).isEmpty();
         assertThat(validator.validate(fixedVersion, DdcAiValidationGroups.Read.class)).isEmpty();
         assertThat(fixedVersion.resourceId()).isEqualTo(41L);

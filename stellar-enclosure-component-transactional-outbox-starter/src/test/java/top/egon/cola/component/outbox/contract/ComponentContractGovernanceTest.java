@@ -420,7 +420,8 @@ class ComponentContractGovernanceTest {
                 "egon.cola.component.transactional-outbox.storage.mp.sql-session-factory-bean-name",
                 "egon.cola.component.transactional-outbox.storage.mp.migration-mode",
                 "egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout",
-                "egon.cola.component.transactional-outbox.storage.mp.manifest-resource");
+                "egon.cola.component.transactional-outbox.storage.mp.manifest-resource",
+                "egon.cola.component.transactional-outbox.storage.mp.auto-initialize-ddl");
 
         assertThat(englishKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);
         assertThat(chineseKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);

@@ -486,7 +486,7 @@ class ComponentContractGovernanceTest {
                         "MANAGEMENT_CONFIG_READ=9", "MANAGEMENT_CONFIG_WRITE=10", "MANAGEMENT_PUBLISH=11",
                         "MANAGEMENT_TASK_READ=12", "MANAGEMENT_TASK_RETRY=13", "MANAGEMENT_INSTANCE_READ=14",
                         "MANAGEMENT_ADMISSION_REVOKE=15", "MANAGEMENT_SCOPE_READ=16", "MANAGEMENT_REGISTRY_READ=17",
-                        "MANAGEMENT_CATALOG_READ=18"));
+                        "MANAGEMENT_CATALOG_READ=18", "AI_READ=19", "AI_REPORT=20", "AI_WRITE=21", "AI_PUBLISH=22"));
         return Map.copyOf(codes);
     }
 

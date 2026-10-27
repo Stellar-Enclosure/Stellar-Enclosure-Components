@@ -6,6 +6,8 @@ import org.slf4j.MDC;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.task.TaskExecutionAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -87,6 +89,29 @@ class DtpAsyncIntegrationTest {
     }
 
     @Test
+    void forcedBootExecutorKeepsDtpVoidExceptionHandling() {
+        FAILURES.clear();
+        runner.withConfiguration(AutoConfigurations.of(TaskExecutionAutoConfiguration.class))
+                .withPropertyValues("spring.task.execution.mode=force", "test.managed-executor.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(AsyncConfigurer.class);
+                    assertThat(context.getBean(AsyncConfigurer.class).getAsyncExecutor())
+                            .isSameAs(context.getBean("applicationTaskExecutor"));
+                    USER.set("force-user");
+                    MDC.put("traceId", "force-trace");
+                    try {
+                        AsyncService service = context.getBean(AsyncService.class);
+                        assertThat(service.context().get(2, TimeUnit.SECONDS)).isEqualTo("force-user:force-trace");
+                        service.voidFailure();
+                        await().untilAsserted(() -> assertThat(FAILURES).hasSize(1));
+                        assertThat(FAILURES.getFirst().getCause()).isSameAs(FAILURE);
+                        assertThat(FAILURES.getFirst().getTraceId()).isEqualTo("force-trace");
+                        assertThat(FAILURES.getFirst().getSource()).isEqualTo("ASYNC_VOID");
+                    } finally { USER.remove(); MDC.clear(); }
+                });
+    }
+
+    @Test
     void unmanagedVoidReportsEachFailureButRestoresCallbackMdcAndLimitsOnlyDefaultLogging() throws Exception {
         var factory = new org.springframework.beans.factory.support.StaticListableBeanFactory();
         var reports = new CopyOnWriteArrayList<DtpTaskFailureBO>();
@@ -154,6 +179,7 @@ class DtpAsyncIntegrationTest {
         }
 
         @Bean("applicationTaskExecutor")
+        @ConditionalOnProperty(name = "test.managed-executor.enabled", havingValue = "true", matchIfMissing = true)
         ThreadPoolTaskExecutor executor(@Qualifier("threadManage") ThreadManage manager) {
             return manager.newThreadPool(new ThreadPoolCreateCommand().setExecutorName("applicationTaskExecutor")
                     .setCorePoolSize(1).setMaximumPoolSize(1).setQueueCapacity(8));
