@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -171,6 +172,28 @@ class DefaultAgentFlowServiceTest {
         active.cancel();
         service.deleteSession(new AgentFlowSessionCommand("flow", "user", session.sessionId()));
         service.close();
+    }
+
+    @Test
+    void terminal_callbacks_can_delete_the_completed_or_failed_session() {
+        for (Flowable<Event> execution : List.of(Flowable.<Event>empty(),
+                Flowable.<Event>error(new IllegalStateException("expected failure")))) {
+            DefaultAgentFlowService service = service(new ControlledRunner(execution), Duration.ofSeconds(1));
+            AgentFlowSessionResult session = service.createSession(createCommand());
+            AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
+            Runnable delete = () -> {
+                try {
+                    service.deleteSession(new AgentFlowSessionCommand("flow", "user", session.sessionId()));
+                } catch (RuntimeException failure) {
+                    cleanupFailure.set(failure);
+                }
+            };
+            service.executeStream(command(session.sessionId())).subscribe(event -> { }, error -> delete.run(), delete::run);
+            assertThat(cleanupFailure.get()).isNull();
+            assertThatThrownBy(() -> service.execute(command(session.sessionId())))
+                    .isInstanceOf(AgentFlowSessionNotFoundException.class);
+            service.close();
+        }
     }
 
     @Test

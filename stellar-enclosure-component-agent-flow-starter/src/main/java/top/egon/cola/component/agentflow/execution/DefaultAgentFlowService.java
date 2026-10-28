@@ -139,15 +139,19 @@ public class DefaultAgentFlowService implements AgentFlowService, AutoCloseable 
                     return execution
                             .doOnNext(event -> eventCount.incrementAndGet())
                             .takeUntil(deadline)
-                            .doOnComplete(() -> log.debug(
-                                    "Agent Flow execution stage=EXECUTION outcome=SUCCESS eventCount={}",
-                                    eventCount.get()))
+                            .doOnComplete(() -> {
+                                lease.close();
+                                log.debug("Agent Flow execution stage=EXECUTION outcome=SUCCESS eventCount={}",
+                                        eventCount.get());
+                            })
                             .doOnCancel(() -> log.debug(
                                     "Agent Flow execution stage=EXECUTION outcome=CANCELLED eventCount={}",
                                     eventCount.get()))
-                            .doOnError(failure -> log.warn(
-                                    "Agent Flow execution stage=EXECUTION outcome=ERROR errorType={}",
-                                    failure.getClass().getSimpleName()))
+                            .doOnError(failure -> {
+                                lease.close();
+                                log.warn("Agent Flow execution stage=EXECUTION outcome=ERROR errorType={}",
+                                        failure.getClass().getSimpleName());
+                            })
                             .onErrorResumeNext(failure -> Flowable.error(
                                     mapExecutionFailure(command.flowId(), failure)))
                             .doFinally(lease::close);

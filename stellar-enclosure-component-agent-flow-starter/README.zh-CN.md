@@ -140,6 +140,7 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
 - `AgentFlowSessionBusyException` 立即失败。delete 和 execute 使用同一个 guard，避免检查后再操作的竞态。
 - `execution-timeout` 是 Session 校验后的执行总 deadline。超时抛出 `AgentFlowExecutionTimeoutException`，dispose 上游订阅并释放 tuple lease。
 - 调用方 cancel 会 dispose 流并释放 lease，不伪造 error。starter 的 `AgentFlowInMemoryRunner` 会跨 ADK 缓存步骤通知正在运行的模型订阅；直接创建原生 ADK `InMemoryRunner` 不包含这层传播。上游失败会包装为保留 cause 的 `AgentFlowExecutionException`。
+- 正常完成或失败时，组件在通知终态订阅者之前释放 Session lease，终态回调可以删除该 Session。cancel 仍先 dispose 上游，再最终释放 lease。
 - 取消和超时不能撤销已经开始的工具或远程请求。流终止时 tuple lease 就会释放；若外部工作忽略中断而继续，宿主必须自行保护重入和业务副作用。
 - 适配器有界地请求模型帧；累计超过 100,000 帧或 4,000,000 个文本/工具参数 UTF-16 代码单元时明确失败。ADK 内部步骤缓存和 provider 缓冲仍可能在下游消费缓慢时保留数据，这不是端到端背压或总内存上限。流式工具调用 ID 缺失或重复时，在执行工具前失败。
 - 自定义 `InMemoryRunner` 子类需要实现接受 `RunConfig` 的重载才能自定义流式执行；同步 `execute` 仍使用原来的三个参数重载。
