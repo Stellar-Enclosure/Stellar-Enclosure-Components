@@ -93,6 +93,96 @@ class EgonColaLocalWriteGuardTest {
     }
 
     @Test
+    void dmlSubqueriesMustResolveToTheSamePrimaryAndConflictsRollBack() {
+        DataSource source = mock(DataSource.class);
+        Connection connection = mock(Connection.class);
+        var configuration = configuration(source);
+        ConnectionHolder holder = begin(source, connection);
+        String sql = "UPDATE a SET version=version+1, update_user_id=#{user}, update_time=#{now} "
+                + "WHERE id=#{id} AND tenant_id=#{tenantId} AND version=#{version} AND deleted_at IS NULL "
+                + "AND NOT EXISTS (SELECT 1 FROM b WHERE b.tenant_id=#{tenantId} AND b.deleted_at IS NULL)";
+        try {
+            var guard = guard(query -> result(query.logicalTable().equals("a") ? "primary_a" : "primary_b", query.logicalTable()));
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, "test.Mapper.check", SqlCommandType.UPDATE,
+                    sql, parameters()), connection, null)).hasMessageContaining("LOCAL_WRITE_TARGET_MISMATCH");
+            assertThat(holder.isRollbackOnly()).isTrue();
+            verifyNoInteractions(connection);
+        } finally {
+            end(source);
+        }
+    }
+
+    @Test
+    void dmlSubqueriesInTheSamePrimaryDoNotCountAsAdditionalWriteTargets() {
+        DataSource source = mock(DataSource.class);
+        var tables = new java.util.ArrayList<String>();
+        var guard = guard(query -> {
+            tables.add(query.logicalTable());
+            assertThat(query.operation()).isEqualTo(top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery.OperationEnum.COMMAND);
+            return result("primary_a", query.logicalTable());
+        });
+        String sql = "UPDATE a SET version=version+1, update_user_id=#{user}, update_time=#{now} "
+                + "WHERE id=#{id} AND tenant_id=#{tenantId} AND version=#{version} AND deleted_at IS NULL "
+                + "AND NOT EXISTS (SELECT 1 FROM b WHERE b.tenant_id=#{tenantId} AND b.deleted_at IS NULL)";
+        assertThatCode(() -> guard.beforePrepare(handler(configuration(source), "test.Mapper.check", SqlCommandType.UPDATE,
+                sql, parameters()), mock(Connection.class), null)).doesNotThrowAnyException();
+        assertThat(tables).containsExactly("a", "b");
+    }
+
+    @Test
+    void dmlCannotHideAnUnroutableSubqueryInAnIgnoredTable() {
+        DataSource source = mock(DataSource.class);
+        var properties = new EgonColaMybatisPlusProperties();
+        properties.getTenantId().getIgnoredTables().add("b");
+        var sqlGuard = new EgonColaTenantIdGuardInnerInterceptor(() -> "tester", properties);
+        var guard = new EgonColaLocalWriteGuardInnerInterceptor(query -> result("primary_a", query.logicalTable()),
+                sqlGuard, mock(top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy.class), Map.of());
+        String sql = "UPDATE a SET version=version+1, update_user_id=#{user}, update_time=#{now} "
+                + "WHERE id=#{id} AND tenant_id=#{tenantId} AND version=#{version} AND deleted_at IS NULL "
+                + "AND NOT EXISTS (SELECT 1 FROM b WHERE b.deleted_at IS NULL)";
+        assertThatThrownBy(() -> guard.beforePrepare(handler(configuration(source), "test.Mapper.check", SqlCommandType.UPDATE,
+                sql, parameters()), mock(Connection.class), null)).hasMessageContaining("DML_IGNORED_SCOPE_UNRESOLVED");
+    }
+
+    @Test
+    void updateAssignmentsCannotReadAnotherPrimaryThroughAScalarSubquery() {
+        DataSource source = mock(DataSource.class);
+        Connection connection = mock(Connection.class);
+        ConnectionHolder holder = begin(source, connection);
+        String sql = "UPDATE a SET title=(SELECT max(b.title) FROM b WHERE b.tenant_id=#{tenantId} AND b.deleted_at IS NULL), "
+                + "version=version+1, update_user_id=#{user}, update_time=#{now} "
+                + "WHERE id=#{id} AND tenant_id=#{tenantId} AND version=#{version} AND deleted_at IS NULL";
+        try {
+            var guard = guard(query -> result(query.logicalTable().equals("a") ? "primary_a" : "primary_b", query.logicalTable()));
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration(source), "test.Mapper.check", SqlCommandType.UPDATE,
+                    sql, parameters()), connection, null)).hasMessageContaining("LOCAL_WRITE_TARGET_MISMATCH");
+            assertThat(holder.isRollbackOnly()).isTrue();
+        } finally {
+            end(source);
+        }
+    }
+
+    @Test
+    void dmlSubqueryCannotFanOutToMultipleTablesInTheSamePrimary() {
+        DataSource source = mock(DataSource.class);
+        Connection connection = mock(Connection.class);
+        ConnectionHolder holder = begin(source, connection);
+        String sql = "UPDATE a SET version=version+1, update_user_id=#{user}, update_time=#{now} "
+                + "WHERE id=#{id} AND tenant_id=#{tenantId} AND version=#{version} AND deleted_at IS NULL "
+                + "AND NOT EXISTS (SELECT 1 FROM b WHERE b.tenant_id=#{tenantId} AND b.deleted_at IS NULL)";
+        try {
+            var guard = guard(query -> query.logicalTable().equals("a") ? result("primary_a", "a")
+                    : new EgonColaRouteResult(List.of(new EgonColaPhysicalTargetBO("primary_a", "public", "b_0"),
+                            new EgonColaPhysicalTargetBO("primary_a", "public", "b_1")), "a".repeat(64)));
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration(source), "test.Mapper.check", SqlCommandType.UPDATE,
+                    sql, parameters()), connection, null)).hasMessageContaining("DML_SUBQUERY_FANOUT_FORBIDDEN");
+            assertThat(holder.isRollbackOnly()).isTrue();
+        } finally {
+            end(source);
+        }
+    }
+
+    @Test
     void aSuspendedTransactionDoesNotLeakItsWriteTargetIntoRequiresNew() {
         DataSource source = mock(DataSource.class);
         Connection connection = mock(Connection.class);

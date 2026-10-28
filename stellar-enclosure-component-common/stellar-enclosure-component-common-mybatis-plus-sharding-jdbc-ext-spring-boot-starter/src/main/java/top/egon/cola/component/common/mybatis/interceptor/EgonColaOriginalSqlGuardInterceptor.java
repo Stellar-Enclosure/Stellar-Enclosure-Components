@@ -108,6 +108,11 @@ public final class EgonColaOriginalSqlGuardInterceptor implements Interceptor {
                 }
                 scopes.add(new TableScopeBO(update.getTable(), update.getWhere(), update.getWhere(), update, 1));
                 nested(update.getWhere(), scopes, new HashSet<>());
+                for (var set : update.getUpdateSets()) {
+                    for (int index = 0; index < set.getColumns().size(); index++) {
+                        nested(set.getValue(index), scopes, new HashSet<>());
+                    }
+                }
             } else if (statement instanceof Delete delete) {
                 scopes.add(new TableScopeBO(delete.getTable(), delete.getWhere(), delete.getWhere(), delete, 1));
                 nested(delete.getWhere(), scopes, new HashSet<>());

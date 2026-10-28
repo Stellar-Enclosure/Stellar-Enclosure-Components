@@ -66,8 +66,11 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
                     throw new IllegalStateException("SQL_SCHEMA_ROUTE_MISMATCH");
                 }
                 if (write) {
+                    if (!scoped.writeTarget() && result.targets().size() != 1) {
+                        throw new IllegalStateException("DML_SUBQUERY_FANOUT_FORBIDDEN");
+                    }
                     result.targets().forEach(target -> groups.add(target.group()));
-                    targetCount += result.targets().size();
+                    if (scoped.writeTarget()) { targetCount += result.targets().size(); }
                 }
             }
             if (sqlGuard.requiresLifecycleTransaction(statement)
@@ -77,6 +80,7 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
                 throw new IllegalStateException("PURGE_TRANSACTION_REQUIRED");
             }
             if (!write || queries.isEmpty()) { return; }
+            if (targetCount == 0) { throw new IllegalStateException("WRITE_TARGET_UNRESOLVED"); }
             if (groups.size() != 1) { throw new IllegalStateException("LOCAL_WRITE_TARGET_MISMATCH"); }
             boolean active = TransactionSynchronizationManager.isActualTransactionActive();
             if (!active) {

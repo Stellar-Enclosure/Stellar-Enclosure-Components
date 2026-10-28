@@ -181,6 +181,9 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
         if (insert) {
             return insertRoutes((Insert) shape.statement(), shape, statement, sql, tenant, profiles);
         }
+        if (!query && shape.scopes().stream().skip(1).anyMatch(this::ignored)) {
+            throw new IllegalStateException("DML_IGNORED_SCOPE_UNRESOLVED");
+        }
         List<ScopedRouteQuery> routes = new ArrayList<>();
         for (TableScopeBO scope : shape.scopes()) {
             if (ignored(scope)) {
@@ -217,10 +220,10 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
             if (query && profile != null && profile.secondaryColumn() != null && roots.isEmpty() && (statement.getResource() == null || !statement.getResource().contains(".xml"))) {
                 throw new IllegalStateException("REGISTERED_QUERY_SQL_REQUIRED");
             }
-            // Only the actual DML target is a write; subqueries remain independently scoped reads.
-            if (query || scope == shape.scopes().getFirst() || policy != null && policy.scope() == LifecycleScopeEnum.PURGE_PARENT) {
-                routes.add(new ScopedRouteQuery(new EgonColaRouteQuery(table, tenant, roots, operation, range), scope.table().getSchemaName() == null ? null : identifier(scope.table().getSchemaName())));
-            }
+            // A DML subquery executes on the same primary as its target and must resolve there too.
+            routes.add(new ScopedRouteQuery(new EgonColaRouteQuery(table, tenant, roots, operation, range),
+                    scope.table().getSchemaName() == null ? null : identifier(scope.table().getSchemaName()),
+                    !query && scope == shape.scopes().getFirst()));
         }
         if (shape.statement() instanceof Update update) {
             validateProtectedAssignments(update, statement, sql, statement.getConfiguration());
@@ -533,7 +536,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
                 roots.add(root);
             }
         }
-        return List.of(new ScopedRouteQuery(new EgonColaRouteQuery(table, tenant, List.copyOf(roots), EgonColaRouteQuery.OperationEnum.COMMAND, false), insert.getTable().getSchemaName() == null ? null : identifier(insert.getTable().getSchemaName())));
+        return List.of(new ScopedRouteQuery(new EgonColaRouteQuery(table, tenant, List.copyOf(roots), EgonColaRouteQuery.OperationEnum.COMMAND, false), insert.getTable().getSchemaName() == null ? null : identifier(insert.getTable().getSchemaName()), true));
     }
 
     private void validateVersionedUpdate(Update update, SqlShapeBO shape, MappedStatement statement, BoundSql sql) {
@@ -714,7 +717,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
         }
     }
 
-    record ScopedRouteQuery(EgonColaRouteQuery query, String schema) {
+    record ScopedRouteQuery(EgonColaRouteQuery query, String schema, boolean writeTarget) {
     }
 
     private boolean ignored(TableScopeBO scope) {
