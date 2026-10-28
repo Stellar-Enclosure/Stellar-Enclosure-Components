@@ -129,6 +129,28 @@ class BackendCrudTemplateTest {
         exerciseManage(sources, config, output.resolve("default"));
     }
 
+    @Test
+    void childShardUsesReplicaCandidateAndImmutableRootForVersionedWrites(@TempDir Path output) throws Exception {
+        String ddl = Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64), order_id BIGINT NOT NULL");
+        Path schemaFile = output.resolve("schema.sql");
+        Files.writeString(schemaFile, ddl);
+        CodegenConfigBO config = config(CodegenProfileEnum.LIGHT, withController(true));
+        config.setInput(CodegenConfigBO.InputBO.builder().mode("schema").schemaFiles(List.of(schemaFile.toString()))
+                .secondaryShardingColumns(Map.of("orders", "order_id")).build());
+        config.getApiContract().setTables(Map.of("orders", TestContracts.apiTable("orders", "/api/v1/orders", "code", "orderId")));
+        config.setFieldPolicies(CodegenConfigBO.FieldPoliciesBO.builder().create(List.of("code", "order_id"))
+                .update(List.of("code")).result(List.of("code")).filter(List.of("code")).sort(List.of("id")).build());
+        CodegenSchemaBO schema = new DdlSchemaService(new PostgreDdlAdapter()).read(config);
+        config.getFieldPolicies().setUpdate(List.of("code", "order_id"));
+        assertTrue(scope.validate(config, schema).stream().anyMatch(value -> "SHARDING_KEY".equals(value.getCode())));
+        config.getFieldPolicies().setUpdate(List.of("code"));
+        Map<String, String> sources = render(config, schema);
+        assertTrue(sources.get("po").contains("value = \"order_id\", insertStrategy = FieldStrategy.NOT_NULL, updateStrategy = FieldStrategy.NEVER"));
+        assertTrue(sources.get("mapper-xml").contains("order_id = #{et.orderId}"));
+        exerciseManage(sources, config, output.resolve("generated"));
+    }
+
     private void exerciseManage(Map<String, String> sources, CodegenConfigBO config, Path output) throws Exception {
         Path sourceRoot = output.resolve("src");
         Files.createDirectories(sourceRoot);
@@ -239,11 +261,14 @@ class BackendCrudTemplateTest {
             Class<?> domainType = loader.loadClass("com.example.order.domain.order.vos.OrdersBO");
             assertEquals(1, validator.forExecutables().validateParameters(implementation,
                     implementationType.getMethod("createOrders", domainType), new Object[]{null}).size());
-            if (sources.containsKey("controller")) {
+            if (sources.containsKey("controller") && !sources.get("domain-impl").contains("repository.updateRouted(po)")) {
                 exerciseReplicaSafeWrites(loader, implementationType, domainType);
             }
             if (sources.get("domain-impl").contains("CREATE_RESULT_VALUE_REQUIRED: code")) {
                 exerciseDefaultGuard(loader, implementationType, domainType);
+            }
+            if (sources.get("domain-impl").contains("repository.updateRouted(po)")) {
+                exerciseSecondaryRouting(loader, implementationType, domainType, sources.get("mapper-xml"));
             }
             Object command = updateCommand.getConstructor().newInstance();
             updateCommand.getMethod("setId", Long.class).invoke(command, 5L);
@@ -412,6 +437,126 @@ class BackendCrudTemplateTest {
                 () -> implementationType.getMethod("createOrders", domainType).invoke(service, domainType.getConstructor().newInstance()));
         assertEquals("CREATE_RESULT_VALUE_REQUIRED: code", failure.getCause().getMessage());
         assertFalse(wrote.get());
+    }
+
+    private static void exerciseSecondaryRouting(ClassLoader loader, Class<?> implementationType, Class<?> domainType,
+                                                 String mapperXml) throws Exception {
+        Class<?> repositoryType = loader.loadClass("com.example.order.infrastructure.order.repo.OrdersRepository");
+        Class<?> poType = loader.loadClass("com.example.order.infrastructure.order.po.OrdersPO");
+        Object current = poType.getConstructor().newInstance();
+        poType.getMethod("setId", Long.class).invoke(current, 5L);
+        poType.getMethod("setOrderId", Long.class).invoke(current, 42L);
+        poType.getMethod("setVersion", Long.class).invoke(current, 7L);
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        Object repository = org.mockito.Mockito.mock(repositoryType, call -> {
+            if (call.getMethod().getName().equals("getById")) return current;
+            if (call.getMethod().getName().equals("updateRouted")) {
+                Object entity = call.getArgument(0);
+                assertEquals(42L, poType.getMethod("getOrderId").invoke(entity));
+                assertEquals(7L, poType.getMethod("getVersion").invoke(entity));
+                poType.getMethod("setVersion", Long.class).invoke(entity, 8L);
+                writes.incrementAndGet();
+                return true;
+            }
+            if (call.getMethod().getName().equals("removeById")) {
+                Object entity = call.getArgument(0);
+                assertEquals(42L, poType.getMethod("getOrderId").invoke(entity));
+                assertEquals(8L, poType.getMethod("getVersion").invoke(entity));
+                writes.incrementAndGet();
+                return true;
+            }
+            return org.mockito.Answers.RETURNS_DEFAULTS.answer(call);
+        });
+        Object converter = loader.loadClass("com.example.order.infrastructure.order.converter.OrdersPersistenceConverterImpl")
+                .getConstructor().newInstance();
+        Object service = implementationType.getDeclaredConstructors()[0].newInstance(repository, converter);
+        Object update = domainType.getConstructor().newInstance();
+        domainType.getMethod("setId", Long.class).invoke(update, 5L);
+        domainType.getMethod("setVersion", Long.class).invoke(update, 7L);
+        domainType.getMethod("setCode", String.class).invoke(update, "updated");
+        implementationType.getMethod("changeOrders", domainType).invoke(service, update);
+        implementationType.getMethod("removeOrders", Long.class, Long.class).invoke(service, 5L, 8L);
+        assertEquals(2, writes.get());
+        assertTrue(org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> implementationType.getMethod("removeOrders", Long.class, Long.class).invoke(service, 5L, 7L))
+                .getCause() instanceof IllegalStateException);
+        assertEquals(2, writes.get());
+        verifyGeneratedSqlGuard(loader, poType, mapperXml);
+    }
+
+    private static void verifyGeneratedSqlGuard(ClassLoader loader, Class<?> poType, String mapperXml) throws Exception {
+        var previousLoader = Thread.currentThread().getContextClassLoader();
+        var previousMdc = org.slf4j.MDC.getCopyOfContextMap();
+        top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider.initialize("tenantId");
+        org.slf4j.MDC.put("tenantId", "41");
+        try (var validationFactory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            Thread.currentThread().setContextClassLoader(loader);
+            var configuration = new com.baomidou.mybatisplus.core.MybatisConfiguration();
+            var source = org.mockito.Mockito.mock(javax.sql.DataSource.class);
+            configuration.setEnvironment(new org.apache.ibatis.mapping.Environment("test",
+                    new org.mybatis.spring.transaction.SpringManagedTransactionFactory(), source));
+            new org.apache.ibatis.builder.xml.XMLMapperBuilder(
+                    new java.io.ByteArrayInputStream(mapperXml.getBytes(StandardCharsets.UTF_8)), configuration,
+                    "generated-orders.xml", configuration.getSqlFragments()).parse();
+            var properties = new top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties();
+            var tenant = new com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor(
+                    new top.egon.cola.component.common.mybatis.business.EgonColaTenantIdTenantLineHandler(properties));
+            var sqlGuard = new top.egon.cola.component.common.mybatis.interceptor.EgonColaTenantIdGuardInnerInterceptor(
+                    () -> "actor", properties);
+            var profileProps = new java.util.Properties();
+            profileProps.setProperty("logical-table", "orders");
+            profileProps.setProperty("tenant-slot-count", "1");
+            profileProps.setProperty("secondary-bucket-count", "2");
+            profileProps.setProperty("tenant-slot-map", "0=shard_0");
+            profileProps.setProperty("actual-data-nodes", "shard_0.public.orders_t0_b0,shard_0.public.orders_t0_b1");
+            profileProps.setProperty("secondary-column", "order_id");
+            profileProps.setProperty("root-key-name", "order_id");
+            profileProps.setProperty("secondary-seed", "0x9e3779b97f4a7c15");
+            profileProps.setProperty("algorithm-version", "mix64-v1");
+            profileProps.setProperty("max-read-fanout-tables", "2");
+            var profile = top.egon.cola.component.common.mybatis.sharding.resolver.EgonColaShardingWriteTargetResolver.profile(profileProps);
+            var strategy = org.mockito.Mockito.spy(new top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy(
+                    new top.egon.cola.component.common.core.validation.ValidationUtils(validationFactory.getValidator())));
+            var guard = new top.egon.cola.component.common.mybatis.interceptor.EgonColaLocalWriteGuardInnerInterceptor(
+                    query -> { throw new AssertionError("unexpected legacy routing"); }, sqlGuard, strategy, Map.of("orders", profile));
+            Object entity = poType.getConstructor().newInstance();
+            poType.getMethod("setId", Long.class).invoke(entity, 5L);
+            poType.getMethod("setOrderId", Long.class).invoke(entity, 42L);
+            poType.getMethod("setVersion", Long.class).invoke(entity, 8L);
+            poType.getMethod("setCode", String.class).invoke(entity, "changed");
+            poType.getMethod("setUpdateUserId", String.class).invoke(entity, "actor");
+            poType.getMethod("setUpdateTime", java.time.Instant.class).invoke(entity, java.time.Instant.parse("2026-01-01T00:00:00Z"));
+            for (String method : List.of("updateRouted", "deleteVersionedById")) {
+                var statement = configuration.getMappedStatement("com.example.order.infrastructure.order.dao.OrdersDAO." + method);
+                var params = new java.util.HashMap<String, Object>();
+                params.put("et", entity);
+                params.put("MP_OPTLOCK_VERSION_ORIGINAL", 7L);
+                var handler = configuration.newStatementHandler(org.mockito.Mockito.mock(org.apache.ibatis.executor.Executor.class),
+                        statement, params, org.apache.ibatis.session.RowBounds.DEFAULT, null, statement.getBoundSql(params));
+                var connection = org.mockito.Mockito.mock(java.sql.Connection.class);
+                sqlGuard.beforePrepare(handler, connection, null);
+                tenant.beforePrepare(handler, connection, null);
+                guard.beforePrepare(handler, connection, null);
+            }
+            var captured = org.mockito.ArgumentCaptor.forClass(top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery.class);
+            org.mockito.Mockito.verify(strategy, org.mockito.Mockito.times(2)).route(org.mockito.Mockito.eq(profile), captured.capture());
+            assertEquals(List.of(List.of(42L), List.of(42L)), captured.getAllValues().stream().map(query -> query.secondaryValues()).toList());
+            poType.getMethod("setOrderId", Long.class).invoke(entity, (Object) null);
+            var statement = configuration.getMappedStatement("com.example.order.infrastructure.order.dao.OrdersDAO.updateRouted");
+            var params = new java.util.HashMap<String, Object>();
+            params.put("et", entity);
+            params.put("MP_OPTLOCK_VERSION_ORIGINAL", 7L);
+            var handler = configuration.newStatementHandler(org.mockito.Mockito.mock(org.apache.ibatis.executor.Executor.class),
+                    statement, params, org.apache.ibatis.session.RowBounds.DEFAULT, null, statement.getBoundSql(params));
+            var connection = org.mockito.Mockito.mock(java.sql.Connection.class);
+            sqlGuard.beforePrepare(handler, connection, null);
+            tenant.beforePrepare(handler, connection, null);
+            org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, () -> guard.beforePrepare(handler, connection, null));
+        } finally {
+            Thread.currentThread().setContextClassLoader(previousLoader);
+            org.slf4j.MDC.clear();
+            if (previousMdc != null) org.slf4j.MDC.setContextMap(previousMdc);
+        }
     }
 
     private static Object executor(ClassLoader loader, String name, Object... dependencies) throws Exception {

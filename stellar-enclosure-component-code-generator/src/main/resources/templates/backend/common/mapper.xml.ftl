@@ -34,8 +34,20 @@
             update_user_id = #{et.updateUserId},
             update_time = #{et.updateTime},
             version = version + 1
-        WHERE id = #{et.id} AND deleted_at IS NULL AND version = #{MP_OPTLOCK_VERSION_ORIGINAL}
+        WHERE id = #{et.id}[#if hasSecondaryRoot] AND [=secondaryRootColumn] = #{et.[=secondaryRootJavaName]}[/#if] AND deleted_at IS NULL AND version = #{MP_OPTLOCK_VERSION_ORIGINAL}
     </update>
+[#if hasSecondaryRoot]
+    <update id="updateRouted">
+        UPDATE [=tableName]
+        SET
+[#list routedUpdateFields as field]
+            <if test="et.[=field.javaName] != null">[=field.column] = #{et.[=field.javaName]},</if>
+[/#list]
+            update_user_id = #{et.updateUserId}, update_time = #{et.updateTime}, version = version + 1
+        WHERE id = #{et.id} AND [=secondaryRootColumn] = #{et.[=secondaryRootJavaName]}
+            AND deleted_at IS NULL AND version = #{MP_OPTLOCK_VERSION_ORIGINAL}
+    </update>
+[/#if]
 [#if includeQuery!false]
     <select id="selectByQuery" resultMap="[=poType]ResultMap">
         SELECT <include refid="columns"/> FROM [=tableName]

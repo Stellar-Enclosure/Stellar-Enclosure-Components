@@ -19,6 +19,11 @@ import org.springframework.stereotype.Repository;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
 import top.egon.cola.component.common.mybatis.extension.EgonColaRepository;
+[#if hasSecondaryRoot]
+import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
+import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationGroups;
+import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationUtils;
+[/#if]
 
 @Slf4j
 @Validated
@@ -33,6 +38,17 @@ public class [=repoType] extends EgonColaRepository<[=daoType], [=poType]> {
     @Getter(AccessLevel.PROTECTED)
     @Qualifier("[=propertiesBean]")
     private final EgonColaMybatisPlusProperties properties;
+[#if hasSecondaryRoot]
+
+    public boolean updateRouted([=poType] entity) {
+        EgonColaTenantIdProvider.currentTenantId();
+        EgonColaModelValidationUtils.validateBusiness(entity, EgonColaModelValidationGroups.Operation.UPDATE);
+        if (entity.get[=secondaryRootJavaName?cap_first]() == null || entity.get[=secondaryRootJavaName?cap_first]() <= 0) {
+            throw new IllegalArgumentException("SHARDING_KEY");
+        }
+        return getBaseMapper().updateRouted(entity) == 1;
+    }
+[/#if]
 [#if includeQuery!false]
 
     public List<[=poType]> selectByQuery(@Valid @NotNull [=domainQueryType] query,

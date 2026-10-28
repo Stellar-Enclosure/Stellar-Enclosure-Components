@@ -166,6 +166,9 @@ public class CodegenConfigBO {
         private Map<String, List<String>> logicalPhysicalMappings = new LinkedHashMap<>();
 
         @Builder.Default
+        private Map<String, String> secondaryShardingColumns = new LinkedHashMap<>();
+
+        @Builder.Default
         private List<String> schemaSnapshotFiles = new ArrayList<>();
 
         private String snapshotManifestFingerprint;
@@ -177,6 +180,7 @@ public class CodegenConfigBO {
                     .schemaFiles(copyList(schemaFiles))
                     .manifest(manifest)
                     .logicalPhysicalMappings(copyMappings(logicalPhysicalMappings))
+                    .secondaryShardingColumns(copyMap(secondaryShardingColumns))
                     .schemaSnapshotFiles(copyList(schemaSnapshotFiles))
                     .snapshotManifestFingerprint(snapshotManifestFingerprint)
                     .build();

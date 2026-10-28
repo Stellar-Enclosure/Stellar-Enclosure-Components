@@ -64,6 +64,7 @@ public class GenerationScopeValidator {
         for (CodegenSchemaBO.TableBO table : schema.getTables()) {
             diagnostics.addAll(validateTable(config, table));
             diagnostics.addAll(validatePolicies(config, table));
+            diagnostics.addAll(validateSecondaryRoot(config, table));
             diagnostics.addAll(validateApiFields(config, table));
             diagnostics.addAll(validateEvents(config, table));
         }
@@ -145,6 +146,10 @@ public class GenerationScopeValidator {
         model.put("poFqn", poFqn);
         model.put("daoFqn", daoFqn);
         model.put("tableName", table.getLogicalName());
+        String secondaryRoot = secondaryRoot(config, table);
+        model.put("hasSecondaryRoot", secondaryRoot != null && !"id".equals(secondaryRoot));
+        model.put("secondaryRootColumn", secondaryRoot == null ? "" : secondaryRoot);
+        model.put("secondaryRootJavaName", secondaryRoot == null ? "" : javaName(secondaryRoot));
         model.put("businessFields", businessFields(table));
         model.put("xmlColumns", xmlColumns(table));
         String stem = typeName(table.getLogicalName(), "");
@@ -218,6 +223,9 @@ public class GenerationScopeValidator {
         model.put("domainFields", policyFields(table, unionPolicies(policies)));
         model.put("createFields", wirePolicyFields(config, table, list(policies, "create")));
         model.put("updateFields", wirePolicyFields(config, table, list(policies, "update")));
+        model.put("routedUpdateFields", policies == null
+                ? businessFields(table).stream().filter(field -> !java.util.Objects.equals(field.get("column"), secondaryRoot)).toList()
+                : wirePolicyFields(config, table, list(policies, "update")));
         model.put("createColumns", list(policies, "create"));
         model.put("updateColumns", list(policies, "update"));
         model.put("resultFields", wirePolicyFields(config, table, list(policies, "result")));
@@ -333,6 +341,29 @@ public class GenerationScopeValidator {
             }
         }
         return diagnostics;
+    }
+
+    private static String secondaryRoot(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        return config.getInput() == null || config.getInput().getSecondaryShardingColumns() == null
+                ? null : config.getInput().getSecondaryShardingColumns().get(table.getLogicalName());
+    }
+
+    private static List<CodegenPlanBO.DiagnosticBO> validateSecondaryRoot(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {
+        String root = secondaryRoot(config, table);
+        if (root == null || "id".equals(root)) return List.of();
+        CodegenSchemaBO.ColumnBO value = column(table, root);
+        if (BASE_COLUMNS.contains(root) || value == null || !"Long".equals(javaType(value))
+                || !Boolean.FALSE.equals(value.getNullable())) {
+            return List.of(diagnostic("SHARDING_KEY", "/input/secondaryShardingColumns/" + table.getLogicalName(),
+                    "secondary routing column must be a non-null BIGINT business field"));
+        }
+        var policies = CodegenConfigValidator.policies(config, table.getLogicalName());
+        if ((policies != null && list(policies, "update").contains(root))
+                || (config.getArtifacts().contains("domain-impl")
+                    && (policies == null || !list(policies, "create").contains(root)))) {
+            return List.of(diagnostic("SHARDING_KEY", "/fieldPolicies", "create must supply the secondary routing column and update must not change it"));
+        }
+        return List.of();
     }
 
     private static List<CodegenPlanBO.DiagnosticBO> validateApiFields(CodegenConfigBO config, CodegenSchemaBO.TableBO table) {

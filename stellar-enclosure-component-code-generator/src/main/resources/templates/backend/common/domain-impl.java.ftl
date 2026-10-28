@@ -63,7 +63,10 @@ public class [=domainImplType] implements [=domainServiceType] {
         po.setCreateUserId(current.getCreateUserId());
         po.setCreateTime(current.getCreateTime());
         po.setVersion(value.getVersion());
-        if (!repository.updateById(po)) {
+[#if hasSecondaryRoot]
+        po.set[=secondaryRootJavaName?cap_first](current.get[=secondaryRootJavaName?cap_first]());
+[/#if]
+        if (!repository.[#if hasSecondaryRoot]updateRouted[#else]updateById[/#if](po)) {
             throw [=errorMapper].zeroRows("update", po.getId(), po.getVersion());
         }
         log.info("updated {} id={} version={}", "[=tableName]", po.getId(), po.getVersion());
@@ -79,9 +82,20 @@ public class [=domainImplType] implements [=domainServiceType] {
     @Override
     @Transactional
     public void [=deleteMethod](Long id, Long expectedVersion) {
+[#if hasSecondaryRoot]
+        [=poType] po = repository.getById(id);
+        if (po == null) {
+            throw [=errorMapper].missing(id);
+        }
+        if (!Objects.equals(po.getVersion(), expectedVersion)) {
+            throw [=errorMapper].zeroRows("delete", id, expectedVersion);
+        }
+[/#if]
+[#if !hasSecondaryRoot]
         [=poType] po = new [=poType]();
         po.setId(id);
         po.setVersion(expectedVersion);
+[/#if]
         if (!repository.removeById(po)) {
             throw [=errorMapper].zeroRows("delete", id, expectedVersion);
         }

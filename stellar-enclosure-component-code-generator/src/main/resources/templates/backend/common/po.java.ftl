@@ -4,6 +4,9 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import jakarta.validation.constraints.NotNull;
+[#if hasSecondaryRoot]
+import jakarta.validation.constraints.Positive;
+[/#if]
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
@@ -30,10 +33,13 @@ public class [=poType] extends EgonModel<[=poType]> {
 [#if field.length?has_content && field.javaType == "String"]
     @Size(max = [=field.length], groups = {EgonColaModelValidationGroups.Insert.class, EgonColaModelValidationGroups.Update.class, EgonColaModelValidationGroups.Query.class, EgonColaModelValidationGroups.Persisted.class})
 [/#if]
+[#if hasSecondaryRoot && field.column == secondaryRootColumn]
+    @Positive(groups = {EgonColaModelValidationGroups.Insert.class, EgonColaModelValidationGroups.Update.class, EgonColaModelValidationGroups.Query.class, EgonColaModelValidationGroups.Persisted.class})
+[/#if]
 [#if field.enumPattern?has_content && field.javaType == "String"]
     @Pattern(regexp = "[=field.enumPattern]", groups = {EgonColaModelValidationGroups.Insert.class, EgonColaModelValidationGroups.Update.class, EgonColaModelValidationGroups.Query.class, EgonColaModelValidationGroups.Persisted.class})
 [/#if]
-    @TableField(value = "[=field.column]", insertStrategy = FieldStrategy.NOT_NULL, updateStrategy = FieldStrategy.NOT_NULL)
+    @TableField(value = "[=field.column]", insertStrategy = FieldStrategy.NOT_NULL, updateStrategy = FieldStrategy.[#if hasSecondaryRoot && field.column == secondaryRootColumn]NEVER[#else]NOT_NULL[/#if])
     private [=field.javaType] [=field.javaName];
 [/#list]
 }

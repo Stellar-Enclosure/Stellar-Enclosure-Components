@@ -304,6 +304,15 @@ public class CodegenConfigValidator {
         }
         List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
         Map<String, List<String>> mappings = input.getLogicalPhysicalMappings();
+        Map<String, String> secondaryColumns = input.getSecondaryShardingColumns();
+        if (secondaryColumns != null) {
+            for (var entry : secondaryColumns.entrySet()) {
+                if (blank(entry.getKey()) || config.getTables() == null || !config.getTables().contains(entry.getKey())
+                        || blank(entry.getValue()) || !entry.getValue().matches("[a-z_][a-z0-9_]*")) {
+                    diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/secondaryShardingColumns", "secondary routing columns require a selected table and a lowercase identifier"));
+                }
+            }
+        }
         Set<String> physicalNames = new LinkedHashSet<>();
         if (mappings != null) {
             for (Map.Entry<String, List<String>> mapping : mappings.entrySet()) {
@@ -336,7 +345,8 @@ public class CodegenConfigValidator {
             if (!artifacts.equals(Set.of("event")) || (config.getTables() != null && !config.getTables().isEmpty())
                     || (input.getSchemaFiles() != null && !input.getSchemaFiles().isEmpty())
                     || !blank(input.getResourceRoot()) || !blank(input.getManifest()) || invalidEvent
-                    || (mappings != null && !mappings.isEmpty()) || hasSnapshot || hasSnapshotFingerprint) {
+                    || (mappings != null && !mappings.isEmpty()) || (secondaryColumns != null && !secondaryColumns.isEmpty())
+                    || hasSnapshot || hasSnapshotFingerprint) {
                 diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input", "event mode requires only table-independent delegate events and no DDL input"));
             }
             return diagnostics;
