@@ -221,6 +221,14 @@ public class GenerationScopeValidator {
         model.put("createColumns", list(policies, "create"));
         model.put("updateColumns", list(policies, "update"));
         model.put("resultFields", wirePolicyFields(config, table, list(policies, "result")));
+        List<String> resultDefaultColumns = config.getArtifacts().contains("domain-impl")
+                ? list(policies, "result").stream()
+                        .filter(name -> name != null && !BASE_COLUMNS.contains(name))
+                        .filter(name -> column(table, name) != null && column(table, name).getDefaultExpression() != null)
+                        .toList()
+                : List.of();
+        model.put("resultDefaultColumns", resultDefaultColumns);
+        model.put("resultDefaultFields", policyFields(table, resultDefaultColumns));
         model.put("filterFields", wirePolicyFields(config, table, list(policies, "filter")));
         model.put("sortFields", policyFields(table, list(policies, "sort")));
         List<String> sortColumns = new ArrayList<>(list(policies, "sort"));
@@ -310,6 +318,17 @@ public class GenerationScopeValidator {
                         || ("update".equals(kind) && "expectedVersion".equals(javaName))) {
                     diagnostics.add(diagnostic("CONFIG_REQUIRED", "/fieldPolicies/" + kind,
                             "field collides with generated request property: " + javaName));
+                }
+            }
+        }
+        if (config.getArtifacts().contains("domain-impl")) {
+            for (String name : list(policies, "result")) {
+                if (name == null) continue;
+                CodegenSchemaBO.ColumnBO result = column(table, name);
+                if (!BASE_COLUMNS.contains(name) && result != null && result.getDefaultExpression() != null
+                        && !list(policies, "create").contains(name)) {
+                    diagnostics.add(diagnostic("CREATE_RESULT_DEFAULT_REQUIRES_INPUT", "/fieldPolicies/create",
+                            "returned field with a database default must be supplied on create: " + name));
                 }
             }
         }

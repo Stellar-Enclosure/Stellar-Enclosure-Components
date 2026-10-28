@@ -17,6 +17,7 @@ import top.egon.cola.component.common.core.pojo.PageSlice;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Service("[=domainServiceBean]")
 @Validated
@@ -34,15 +35,16 @@ public class [=domainImplType] implements [=domainServiceType] {
     @Transactional
     public [=domainType] [=createMethod]([=domainType] value) {
         [=poType] po = converter.toSource(value);
+[#list resultDefaultFields as field]
+        if (po.get[=field.javaName?cap_first]() == null) {
+            throw new IllegalArgumentException("CREATE_RESULT_VALUE_REQUIRED: [=field.column]");
+        }
+[/#list]
         if (!repository.save(po)) {
             throw [=errorMapper].zeroRows("create", po.getId(), po.getVersion());
         }
         log.info("created {} id={}", "[=tableName]", po.getId());
-        [=poType] saved = repository.getById(po.getId());
-        if (saved == null) {
-            throw [=errorMapper].missing(po.getId());
-        }
-        return converter.toTarget(saved);
+        return converter.toTarget(po);
     }
 
     @Override
@@ -51,6 +53,9 @@ public class [=domainImplType] implements [=domainServiceType] {
         [=poType] current = repository.getById(value.getId());
         if (current == null) {
             throw [=errorMapper].missing(value.getId());
+        }
+        if (!Objects.equals(current.getVersion(), value.getVersion())) {
+            throw [=errorMapper].zeroRows("update", value.getId(), value.getVersion());
         }
         [=poType] po = converter.toSource(value);
         po.setId(current.getId());
@@ -62,11 +67,13 @@ public class [=domainImplType] implements [=domainServiceType] {
             throw [=errorMapper].zeroRows("update", po.getId(), po.getVersion());
         }
         log.info("updated {} id={} version={}", "[=tableName]", po.getId(), po.getVersion());
-        [=poType] saved = repository.getById(po.getId());
-        if (saved == null) {
-            throw [=errorMapper].missing(po.getId());
+[#list businessFields as field]
+        if (po.get[=field.javaName?cap_first]() != null) {
+            current.set[=field.javaName?cap_first](po.get[=field.javaName?cap_first]());
         }
-        return converter.toTarget(saved);
+[/#list]
+        current.setVersion(po.getVersion());
+        return converter.toTarget(current);
     }
 
     @Override

@@ -148,11 +148,13 @@ public final class FrontendGenerationService {
         }
         List<Map<String, Object>> create = (List<Map<String, Object>>) model.get("createFields");
         List<Map<String, Object>> update = (List<Map<String, Object>>) model.get("updateFields");
+        List<String> resultDefaults = (List<String>) model.get("resultDefaultColumns");
         for (Map<String, Object> field : enriched.values()) {
             boolean inCreate = create.contains(field), inUpdate = update.contains(field);
             field.put("createPresent", inCreate);
             field.put("updatePresent", inUpdate);
-            field.put("requiredCreate", inCreate && "false".equals(field.get("nullable")));
+            field.put("requiredCreate", inCreate
+                    && ("false".equals(field.get("nullable")) || resultDefaults.contains(field.get("column"))));
         }
         model.put("formFields", enriched.values().stream().filter(value -> create.contains(value) || update.contains(value)).toList());
         model.put("hasDecimal", enriched.values().stream().anyMatch(value -> "decimal".equals(value.get("control"))));

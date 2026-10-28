@@ -26,6 +26,24 @@ class FrontendGenerationTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void returnedDatabaseDefaultIsRequiredInTheCreateForm(@TempDir Path temp) throws Exception {
+        Path backend = temp.resolve("backend"); Path frontend = temp.resolve("frontend");
+        Files.createDirectories(backend); scaffold(frontend);
+        Path schema = temp.resolve("schema.sql");
+        Files.writeString(schema, Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64) DEFAULT 'generated'"));
+        CodegenConfigBO config = config(backend, frontend);
+        config.getInput().setSchemaFiles(List.of(schema.toString()));
+        Path configFile = temp.resolve("codegen.json"); MAPPER.writeValue(configFile.toFile(), config);
+        CommandResult plan = run("plan", "--config", configFile.toString(), "--target", "frontend");
+        assertEquals(0, plan.code(), plan.error());
+        assertEquals(0, run("apply", "--config", configFile.toString(), "--target", "frontend", "--plan",
+                MAPPER.readTree(plan.output()).path("planId").asText()).code());
+        assertTrue(Files.readString(frontend.resolve("src/features/orders/OrdersForm.tsx"))
+                .contains("required: mode === 'create' && true"));
+    }
+
+    @Test
     void plansAndAppliesReactFeatureWithoutOverwritingEdits(@TempDir Path temp) throws Exception {
         Path backend = temp.resolve("backend");
         Path frontend = temp.resolve("frontend");

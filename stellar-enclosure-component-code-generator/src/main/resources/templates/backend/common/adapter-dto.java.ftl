@@ -41,7 +41,7 @@ public class [=createDtoType] implements BasePojo {
 [#if field.length?has_content]
     @Size(max = [=field.length])
 [/#if]
-[#if field.nullable == "false"]
+[#if field.nullable == "false" || resultDefaultColumns?seq_contains(field.column)]
     @NotNull
 [/#if]
     private [=field.javaType] [=field.javaName];

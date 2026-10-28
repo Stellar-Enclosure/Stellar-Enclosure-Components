@@ -222,7 +222,7 @@ class CodegenAcceptanceTest {
                     public boolean updateById(OrdersPO patch) {
                         if (patch.getCode() != null) stored.setCode(patch.getCode());
                         if (patch.getLabel() != null) stored.setLabel(patch.getLabel());
-                        stored.setVersion(4L); return true;
+                        stored.setVersion(4L); patch.setVersion(4L); return true;
                     }
                     public boolean save(OrdersPO value) { return true; }
                     public boolean removeById(OrdersPO value) { return true; }

@@ -231,7 +231,7 @@ Supply the OAuth scope without the `SCOPE_` prefix. Each operation declares `@Pr
 
 The legacy `contextSymbol` remains accepted for compatibility but does not establish a security context. Existing native HTTP filters must provide trusted identity/tenant context, and event consumers must establish their own trusted context. Generated permission resources allow USER principals by default; SERVICE/client-credentials cases require target-specific extension and verification. Generated repositories do not enable caching; add cache read/write and consistency policy through existing components when the business requires it.
 
-Result/VO always include a string `id` and `version`. A request-body update ID is optional but must match the path when present. A null update field means omitted, not an explicit SQL NULL. Create and update reread the persisted record to return database defaults, unchanged fields and the actual version; the existing transaction and error contracts still apply.
+Result/VO always include a string `id` and `version`. A request-body update ID is optional but must match the path when present. A null update field means omitted, not an explicit SQL NULL. Create returns the inserted object without rereading an uncommitted row from a replica. A result field with a database default must be included in the create policy and supplied explicitly; otherwise generation is rejected or the create is rejected before writing. Update merges non-null fields into a replica candidate only when its version matches the caller's expected version, then uses the versioned primary write. Returned values assume no database trigger changes the selected business fields; review such tables separately.
 
 ## Inbound events
 

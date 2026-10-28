@@ -2,6 +2,7 @@ package [=poPackage];
 
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -32,7 +33,7 @@ public class [=poType] extends EgonModel<[=poType]> {
 [#if field.enumPattern?has_content && field.javaType == "String"]
     @Pattern(regexp = "[=field.enumPattern]", groups = {EgonColaModelValidationGroups.Insert.class, EgonColaModelValidationGroups.Update.class, EgonColaModelValidationGroups.Query.class, EgonColaModelValidationGroups.Persisted.class})
 [/#if]
-    @TableField("[=field.column]")
+    @TableField(value = "[=field.column]", insertStrategy = FieldStrategy.NOT_NULL, updateStrategy = FieldStrategy.NOT_NULL)
     private [=field.javaType] [=field.javaName];
 [/#list]
 }

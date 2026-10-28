@@ -108,6 +108,27 @@ class BackendCrudTemplateTest {
         }
     }
 
+    @Test
+    void databaseDefaultReturnedByCreateRequiresExplicitInput(@TempDir Path output) throws Exception {
+        String ddl = Files.readString(Path.of("src/test/resources/ddl/schema.sql"))
+                .replace("code VARCHAR(64)", "code VARCHAR(64) DEFAULT 'generated'");
+        Path schemaFile = output.resolve("schema.sql");
+        Files.writeString(schemaFile, ddl);
+        CodegenSchemaBO schema = new DdlSchemaService(new PostgreDdlAdapter()).read(CodegenConfigBO.builder()
+                .input(CodegenConfigBO.InputBO.builder().mode("schema").schemaFiles(List.of(schemaFile.toString())).build())
+                .build());
+        CodegenConfigBO config = config(CodegenProfileEnum.LIGHT, withController(false));
+        config.setFieldPolicies(CodegenConfigBO.FieldPoliciesBO.builder().create(List.of()).update(List.of("code"))
+                .result(List.of("code")).filter(List.of("code")).sort(List.of("id")).build());
+        assertTrue(scope.validate(config, schema).stream()
+                .anyMatch(value -> "CREATE_RESULT_DEFAULT_REQUIRES_INPUT".equals(value.getCode())));
+        config.getFieldPolicies().setCreate(List.of("code"));
+        Map<String, String> sources = render(config, schema);
+        assertTrue(sources.get("create-command").contains("@NotNull\n    private String code;"));
+        assertTrue(sources.get("domain-impl").contains("CREATE_RESULT_VALUE_REQUIRED: code"));
+        exerciseManage(sources, config, output.resolve("default"));
+    }
+
     private void exerciseManage(Map<String, String> sources, CodegenConfigBO config, Path output) throws Exception {
         Path sourceRoot = output.resolve("src");
         Files.createDirectories(sourceRoot);
@@ -218,6 +239,12 @@ class BackendCrudTemplateTest {
             Class<?> domainType = loader.loadClass("com.example.order.domain.order.vos.OrdersBO");
             assertEquals(1, validator.forExecutables().validateParameters(implementation,
                     implementationType.getMethod("createOrders", domainType), new Object[]{null}).size());
+            if (sources.containsKey("controller")) {
+                exerciseReplicaSafeWrites(loader, implementationType, domainType);
+            }
+            if (sources.get("domain-impl").contains("CREATE_RESULT_VALUE_REQUIRED: code")) {
+                exerciseDefaultGuard(loader, implementationType, domainType);
+            }
             Object command = updateCommand.getConstructor().newInstance();
             updateCommand.getMethod("setId", Long.class).invoke(command, 5L);
             updateCommand.getMethod("setExpectedVersion", Long.class).invoke(command, 7L);
@@ -309,6 +336,82 @@ class BackendCrudTemplateTest {
                         () -> page.invoke(controller, pageRequest, 2, null, 4, null)).getCause() instanceof IllegalArgumentException);
             }
         }
+    }
+
+    private static void exerciseReplicaSafeWrites(ClassLoader loader, Class<?> implementationType, Class<?> domainType) throws Exception {
+        Class<?> repositoryType = loader.loadClass("com.example.order.infrastructure.order.repo.OrdersRepository");
+        Class<?> poType = loader.loadClass("com.example.order.infrastructure.order.po.OrdersPO");
+        Object converter = loader.loadClass("com.example.order.infrastructure.order.converter.OrdersPersistenceConverterImpl")
+                .getConstructor().newInstance();
+        var snapshot = new java.util.concurrent.atomic.AtomicReference<Object>();
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        var updates = new java.util.concurrent.atomic.AtomicInteger();
+        Object repository = org.mockito.Mockito.mock(repositoryType, call -> {
+            if (call.getMethod().getName().equals("save")) {
+                Object po = call.getArgument(0);
+                poType.getMethod("setId", Long.class).invoke(po, 5L);
+                poType.getMethod("setVersion", Long.class).invoke(po, 0L);
+                return true;
+            }
+            if (call.getMethod().getName().equals("getById")) {
+                reads.incrementAndGet();
+                return snapshot.get();
+            }
+            if (call.getMethod().getName().equals("updateById")) {
+                updates.incrementAndGet();
+                Object po = call.getArgument(0);
+                Long version = (Long) poType.getMethod("getVersion").invoke(po);
+                poType.getMethod("setVersion", Long.class).invoke(po, version + 1);
+                return true;
+            }
+            return org.mockito.Answers.RETURNS_DEFAULTS.answer(call);
+        });
+        Object service = implementationType.getDeclaredConstructors()[0].newInstance(repository, converter);
+        Object create = domainType.getConstructor().newInstance();
+        domainType.getMethod("setCode", String.class).invoke(create, "created");
+        Object created = implementationType.getMethod("createOrders", domainType).invoke(service, create);
+        assertEquals(0, reads.get(), "create must not reread an uncommitted row from a replica");
+        assertEquals(5L, domainType.getMethod("getId").invoke(created));
+        assertEquals(0L, domainType.getMethod("getVersion").invoke(created));
+        assertEquals("created", domainType.getMethod("getCode").invoke(created));
+
+        Object current = poType.getConstructor().newInstance();
+        poType.getMethod("setId", Long.class).invoke(current, 5L);
+        poType.getMethod("setVersion", Long.class).invoke(current, 3L);
+        poType.getMethod("setCode", String.class).invoke(current, "unchanged");
+        snapshot.set(current);
+        Object update = domainType.getConstructor().newInstance();
+        domainType.getMethod("setId", Long.class).invoke(update, 5L);
+        domainType.getMethod("setVersion", Long.class).invoke(update, 3L);
+        Object updated = implementationType.getMethod("changeOrders", domainType).invoke(service, update);
+        assertEquals(1, reads.get(), "update must use only the observed candidate");
+        assertEquals(4L, domainType.getMethod("getVersion").invoke(updated));
+        assertEquals("unchanged", domainType.getMethod("getCode").invoke(updated));
+        assertEquals(1, updates.get());
+
+        Object stale = domainType.getConstructor().newInstance();
+        domainType.getMethod("setId", Long.class).invoke(stale, 5L);
+        domainType.getMethod("setVersion", Long.class).invoke(stale, 3L);
+        assertTrue(org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> implementationType.getMethod("changeOrders", domainType).invoke(service, stale))
+                .getCause() instanceof IllegalStateException);
+        assertEquals(1, updates.get(), "a stale replica snapshot must not be used for a write");
+    }
+
+    private static void exerciseDefaultGuard(ClassLoader loader, Class<?> implementationType, Class<?> domainType) throws Exception {
+        Class<?> repositoryType = loader.loadClass("com.example.order.infrastructure.order.repo.OrdersRepository");
+        var wrote = new java.util.concurrent.atomic.AtomicBoolean();
+        Object repository = org.mockito.Mockito.mock(repositoryType, call -> {
+            if (call.getMethod().getName().equals("save")) wrote.set(true);
+            return org.mockito.Answers.RETURNS_DEFAULTS.answer(call);
+        });
+        Object converter = loader.loadClass("com.example.order.infrastructure.order.converter.OrdersPersistenceConverterImpl")
+                .getConstructor().newInstance();
+        Object service = implementationType.getDeclaredConstructors()[0].newInstance(repository, converter);
+        var failure = org.junit.jupiter.api.Assertions.assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> implementationType.getMethod("createOrders", domainType).invoke(service, domainType.getConstructor().newInstance()));
+        assertEquals("CREATE_RESULT_VALUE_REQUIRED: code", failure.getCause().getMessage());
+        assertFalse(wrote.get());
     }
 
     private static Object executor(ClassLoader loader, String name, Object... dependencies) throws Exception {
