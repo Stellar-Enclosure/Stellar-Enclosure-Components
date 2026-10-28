@@ -25,6 +25,11 @@ public final class AgentFlowSchedulers {
         Objects.requireNonNull(delegate, "delegate");
         return new Scheduler() {
             @Override
+            public long now(TimeUnit unit) {
+                return delegate.now(unit);
+            }
+
+            @Override
             public Worker createWorker() {
                 Worker worker = delegate.createWorker();
                 return new Worker() {
@@ -43,6 +48,7 @@ public final class AgentFlowSchedulers {
 
                     @Override public void dispose() { worker.dispose(); }
                     @Override public boolean isDisposed() { return worker.isDisposed(); }
+                    @Override public long now(TimeUnit unit) { return worker.now(unit); }
                 };
             }
         };
