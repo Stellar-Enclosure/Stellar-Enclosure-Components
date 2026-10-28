@@ -62,7 +62,9 @@ The example intentionally contains no provider URL, API key, or vendor starter. 
 
 ## Configuration
 
-The only component prefix is `egon.cola.component.agent-flow`. Binding is strict: unknown keys, invalid types, invalid durations, missing model beans, duplicate nodes, cycles, multiple parents, unreachable nodes, and invalid roots fail application startup before a partial registry is published.
+The static flow configuration prefix is `egon.cola.component.agent-flow`. Binding is strict: unknown keys, invalid types, invalid durations, missing model beans, duplicate nodes, cycles, multiple parents, unreachable nodes, and invalid roots fail application startup before a partial registry is published.
+
+Hosts that own their definitions and execution lifecycle may enable `egon.cola.component.agent-flow.enabled` and set `egon.cola.component.agent-flow-registry.enabled=false` to obtain the compiler, validator and named model map without creating the static registry or `AgentFlowService`. Static `flows` must be empty in this mode; the host validates each definition and owns Runner, session, authorization and resource lifecycles. The registry remains enabled by default and still requires at least one valid static flow.
 
 ```yaml
 egon:

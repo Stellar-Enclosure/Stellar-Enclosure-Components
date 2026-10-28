@@ -14,6 +14,7 @@ import top.egon.cola.component.agentflow.config.AgentFlowConfigValidator;
 import top.egon.cola.component.agentflow.common.exception.AgentFlowException;
 import top.egon.cola.component.agentflow.execution.AgentFlowSessionExecutionGuard;
 import top.egon.cola.component.agentflow.runtime.AgentFlowRegistry;
+import top.egon.cola.component.agentflow.runtime.AgentFlowFactory;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -49,6 +50,30 @@ class AgentFlowAutoConfigurationTest {
                     .isInstanceOf(AgentFlowSessionExecutionGuard.class);
             assertThat(context).getBean("agentFlowService").isInstanceOf(AgentFlowService.class);
         });
+    }
+
+    @Test
+    void exposes_the_compiler_without_a_static_registry_when_explicitly_disabled() {
+        contextRunner.withPropertyValues("egon.cola.component.agent-flow.enabled=true",
+                "egon.cola.component.agent-flow-registry.enabled=false").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(AgentFlowFactory.class);
+            assertThat(context).hasSingleBean(AgentFlowConfigValidator.class);
+            assertThat(context).hasBean("agentFlowChatModels");
+            assertThat(context).doesNotHaveBean(AgentFlowRegistry.class);
+            assertThat(context).doesNotHaveBean(AgentFlowService.class);
+        });
+    }
+
+    @Test
+    void registry_still_requires_flows_and_disabled_registry_rejects_ignored_flows() {
+        contextRunner.withPropertyValues("egon.cola.component.agent-flow.enabled=true")
+                .run(context -> assertThat(context).hasFailed());
+        contextRunner.withPropertyValues(concat(validProperties(), "egon.cola.component.agent-flow-registry.enabled=false"))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining("static flows cannot be configured");
+                });
     }
 
     @Test

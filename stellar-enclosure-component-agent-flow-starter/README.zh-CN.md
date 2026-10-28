@@ -62,7 +62,9 @@ ChatModel researchChatModel(ChatModel hostProviderChatModel) {
 
 ## 配置
 
-组件唯一配置前缀是 `egon.cola.component.agent-flow`。Binder 使用严格模式：未知键、类型错误、非法 duration、缺失模型 Bean、重复节点、环、多个父节点、不可达节点和非法 root 都会在应用启动时失败，不发布部分 Registry。
+静态流程配置前缀是 `egon.cola.component.agent-flow`。Binder 使用严格模式：未知键、类型错误、非法 duration、缺失模型 Bean、重复节点、环、多个父节点、不可达节点和非法 root 都会在应用启动时失败，不发布部分 Registry。
+
+自行管理定义和执行生命周期的宿主可以启用 `egon.cola.component.agent-flow.enabled`，并设置 `egon.cola.component.agent-flow-registry.enabled=false`，只获取编译器、校验器和具名模型映射，不创建静态 Registry 或 `AgentFlowService`。该模式下静态 `flows` 必须为空；宿主负责逐个校验定义以及 Runner、Session、授权和资源生命周期。Registry 默认仍然启用，并要求至少一个有效的静态流程。
 
 ```yaml
 egon:

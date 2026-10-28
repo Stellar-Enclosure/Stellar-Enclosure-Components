@@ -5,6 +5,7 @@ import jakarta.validation.Validator;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -146,6 +147,8 @@ public class AgentFlowAutoConfiguration {
 
     @Bean(name = "agentFlowRegistry")
     @ConditionalOnMissingBean(name = "agentFlowRegistry")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow-registry", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public AgentFlowRegistry agentFlowRegistry(
             @Qualifier("agentFlowProperties") AgentFlowProperties properties,
             @Qualifier("agentFlowConfigValidator") AgentFlowConfigValidator configValidator,
@@ -163,6 +166,8 @@ public class AgentFlowAutoConfiguration {
 
     @Bean(name = "agentFlowService", destroyMethod = "close")
     @ConditionalOnMissingBean(name = "agentFlowService")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow-registry", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public DefaultAgentFlowService agentFlowService(
             @Qualifier("agentFlowRegistry") AgentFlowRegistry registry,
             @Qualifier("agentFlowSessionExecutionGuard") AgentFlowSessionExecutionGuard guard,
@@ -170,5 +175,15 @@ public class AgentFlowAutoConfiguration {
             @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
             @Qualifier("agentFlowClock") Clock clock) {
         return new DefaultAgentFlowService(registry, guard, properties, validationUtils, clock);
+    }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow-registry", name = "enabled", havingValue = "false")
+    public SmartInitializingSingleton agentFlowRegistryDisabledGuard(@Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+        return () -> {
+            if (!properties.flows().isEmpty()) {
+                throw new IllegalStateException("Agent Flow static flows cannot be configured while the registry is disabled");
+            }
+        };
     }
 }
