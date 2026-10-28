@@ -166,6 +166,8 @@ configuration -> validation -> ADK graph compilation -> registry -> session exec
 
 更新后的 starter 使用 `0.0.2-SNAPSHOT` 进行源码 reactor 开发；现有 Components BOM 仍选择 `0.0.1`。消费者需要在新版发布后显式选择该版本，或在同一源码 reactor 中构建。`AgentFlowFactory.compileRoot` 可以只编译已校验配置而不创建 Runner，并要求调用方明确提供 ADK 工具列表；工具授权和 Runner 生命周期由调用方负责。
 
+配置构建的并行 Agent 使用上下文感知调度器，使运行 Trace 与取消信号传到分支订阅。受信 Code-First 并行 Agent 必须使用 `AgentFlowSchedulers.contextAwareIo()` 或通过 `contextAware` 包装其调度器；独立配置的原生调度器不具有此保证。Provider 自己调度到其他线程的工作仍需自行传播上下文。
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

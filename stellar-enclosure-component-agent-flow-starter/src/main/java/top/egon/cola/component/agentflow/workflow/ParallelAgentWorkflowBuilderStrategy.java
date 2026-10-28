@@ -5,6 +5,7 @@ import com.google.adk.agents.ParallelAgent;
 import lombok.extern.slf4j.Slf4j;
 import top.egon.cola.component.agentflow.config.AgentWorkflowConfigDTO;
 import top.egon.cola.component.agentflow.config.AgentWorkflowTypeEnum;
+import top.egon.cola.component.agentflow.runtime.AgentFlowSchedulers;
 
 import java.util.List;
 
@@ -23,6 +24,7 @@ public class ParallelAgentWorkflowBuilderStrategy implements AgentWorkflowBuilde
                 .name(workflow.name())
                 .description(workflow.description())
                 .subAgents(children)
+                .scheduler(AgentFlowSchedulers.contextAwareIo())
                 .build();
     }
 }

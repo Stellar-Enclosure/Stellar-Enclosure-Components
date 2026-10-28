@@ -166,6 +166,8 @@ The compatibility line is Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google
 
 The updated starter is versioned `0.0.2-SNAPSHOT` for source-reactor development; the existing Components BOM still selects `0.0.1`. Consumers must explicitly select the newer artifact after it is published, or build it in the same source reactor. `AgentFlowFactory.compileRoot` can compile a validated configuration without allocating a runner and takes an explicit ADK tool list; the caller owns tool authorization and runner lifecycle.
 
+Configuration-built parallel agents use a context-aware scheduler so invocation trace and cancellation reach the branch subscriptions. Trusted code-first parallel agents must use `AgentFlowSchedulers.contextAwareIo()` or wrap their scheduler with `contextAware`; an independently configured native scheduler does not inherit that guarantee. Provider work scheduled on its own threads still needs its own context propagation.
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

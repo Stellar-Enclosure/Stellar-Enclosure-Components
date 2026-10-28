@@ -51,6 +51,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -85,6 +86,64 @@ class AgentFlowAdapterRegressionTest {
             runner.runAsync(USER, session.id(), input()).toList().blockingGet();
             assertThat(calls).hasValue(1);
             assertThat(model.calls).hasValue(1);
+        } finally {
+            runner.close().blockingAwait();
+        }
+    }
+
+    @Test
+    void parallel_streaming_model_subscriptions_receive_the_invocation_trace_context() {
+        ScriptedChatModel model = new ScriptedChatModel();
+        List<String> tenants = new CopyOnWriteArrayList<>();
+        model.streaming = prompt -> Flux.defer(() -> {
+            tenants.add(MDC.get("tenantId"));
+            return Flux.just(text("done", "stop", true));
+        });
+        var flow = new AgentFlowConfigDTO("fixtureChatModel", MODEL, "parallel",
+                List.of(new AgentConfigDTO("first", "first", "first", "first_output"),
+                        new AgentConfigDTO("second", "second", "second", "second_output")),
+                List.of(new top.egon.cola.component.agentflow.config.AgentWorkflowConfigDTO(
+                        top.egon.cola.component.agentflow.config.AgentWorkflowTypeEnum.PARALLEL,
+                        "parallel", "parallel", List.of("first", "second"), null)));
+        var root = factory().compileRoot(APP, flow, Map.of("fixtureChatModel", model), List.of());
+        MDC.put("tenantId", "tenant-101");
+        var runner = new AgentFlowInMemoryRunner(root, APP);
+        try {
+            var session = runner.sessionService().createSession(APP, USER).blockingGet();
+            var config = RunConfig.builder().setStreamingMode(RunConfig.StreamingMode.SSE).build();
+            runner.runAsync(USER, session.id(), input(), config).toList().blockingGet();
+            assertThat(tenants).containsExactlyInAnyOrder("tenant-101", "tenant-101");
+            assertThat(MDC.get("tenantId")).isEqualTo("tenant-101");
+        } finally {
+            runner.close().blockingAwait();
+            MDC.remove("tenantId");
+        }
+    }
+
+    @Test
+    void cancelling_a_parallel_workflow_disposes_both_model_subscriptions() throws InterruptedException {
+        ScriptedChatModel model = new ScriptedChatModel();
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch cancelled = new CountDownLatch(2);
+        model.streaming = prompt -> Flux.defer(() -> {
+            started.countDown();
+            return Flux.<ChatResponse>never().doOnCancel(cancelled::countDown);
+        });
+        var flow = new AgentFlowConfigDTO("fixtureChatModel", MODEL, "parallel",
+                List.of(new AgentConfigDTO("first", "first", "first", "first_output"),
+                        new AgentConfigDTO("second", "second", "second", "second_output")),
+                List.of(new top.egon.cola.component.agentflow.config.AgentWorkflowConfigDTO(
+                        top.egon.cola.component.agentflow.config.AgentWorkflowTypeEnum.PARALLEL,
+                        "parallel", "parallel", List.of("first", "second"), null)));
+        var root = factory().compileRoot(APP, flow, Map.of("fixtureChatModel", model), List.of());
+        var runner = new AgentFlowInMemoryRunner(root, APP);
+        try {
+            var session = runner.sessionService().createSession(APP, USER).blockingGet();
+            var config = RunConfig.builder().setStreamingMode(RunConfig.StreamingMode.SSE).build();
+            TestSubscriber<Event> subscriber = runner.runAsync(USER, session.id(), input(), config).test();
+            assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+            subscriber.cancel();
+            assertThat(cancelled.await(3, TimeUnit.SECONDS)).isTrue();
         } finally {
             runner.close().blockingAwait();
         }

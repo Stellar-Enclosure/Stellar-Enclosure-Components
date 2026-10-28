@@ -63,7 +63,7 @@ final class SpringAiModelAdapter extends BaseLlm {
             TraceContext trace = cancellation == null ? TraceContext.capture() : cancellation.traceContext();
             AtomicBoolean disposed = new AtomicBoolean();
             Flowable<LlmResponse> response = stream
-                    ? stream(prompt, cancellation != null)
+                    ? stream(prompt, cancellation != null, otelContext, trace)
                     : Flowable.fromPublisher(Mono.fromCallable(() -> {
                         try (Scope ignored = otelContext.makeCurrent(); TraceContext.Scope scope = trace.open()) {
                             AgentFlowInMemoryRunner.requireActive();
@@ -82,12 +82,16 @@ final class SpringAiModelAdapter extends BaseLlm {
         });
     }
 
-    private Flowable<LlmResponse> stream(Prompt prompt, boolean nativeRunner) {
+    private Flowable<LlmResponse> stream(Prompt prompt, boolean nativeRunner, Context otelContext, TraceContext trace) {
         return Flowable.fromPublisher(Flux.defer(() -> {
             StreamState state = new StreamState();
             MessageAggregator aggregator = new MessageAggregator();
             AtomicReference<Throwable> failure = new AtomicReference<>();
-            Flux<ChatResponse> source = Flux.defer(() -> model.stream(prompt))
+            Flux<ChatResponse> source = Flux.<ChatResponse>from(subscriber -> {
+                        try (Scope ignored = otelContext.makeCurrent(); TraceContext.Scope scope = trace.open()) {
+                            Flux.defer(() -> model.stream(prompt)).subscribe(subscriber);
+                        }
+                    })
                     .limitRate(1)
                     .map(state::record)
                     .onErrorResume(error -> {

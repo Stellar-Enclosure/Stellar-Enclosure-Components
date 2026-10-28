@@ -38,6 +38,7 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
 
     private static final ContextKey<InvocationCancellation> CANCELLATION_KEY =
             ContextKey.named("agent-flow-invocation-cancellation");
+    private static final ContextKey<TraceContext> TRACE_KEY = ContextKey.named("agent-flow-trace-context");
 
     private final Object monitor = new Object();
     private final Set<InvocationCancellation> active = ConcurrentHashMap.newKeySet();
@@ -69,10 +70,24 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
     }
 
     @Override
+    public Flowable<Event> runAsync(String userId, String sessionId, Content message, RunConfig config,
+                                    Map<String, Object> stateDelta) {
+        return Flowable.defer(() -> {
+            Context context = Context.current().with(TRACE_KEY, TraceContext.capture());
+            try (Scope ignored = context.makeCurrent()) {
+                return super.runAsync(userId, sessionId, message, config, stateDelta)
+                        .compose(Tracing.withContext(context));
+            }
+        });
+    }
+
+    @Override
     protected Flowable<Event> runAsyncImpl(Session session, Content message, RunConfig config,
                                            Map<String, Object> stateDelta) {
         return Flowable.defer(() -> {
-            InvocationCancellation cancellation = new InvocationCancellation(TraceContext.capture());
+            TraceContext captured = Context.current().get(TRACE_KEY);
+            InvocationCancellation cancellation = new InvocationCancellation(
+                    captured == null ? TraceContext.capture() : captured);
             synchronized (monitor) {
                 if (closing) {
                     return Flowable.error(new IllegalStateException("Agent Flow runner is closing"));
