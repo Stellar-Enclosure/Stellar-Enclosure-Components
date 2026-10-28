@@ -66,6 +66,31 @@ import static top.egon.cola.component.agentflow.compatibility.AdkCompatibilityFi
 class AgentFlowAdapterRegressionTest {
 
     @Test
+    void runner_invokes_host_governance_plugin_without_replacing_its_cancellation_guard() {
+        ScriptedChatModel model = new ScriptedChatModel();
+        AtomicInteger calls = new AtomicInteger();
+        com.google.adk.plugins.Plugin plugin = new com.google.adk.plugins.Plugin() {
+            @Override public String getName() { return "fixture-governance"; }
+
+            @Override
+            public io.reactivex.rxjava3.core.Maybe<LlmResponse> beforeModelCallback(
+                    com.google.adk.agents.CallbackContext context, com.google.adk.models.LlmRequest.Builder request) {
+                calls.incrementAndGet();
+                return io.reactivex.rxjava3.core.Maybe.empty();
+            }
+        };
+        var runner = new AgentFlowInMemoryRunner(agent("single", model), APP, List.of(plugin));
+        try {
+            var session = runner.sessionService().createSession(APP, USER).blockingGet();
+            runner.runAsync(USER, session.id(), input()).toList().blockingGet();
+            assertThat(calls).hasValue(1);
+            assertThat(model.calls).hasValue(1);
+        } finally {
+            runner.close().blockingAwait();
+        }
+    }
+
+    @Test
     void explicit_empty_tool_list_does_not_register_host_model_callbacks() {
         ScriptedChatModel model = new ScriptedChatModel();
         model.options = ToolCallingChatOptions.builder().model(MODEL)

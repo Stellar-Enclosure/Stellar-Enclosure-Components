@@ -22,6 +22,7 @@ import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.subjects.CompletableSubject;
 import top.egon.cola.component.common.trace.TraceContext;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -52,7 +53,19 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
     }).cache();
 
     public AgentFlowInMemoryRunner(BaseAgent agent, String appName) {
-        super(agent, appName, List.of(new CancellationPlugin()));
+        this(agent, appName, List.of());
+    }
+
+    /** Adds host governance plugins after the starter's cancellation guard. */
+    public AgentFlowInMemoryRunner(BaseAgent agent, String appName, List<Plugin> plugins) {
+        super(agent, appName, withCancellationPlugin(plugins));
+    }
+
+    private static List<Plugin> withCancellationPlugin(List<Plugin> plugins) {
+        List<Plugin> all = new ArrayList<>();
+        all.add(new CancellationPlugin());
+        all.addAll(List.copyOf(plugins));
+        return List.copyOf(all);
     }
 
     @Override
