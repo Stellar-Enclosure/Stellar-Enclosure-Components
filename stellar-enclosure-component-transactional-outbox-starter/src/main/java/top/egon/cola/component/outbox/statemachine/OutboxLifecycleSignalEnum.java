@@ -10,7 +10,8 @@ public enum OutboxLifecycleSignalEnum implements EgonEnum {
     DELIVERY_SUCCEEDED(3, "DELIVERY_SUCCEEDED"),
     DELIVERY_RETRYABLE(4, "DELIVERY_RETRYABLE"),
     SCHEDULE_RETRY(5, "SCHEDULE_RETRY"),
-    DELIVERY_PERMANENT(6, "DELIVERY_PERMANENT");
+    DELIVERY_PERMANENT(6, "DELIVERY_PERMANENT"),
+    REDRIVE_EXHAUSTED(7, "REDRIVE_EXHAUSTED");
 
     private final int code;
     private final String message;

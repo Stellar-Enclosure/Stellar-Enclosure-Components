@@ -152,6 +152,17 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
         return getBaseMapper().selectExpiredSucceededCandidates(retentionMillis, limit);
     }
 
+    public List<OutboxMessagePO> selectExhaustedCandidates(@Positive long cooldownMillis, @Min(1) @Max(10_000) int limit) {
+        requireBatchLimit(limit);
+        return getBaseMapper().selectExhaustedCandidates(cooldownMillis, limit);
+    }
+
+    public int redriveExhausted(@Positive long id, @Min(0) long version, @Positive long cooldownMillis,
+            @NotNull Instant updateTime, @NotBlank @Size(max = 128) String updateUserId) {
+        return requireAtMostOne("redriveExhausted", getBaseMapper().redriveExhausted(
+                id, version, cooldownMillis, updateTime, updateUserId));
+    }
+
     public int deleteSucceededByIdVersion(
             @Positive long id,
             @Min(0) long version,

@@ -253,6 +253,30 @@
           AND deleted_at IS NULL
     </update>
 
+    <select id="selectExhaustedCandidates" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/>
+        FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot} AND tenant_id = 0 AND deleted_at IS NULL
+          AND status = 'DEAD' AND last_error_code = 'OUTBOX_RETRY_EXHAUSTED'
+          AND attempt_count &gt;= max_attempts
+          AND completed_at &lt;= clock_timestamp() - (CAST(#{cooldownMillis} AS BIGINT) * interval '0.001' second)
+        ORDER BY completed_at, id LIMIT #{limit}
+    </select>
+
+    <update id="redriveExhausted">
+        <include refid="outboxShardBinding"/>
+        UPDATE egon_outbox.egon_cola_outbox_message
+        SET status = 'RETRY_WAIT', attempt_count = 0, next_attempt_at = clock_timestamp(),
+            completed_at = NULL, updated_at = clock_timestamp(), update_user_id = #{updateUserId},
+            update_time = #{updateTime}, version = version + 1
+        WHERE shard_slot = #{_outboxSlot} AND tenant_id = 0 AND deleted_at IS NULL
+          AND id = #{id} AND version = #{version} AND status = 'DEAD'
+          AND last_error_code = 'OUTBOX_RETRY_EXHAUSTED'
+          AND attempt_count &gt;= max_attempts
+          AND completed_at &lt;= clock_timestamp() - (CAST(#{cooldownMillis} AS BIGINT) * interval '0.001' second)
+    </update>
+
     <select id="selectExpiredSucceededCandidates" resultMap="outboxMessageResultMap">
         <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>

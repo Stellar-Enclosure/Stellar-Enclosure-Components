@@ -100,6 +100,37 @@ class OutboxDispatcherTest {
     }
 
     @Test
+    void enabledExhaustedRecoveryRunsBeforeTheNormalPoll() {
+        TransactionalOutboxProperties properties = new TransactionalOutboxProperties();
+        properties.getRetry().setRecoverExhausted(true);
+        properties.getRetry().setExhaustedRetryDelay(Duration.ofMinutes(7));
+        var subject = dispatcher(new DeliveryHandlerRegistry(List.of(handler)), properties);
+        subject.dispatchDue();
+        assertThat(store.recoverCount).isEqualTo(1);
+        assertThat(store.recoverDelay).isEqualTo(Duration.ofMinutes(7));
+        assertThat(store.claimDueCount).isEqualTo(1);
+    }
+
+    @Test
+    void recoveryFailureDoesNotBlockOrdinaryDelivery() {
+        TransactionalOutboxProperties properties = new TransactionalOutboxProperties();
+        properties.getRetry().setRecoverExhausted(true);
+        store.failRecovery = true;
+        store.add(record(1, "message-1", "http", 1, 10));
+        handler.results.put("message-1", DeliveryResult.success());
+        dispatcher(new DeliveryHandlerRegistry(List.of(handler)), properties).dispatchDue();
+        assertThat(store.succeeded).containsExactly("message-1");
+    }
+
+    @Test
+    void permanentFailureCannotUseTheRecoverableExhaustionMarker() {
+        store.add(record(1, "permanent", "http", 10, 10));
+        handler.results.put("permanent", DeliveryResult.permanentFailure("OUTBOX_RETRY_EXHAUSTED", "invalid"));
+        dispatcher.dispatchDue();
+        assertThat(store.deadCodes.get("permanent")).isEqualTo("OUTBOX_PERMANENT_FAILURE");
+    }
+
+    @Test
     void shouldMarkSuccessfulDeliveryWithCurrentOwner() {
         store.add(record(1, "message-1", "http", 11, 10));
         handler.results.put("message-1", DeliveryResult.success());
@@ -376,6 +407,9 @@ class OutboxDispatcherTest {
         private int claimDueCount;
         private int claimByMessageIdsCount;
         private int backlogCount;
+        private int recoverCount;
+        private Duration recoverDelay;
+        private boolean failRecovery;
 
         void add(OutboxRecord... added) {
             records.addAll(List.of(added));
@@ -449,6 +483,14 @@ class OutboxDispatcherTest {
 
         @Override
         public int deleteSucceeded(Duration retention, int limit) {
+            return 0;
+        }
+
+        @Override
+        public int recoverExhausted(int limit, Duration cooldown) {
+            recoverCount++;
+            recoverDelay = cooldown;
+            if (failRecovery) throw new IllegalStateException("recovery failed");
             return 0;
         }
 

@@ -277,6 +277,31 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     }
 
     @Override
+    public int recoverExhausted(@Positive @Max(10_000) int limit, @NotNull Duration cooldown) {
+        if (cooldown == null || cooldown.isNegative() || cooldown.isZero() || cooldown.toMillis() <= 0) {
+            throw new IllegalArgumentException("OUTBOX_REDRIVE_COOLDOWN_INVALID");
+        }
+        int total = 0;
+        for (int slot : rotatedSlots()) {
+            int remaining = limit - total;
+            if (remaining <= 0) break;
+            total += inWorkerTransaction("Failed to recover exhausted outbox messages", slot, () -> {
+                int changed = 0;
+                for (OutboxMessagePO candidate : repository.selectExhaustedCandidates(cooldown.toMillis(), candidateScanLimit(remaining))) {
+                    if (changed >= remaining) break;
+                    OutboxStatus target = lifecycle.evaluate(OutboxStatus.DEAD.getMessage(),
+                            OutboxLifecycleSignalEnum.REDRIVE_EXHAUSTED, candidate.getAttemptCount(), candidate.getMaxAttempts());
+                    if (target != OutboxStatus.RETRY_WAIT) throw new IllegalStateException("OUTBOX_REDRIVE_TARGET_INVALID");
+                    changed += repository.redriveExhausted(candidate.getId(), candidate.getVersion(), cooldown.toMillis(),
+                            clock.instant(), TECHNICAL_USER_ID);
+                }
+                return changed;
+            });
+        }
+        return total;
+    }
+
+    @Override
     public long countBacklog() {
         long total = 0;
         for (int slot : shardRouting.slots()) {

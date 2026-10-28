@@ -71,6 +71,8 @@ public class OutboxLifecycleStateMachineFactory {
                     OutboxLifecycleSignalEnum.SCHEDULE_RETRY, null);
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.DEAD.getMessage(),
                     OutboxLifecycleSignalEnum.DELIVERY_PERMANENT, null);
+            add(transitions, OutboxStatus.DEAD.getMessage(), OutboxStatus.RETRY_WAIT.getMessage(),
+                    OutboxLifecycleSignalEnum.REDRIVE_EXHAUSTED, null);
             return builder.build();
         } catch (Exception exception) {
             throw new OutboxStateMachineException(

@@ -50,6 +50,10 @@ public class OutboxConfigurationValidator extends BaseValidator {
         positive(properties.getRetry().getMaxAttempts(), "retry.max-attempts");
         positive(properties.getRetry().getInitialDelay(), "retry.initial-delay");
         positive(properties.getRetry().getMaxDelay(), "retry.max-delay");
+        positive(properties.getRetry().getExhaustedRetryDelay(), "retry.exhausted-retry-delay");
+        if (properties.getRetry().getExhaustedRetryDelay().toMillis() < 1) {
+            throw invalid("retry.exhausted-retry-delay");
+        }
         if (!Double.isFinite(properties.getRetry().getMultiplier())
                 || properties.getRetry().getMultiplier() < 1.0) {
             throw invalid("retry.multiplier");

@@ -561,6 +561,8 @@ egon:
           multiplier: 2.0
           max-delay: 5m
           jitter: 0.2
+          recover-exhausted: false
+          exhausted-retry-delay: 5m
         payload:
           max-bytes: 1MB
           max-header-count: 64
@@ -692,6 +694,12 @@ Retry uses bounded exponential backoff with jitter. A retryable result moves the
 row to `RETRY_WAIT`; exhausting `max-attempts`, a permanent failure, or an
 unknown channel moves it to `DEAD`. `OutboxDeadLetterListener` Beans may observe
 the transition, but listener failures do not undo the stored state.
+
+Set `retry.recover-exhausted=true` to redrive messages that exhausted retryable
+failures after `exhausted-retry-delay`. Recovery uses shard and version predicates,
+resets the attempt budget, and retains the message identity. Permanent failures
+and unknown channels are not redriven. This is disabled by default; consumers
+must still deduplicate repeated deliveries.
 
 If a worker crashes in `PROCESSING`, another worker can reclaim the row after
 `locked_until`. A stale worker cannot overwrite a new owner because all terminal

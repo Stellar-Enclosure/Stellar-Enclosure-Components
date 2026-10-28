@@ -96,6 +96,9 @@ class OutboxLifecycleServiceTest {
         assertThat(service.evaluate(
                 OutboxStatus.PROCESSING.getMessage(), OutboxLifecycleSignalEnum.DELIVERY_PERMANENT, 1, 3
         )).isEqualTo(OutboxStatus.DEAD);
+        assertThat(service.evaluate(
+                OutboxStatus.DEAD.getMessage(), OutboxLifecycleSignalEnum.REDRIVE_EXHAUSTED, 3, 3
+        )).isEqualTo(OutboxStatus.RETRY_WAIT);
     }
 
     @Test
@@ -181,7 +184,8 @@ class OutboxLifecycleServiceTest {
         return new OutboxLifecycleService(
                 new OutboxLifecycleStateMachineFactory(),
                 new StateMachineExecutionService(validationUtils),
-                OutboxStateMachineProperties.builder().build(),
+                OutboxStateMachineProperties.builder().executionTimeout(Duration.ofSeconds(1))
+                        .claimEvaluationTimeout(Duration.ofSeconds(2)).build(),
                 validationUtils
         );
     }

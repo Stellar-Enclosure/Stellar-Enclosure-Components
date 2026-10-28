@@ -477,6 +477,8 @@ egon:
           multiplier: 2.0
           max-delay: 5m
           jitter: 0.2
+          recover-exhausted: false
+          exhausted-retry-delay: 5m
         payload:
           max-bytes: 1MB
           max-header-count: 64
@@ -598,6 +600,10 @@ handler 在业务/数据库事务之外执行，必须遵守 `context.deadline()
 重试采用带 jitter 的有界指数退避。可重试结果进入 `RETRY_WAIT`；耗尽
 `max-attempts`、永久失败或未知 channel 会进入 `DEAD`。可以注册
 `OutboxDeadLetterListener` 观察死亡状态，但监听器异常不会撤销已保存的状态。
+
+可设置 `retry.recover-exhausted=true`，在 `exhausted-retry-delay` 后按分片和版本条件重新投递
+因可重试错误耗尽次数而进入 `DEAD` 的消息。每次恢复重置本轮尝试次数，保留相同消息标识；
+永久错误和未知 channel 不会自动恢复。默认关闭，消费者仍须处理重复投递。
 
 worker 在 `PROCESSING` 时崩溃，其他 worker 可在 `locked_until` 后重新 claim。旧 worker
 不能覆盖新 owner，因为所有终态更新都比较 owner token。单条毒消息也不会阻断同批次的

@@ -154,6 +154,13 @@ public class OutboxDispatcher {
     }
 
     void dispatchDue() {
+        if (properties.getRetry().isRecoverExhausted()) {
+            try {
+                store.recoverExhausted(properties.getPolling().getBatchSize(), properties.getRetry().getExhaustedRetryDelay());
+            } catch (RuntimeException failure) {
+                log.warn("Transactional outbox exhausted-message recovery failed; failureType={}", failure.getClass().getSimpleName());
+            }
+        }
         dispatch(limit -> store.claimDue(
                 limit,
                 workerIdentity.nextLeaseOwner(),
@@ -407,9 +414,11 @@ public class OutboxDispatcher {
             OutboxLifecycleSignalEnum signal
     ) {
         boolean exhausted = signal == OutboxLifecycleSignalEnum.DELIVERY_RETRYABLE;
+        String code = exhausted ? RETRY_EXHAUSTED : sanitize(result.code(), 64);
+        if (!exhausted && RETRY_EXHAUSTED.equals(code)) code = "OUTBOX_PERMANENT_FAILURE";
         markDead(
                 record,
-                exhausted ? RETRY_EXHAUSTED : sanitize(result.code(), 64),
+                code,
                 sanitize(exhausted ? result.code() : result.message(), 512)
         );
     }

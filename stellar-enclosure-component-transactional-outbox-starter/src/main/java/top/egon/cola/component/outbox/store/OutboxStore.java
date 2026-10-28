@@ -64,6 +64,10 @@ public interface OutboxStore {
 
     int deleteSucceeded(@NotNull Duration retention, @Positive @Max(10_000) int limit);
 
+    default int recoverExhausted(@Positive @Max(10_000) int limit, @NotNull Duration cooldown) {
+        throw new UnsupportedOperationException("OUTBOX_REDRIVE_UNSUPPORTED");
+    }
+
     long countBacklog();
 
     void validateSchema();

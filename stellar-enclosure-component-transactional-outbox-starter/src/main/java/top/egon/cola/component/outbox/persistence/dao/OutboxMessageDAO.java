@@ -102,6 +102,13 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
             @Param("limit") @Min(1) @Max(10_000) int limit
     );
 
+    List<OutboxMessagePO> selectExhaustedCandidates(@Param("cooldownMillis") @Positive long cooldownMillis,
+            @Param("limit") @Min(1) @Max(10_000) int limit);
+
+    int redriveExhausted(@Param("id") @Positive long id, @Param("version") @Min(0) long version,
+            @Param("cooldownMillis") @Positive long cooldownMillis, @Param("updateTime") @NotNull Instant updateTime,
+            @Param("updateUserId") @NotBlank @Size(max = 128) String updateUserId);
+
     int deleteSucceededByIdVersion(
             @Param("id") @Positive long id,
             @Param("version") @Min(0) long version,

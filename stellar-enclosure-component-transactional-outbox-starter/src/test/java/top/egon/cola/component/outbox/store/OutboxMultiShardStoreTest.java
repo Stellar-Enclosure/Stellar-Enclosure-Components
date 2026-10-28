@@ -179,6 +179,30 @@ class OutboxMultiShardStoreTest {
                 .isEqualTo(2);
     }
 
+    @Test
+    void exhaustedRecoveryStaysInTheCandidateShardAndUsesVersionedUpdates() {
+        var fixture = fixture();
+        var seen = new ArrayList<Integer>();
+        when(fixture.lifecycle.evaluate(eq("DEAD"), eq(OutboxLifecycleSignalEnum.REDRIVE_EXHAUSTED), anyInt(), anyInt()))
+                .thenReturn(OutboxStatus.RETRY_WAIT);
+        when(fixture.repository.selectExhaustedCandidates(anyLong(), anyInt())).thenAnswer(invocation -> {
+            int slot = OutboxShardContext.currentSlot();
+            return List.of(OutboxMessagePO.builder().id(slot == 0 ? 1L : 2L).version(4L)
+                    .shardSlot(slot).status(OutboxStatus.DEAD).attemptCount(10).maxAttempts(10).build());
+        });
+        when(fixture.repository.redriveExhausted(anyLong(), anyLong(), anyLong(), any(), anyString())).thenAnswer(invocation -> {
+            int slot = OutboxShardContext.currentSlot();
+            seen.add(slot);
+            assertThat((Long) invocation.getArgument(1)).isEqualTo(4L);
+            assertThat((Long) invocation.getArgument(0)).isEqualTo(slot == 0 ? 1L : 2L);
+            return 1;
+        });
+        assertThat(fixture.store.recoverExhausted(10, Duration.ofMinutes(5))).isEqualTo(2);
+        assertThat(seen).containsExactlyInAnyOrder(0, fixture.secondSlot);
+        assertThatThrownBy(() -> fixture.store.recoverExhausted(10, Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private static Fixture fixture() {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:" + UUID.randomUUID().toString().replace("-", "") + ";DB_CLOSE_DELAY=-1");
@@ -256,7 +280,7 @@ class OutboxMultiShardStoreTest {
         var store = new MybatisPlusOutboxStore(repository, converter,
                 new OutboxTechnicalContextExecutor(new EgonColaMybatisPlusProperties()), lifecycle, transaction,
                 mock(OutboxSchemaMetadataValidator.class), Clock.systemUTC(), new OutboxMpStorageProperties(), routing);
-        return new Fixture(dataSource, jdbc, store, secondSlot, failSecond);
+        return new Fixture(dataSource, jdbc, store, secondSlot, failSecond, repository, lifecycle);
     }
 
     private static OutboxMessagePO model(java.sql.ResultSet rows) throws java.sql.SQLException {
@@ -271,6 +295,7 @@ class OutboxMultiShardStoreTest {
     }
 
     private record Fixture(JdbcDataSource dataSource, JdbcTemplate jdbc, MybatisPlusOutboxStore store,
-                           int secondSlot, AtomicBoolean failSecond) {
+                           int secondSlot, AtomicBoolean failSecond, OutboxMessageRepository repository,
+                           OutboxLifecycleService lifecycle) {
     }
 }

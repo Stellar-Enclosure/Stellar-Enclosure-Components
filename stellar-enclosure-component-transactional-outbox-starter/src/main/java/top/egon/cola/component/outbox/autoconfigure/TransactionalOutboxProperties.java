@@ -212,6 +212,13 @@ public class TransactionalOutboxProperties {
         private double multiplier = 2.0;
         private Duration maxDelay = Duration.ofMinutes(5);
         private double jitter = 0.2;
+        private boolean recoverExhausted = false;
+        private Duration exhaustedRetryDelay = Duration.ofMinutes(5);
+
+        public boolean isRecoverExhausted() { return recoverExhausted; }
+        public void setRecoverExhausted(boolean recoverExhausted) { this.recoverExhausted = recoverExhausted; }
+        public Duration getExhaustedRetryDelay() { return exhaustedRetryDelay; }
+        public void setExhaustedRetryDelay(Duration exhaustedRetryDelay) { this.exhaustedRetryDelay = exhaustedRetryDelay; }
 
         public int getMaxAttempts() {
             return maxAttempts;
