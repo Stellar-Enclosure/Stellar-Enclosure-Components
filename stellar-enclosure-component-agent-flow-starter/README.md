@@ -163,6 +163,8 @@ Component failures are raised from `top.egon.cola.component.agentflow.common.exc
 
 The compatibility line is Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 1.13.0. Any Spring AI or ADK upgrade requires re-running the focused tests, the runtime dependency tree check, and the Components reactor test. Do not add `google-adk-dev`, provider starters, Web, MCP, JDBC, or Flyway dependencies to this starter without a new specification.
 
+The updated starter is versioned `0.0.2-SNAPSHOT` for source-reactor development; the existing Components BOM still selects `0.0.1`. Consumers must explicitly select the newer artifact after it is published, or build it in the same source reactor. `AgentFlowFactory.compileRoot` can compile a validated configuration without allocating a runner and takes an explicit ADK tool list; the caller owns tool authorization and runner lifecycle.
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

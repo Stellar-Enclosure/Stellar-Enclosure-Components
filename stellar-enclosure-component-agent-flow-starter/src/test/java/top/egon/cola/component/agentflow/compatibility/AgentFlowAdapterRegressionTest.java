@@ -66,6 +66,16 @@ import static top.egon.cola.component.agentflow.compatibility.AdkCompatibilityFi
 class AgentFlowAdapterRegressionTest {
 
     @Test
+    void explicit_empty_tool_list_does_not_register_host_model_callbacks() {
+        ScriptedChatModel model = new ScriptedChatModel();
+        model.options = ToolCallingChatOptions.builder().model(MODEL)
+                .toolCallbacks(callback(new AtomicInteger(), new AtomicReference<>(), new AtomicReference<>(), false))
+                .build();
+        var root = factory().compileRoot(APP, config("entry"), Map.of("fixtureChatModel", model), List.of());
+        assertThat(((com.google.adk.agents.LlmAgent) root).tools().blockingGet()).isEmpty();
+    }
+
+    @Test
     void configured_host_tool_executes_with_scoped_host_context() throws Exception {
         ScriptedChatModel model = new ScriptedChatModel();
         AtomicInteger calls = new AtomicInteger();

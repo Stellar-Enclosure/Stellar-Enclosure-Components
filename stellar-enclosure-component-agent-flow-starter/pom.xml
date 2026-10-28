@@ -12,15 +12,33 @@
     </parent>
 
     <artifactId>stellar-enclosure-component-agent-flow-starter</artifactId>
+    <version>0.0.2-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>stellar-enclosure-component-agent-flow-starter</name>
     <description>Spring Boot starter for configuration-driven Google ADK agent flows.</description>
+
+    <properties>
+        <agent-flow.spring-ai.version>2.0.2</agent-flow.spring-ai.version>
+        <agent-flow.google-adk.version>1.13.0</agent-flow.google-adk.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>top.egon</groupId>
+                <artifactId>stellar-enclosure-components-bom</artifactId>
+                <version>${project.parent.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
             <groupId>top.egon</groupId>
             <artifactId>stellar-enclosure-component-common-core</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -37,14 +55,17 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-model</artifactId>
+            <version>${agent-flow.spring-ai.version}</version>
         </dependency>
         <dependency>
             <groupId>com.google.adk</groupId>
             <artifactId>google-adk</artifactId>
+            <version>${agent-flow.google-adk.version}</version>
         </dependency>
         <dependency>
             <groupId>com.google.adk</groupId>
             <artifactId>google-adk-spring-ai</artifactId>
+            <version>${agent-flow.google-adk.version}</version>
             <exclusions>
                 <exclusion>
                     <groupId>com.google.adk</groupId>

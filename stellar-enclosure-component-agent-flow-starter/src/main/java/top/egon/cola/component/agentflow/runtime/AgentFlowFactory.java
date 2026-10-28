@@ -43,8 +43,7 @@ public class AgentFlowFactory {
             if (chatModel == null) {
                 throw new AgentFlowConfigurationException(flowId, config.chatModelBeanName(), "ChatModel bean is missing");
             }
-            BaseAgent root = buildRoot(flowId, config, modelAdapterFactory.create(chatModel, config.modelName()),
-                    modelAdapterFactory.createTools(chatModel));
+            BaseAgent root = compileRoot(flowId, config, chatModels, modelAdapterFactory.createTools(chatModel));
             runner = new AgentFlowInMemoryRunner(root, flowId);
             return new AgentFlowCompilationBO(flowId, root, runner);
         } catch (AgentFlowConfigurationException failure) {
@@ -52,6 +51,25 @@ public class AgentFlowFactory {
             throw failure;
         } catch (RuntimeException failure) {
             closeQuietly(runner, failure);
+            throw new AgentFlowConfigurationException(flowId, "flow", "ADK flow construction failed", failure);
+        }
+    }
+
+    /** Compiles a validated flow without creating a runner; the caller owns the supplied tool set. */
+    public BaseAgent compileRoot(String flowId, AgentFlowConfigDTO config, Map<String, ChatModel> chatModels,
+                                 List<BaseTool> tools) {
+        if (flowId == null || flowId.isBlank() || config == null || chatModels == null || tools == null) {
+            throw new AgentFlowConfigurationException(flowId == null ? "flow" : flowId, "flow", "flow inputs are required");
+        }
+        try {
+            ChatModel chatModel = chatModels.get(config.chatModelBeanName());
+            if (chatModel == null) {
+                throw new AgentFlowConfigurationException(flowId, config.chatModelBeanName(), "ChatModel bean is missing");
+            }
+            return buildRoot(flowId, config, modelAdapterFactory.create(chatModel, config.modelName()), List.copyOf(tools));
+        } catch (AgentFlowConfigurationException failure) {
+            throw failure;
+        } catch (RuntimeException failure) {
             throw new AgentFlowConfigurationException(flowId, "flow", "ADK flow construction failed", failure);
         }
     }

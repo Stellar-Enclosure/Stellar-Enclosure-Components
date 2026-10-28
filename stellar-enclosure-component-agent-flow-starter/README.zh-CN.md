@@ -163,6 +163,8 @@ configuration -> validation -> ADK graph compilation -> registry -> session exec
 
 当前兼容线是 Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 1.13.0。升级 Spring AI 或 ADK 后必须重新执行 focused tests、runtime dependency tree 检查和 Components reactor 测试。没有新的 Spec，不要向 starter 加入 `google-adk-dev`、provider starter、Web、MCP、JDBC 或 Flyway 依赖。
 
+更新后的 starter 使用 `0.0.2-SNAPSHOT` 进行源码 reactor 开发；现有 Components BOM 仍选择 `0.0.1`。消费者需要在新版发布后显式选择该版本，或在同一源码 reactor 中构建。`AgentFlowFactory.compileRoot` 可以只编译已校验配置而不创建 Runner，并要求调用方明确提供 ADK 工具列表；工具授权和 Runner 生命周期由调用方负责。
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

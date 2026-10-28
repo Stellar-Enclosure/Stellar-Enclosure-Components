@@ -60,6 +60,14 @@ class AgentFlowFactoryTest {
     }
 
     @Test
+    void compiles_root_without_owning_a_runner_and_uses_the_explicit_tool_list() {
+        var root = factory.compileRoot("research-flow", leafFlow(), Map.of("researchChatModel", chatModel), List.of());
+        assertThat(root).isInstanceOf(LlmAgent.class);
+        assertThat(((LlmAgent) root).tools().blockingGet()).isEmpty();
+        assertThat(chatModel.calls).isZero();
+    }
+
+    @Test
     void rejects_missing_named_chat_model_without_provider_call() {
         assertThatThrownBy(() -> factory.create("research-flow", leafFlow(), Map.of()))
                 .isInstanceOf(AgentFlowConfigurationException.class)
