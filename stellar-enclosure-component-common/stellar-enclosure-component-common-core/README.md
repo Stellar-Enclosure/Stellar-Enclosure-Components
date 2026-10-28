@@ -1,5 +1,8 @@
 # Common core exception handling
 
+The bounded XLSX export utilities are also in common-core; see [Excel export](README-excel.zh-CN.md)
+for the optional POI dependency, authorization boundary, and paging contract.
+
 `CommonException` defaults to `SYSTEM`; expected `BusinessException` failures default to
 `BUSINESS` and WARN. `BusinessException.alert(status, cause, details)` explicitly creates a
 `BUSINESS_ALERT`. Built-in system/dependency codes and wrapping a classified alert also retain
