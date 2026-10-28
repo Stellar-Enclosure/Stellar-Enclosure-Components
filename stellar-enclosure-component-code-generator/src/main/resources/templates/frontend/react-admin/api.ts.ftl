@@ -1,4 +1,5 @@
 import {api} from '../../app/api'
+import type {ListTemplate, ListTemplateSave, ListTemplateView} from '@stellar-enclosure/stellar-enclosure-web-shared'
 [#if responseMode == "result-record"]
 import {ApiError} from '@stellar-enclosure/stellar-enclosure-web-shared'
 [/#if]
@@ -42,6 +43,19 @@ const validateView = (value: unknown): [=stem]View => {
 }
 
 export const [=featureIdentifier]Api = {
+  listView: (catalogVersion: string, includeSystemMetadata = false): Promise<ListTemplateView> => {
+    const query = new URLSearchParams({catalogVersion, includeSystemMetadata: String(includeSystemMetadata)})
+    return request<ListTemplateView>(base + '/list-view?' + query.toString())
+  },
+  selectListTemplate: (id: string, view: ListTemplateView): Promise<unknown> => request(base + '/list-view/selection', {
+    method: 'POST', body: JSON.stringify({templateId: id, catalogVersion: view.catalogVersion, definitionDigest: view.definitionDigest}),
+  }),
+  saveListTemplate: (type: ListTemplate['type'], command: ListTemplateSave): Promise<ListTemplate> =>
+    request(base + '/list-view/' + type.toLowerCase(), {method: 'POST', body: JSON.stringify(command)}),
+  removeListTemplate: (template: ListTemplate, catalogVersion: string): Promise<unknown> => {
+    const query = new URLSearchParams({catalogVersion, version: template.version})
+    return request(base + '/list-view/' + template.type.toLowerCase() + '/' + encodeURIComponent(template.id) + '?' + query.toString(), {method: 'DELETE'})
+  },
   page: async (query: [=stem]PageQuery): Promise<[=stem]Slice> => {
     const parameters = new URLSearchParams()
     for (const [key, value] of Object.entries(query)) {

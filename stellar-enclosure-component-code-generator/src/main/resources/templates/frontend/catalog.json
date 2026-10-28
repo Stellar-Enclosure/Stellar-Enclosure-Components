@@ -11,6 +11,7 @@
     {"id":"permissions","artifact":"frontend-permissions","templateResource":"react-admin/permissions.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.permissions.ts"},
     {"id":"routes","artifact":"frontend-routes","templateResource":"react-admin/routes.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.routes.tsx"},
     {"id":"page","artifact":"frontend-page","templateResource":"react-admin/page.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Page.tsx"},
+    {"id":"page-test","artifact":"frontend-page-test","templateResource":"react-admin/page.test.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Page.test.tsx"},
     {"id":"form","artifact":"frontend-form","templateResource":"react-admin/form.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Form.tsx"},
     {"id":"detail","artifact":"frontend-detail","templateResource":"react-admin/detail.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Detail.tsx"},
     {"id":"registry","artifact":"frontend-registry","templateResource":"react-admin/registry.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/generated/permissions.ts"}

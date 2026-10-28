@@ -93,6 +93,10 @@ This is a fragment: keep the existing DDL, `logicalTables`, `fieldPolicies`, `do
 
 Use `--target backend` (the default) or `--target frontend` on `plan`, `apply`, `check` and `recover`. The same config and DDL feed both targets; each output root has its own lock, state, plan ID and recovery. Applying one repository does not atomically apply the other. The frontend plan emits API/types, a list page, form, detail, static permissions, routes and metadata. The template-owned static permission registry collects previously generated features without overwriting manually changed files. Configure the permission producer and register/activate manifests through the existing delivery workflow; generated resources alone do not grant roles.
 
+Generated list pages include the shared `ListTemplateSettings` control. They load and select templates independently of the list data query, then intersect the returned visible columns with the current Jianshen field permissions. A template load failure is not treated as a saved local view. The host supplies the system/personal management capabilities through the optional `listTemplateAccess` page property; backend authorization remains mandatory.
+
+The generated page calls the business list API's `GET /list-view` (`catalogVersion`, `includeSystemMetadata`), `POST /list-view/selection`, `POST /list-view/system`, `POST /list-view/personal`, and `DELETE /list-view/{system|personal}/{id}`. Responses use the configured `responseMode`. The business service must implement this adapter using `stellar-enclosure-tianshu-list-client`; Tianshu's list-template documentation describes the identity and catalog bindings. Registration, activation and explicit role grants remain deployment prerequisites.
+
 ```sh
 scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target backend
 scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target backend --plan "$BACKEND_PLAN_ID"

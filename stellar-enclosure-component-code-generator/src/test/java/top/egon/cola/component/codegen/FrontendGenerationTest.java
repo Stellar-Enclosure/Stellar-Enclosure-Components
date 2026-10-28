@@ -42,6 +42,17 @@ class FrontendGenerationTest {
         Path page = frontend.resolve("src/features/orders/OrdersPage.tsx");
         assertTrue(Files.readString(page).contains("PageTemplate"));
         assertTrue(Files.readString(page).contains("ActionGuard"));
+        String generatedPage = Files.readString(page);
+        assertTrue(generatedPage.contains("<ListTemplateSettings key={scope ?? 'unavailable'} view={view}"));
+        assertTrue(generatedPage.contains("read === 'OMITTED'"));
+        assertTrue(generatedPage.contains("listView.data.visibleColumns"));
+        assertTrue(generatedPage.contains("filter(key => availableKeys.has(key))"));
+        assertTrue(generatedPage.contains("permissionContextKey(binding)"));
+        assertTrue(generatedPage.contains("visibleKeys.flatMap"));
+        assertTrue(generatedPage.contains("Api.listView(binding!.catalogVersion)"));
+        assertTrue(generatedPage.contains("Api.page({...filters, pageNo, pageSize: 20})"));
+        assertTrue(Files.readString(frontend.resolve("src/features/orders/orders.api.ts")).contains("/list-view/selection"));
+        assertTrue(Files.readString(frontend.resolve("src/features/orders/OrdersPage.test.tsx")).contains("without changing or repeating the list query"));
         assertTrue(Files.readString(frontend.resolve("src/features/orders/OrdersForm.tsx")).contains("useFieldAccess"));
         assertTrue(Files.readString(frontend.resolve("src/features/orders/orders.api.ts")).contains("{allowEmptyResponse}"));
         assertTrue(Files.readString(frontend.resolve("src/features/orders/orders.api.ts")).contains("Response envelope is invalid"));

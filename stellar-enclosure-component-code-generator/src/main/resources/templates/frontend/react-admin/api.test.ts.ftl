@@ -7,6 +7,22 @@ import {[=featureIdentifier]Api} from './[=feature].api'
 beforeEach(() => transport.request.mockReset())
 
 describe('[=stem] API contract', () => {
+  it('loads and selects a list template through separate backend requests', async () => {
+    const view = {definitionDigest: 'digest', catalogVersion: '1', columns: [], templates: [],
+      selectedTemplateId: null, visibleColumns: [], mayManageSystem: false, mayManagePersonal: false}
+[#if responseMode == "result-record"]
+    transport.request.mockResolvedValueOnce({success: true, data: view}).mockResolvedValueOnce({success: true, data: true})
+[#else]
+    transport.request.mockResolvedValueOnce(view).mockResolvedValueOnce(true)
+[/#if]
+    await expect([=featureIdentifier]Api.listView('1')).resolves.toEqual(view)
+    expect(transport.request).toHaveBeenNthCalledWith(1, [=apiBasePathJson] + '/list-view?catalogVersion=1&includeSystemMetadata=false',
+      undefined, {allowEmptyResponse: false})
+    await [=featureIdentifier]Api.selectListTemplate('7', view)
+    expect(transport.request).toHaveBeenNthCalledWith(2, [=apiBasePathJson] + '/list-view/selection',
+      {method: 'POST', body: JSON.stringify({templateId: '7', catalogVersion: '1', definitionDigest: 'digest'})}, {allowEmptyResponse: false})
+  })
+
   it('reads a slice using the backend pagination contract', async () => {
     const slice = {records: [{id: '42', version: 1}], hasNext: false}
 [#if responseMode == "result-record"]

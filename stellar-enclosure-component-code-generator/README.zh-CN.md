@@ -73,6 +73,10 @@ scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths
 
 `plan`、`apply`、`check`、`recover` 可传 `--target backend` 或 `--target frontend`，默认后端。两端使用同一配置与 DDL，但分别维护生成计划、状态和锁；跨仓库写入不是一个原子事务。前端生成 API、类型、列表、表单、详情、路由和静态权限声明，模板拥有的权限聚合文件会保留之前生成的模块。人工修改的文件发生冲突时不覆盖。权限清单仍需经构建、注册和激活流程，生成代码不会自动授予角色。
 
+生成列表页预置共享 `ListTemplateSettings`，独立请求业务后端的字段模板，切换后重新读取当前模板并按返回顺序显示；列表数据请求不携带模板参数，仍由后端按鉴神权限返回字段。模板加载失败时不会用本地临时选择冒充已保存模板。生成页将返回字段与当前鉴神可读字段取交集；业务应用应通过自身受权接口接入天枢列表模板服务，并从本应用的鉴神资源提供 `listTemplateAccess` 中的系统/个人维护能力。生成页面本身不授予权限。
+
+生成页的模板接口位于业务列表 API 路径下：`GET /list-view`（`catalogVersion`、`includeSystemMetadata`）、`POST /list-view/selection`、`POST /list-view/system`、`POST /list-view/personal`，以及 `DELETE /list-view/{system|personal}/{id}`。响应采用所配置的 `responseMode`。业务服务须实现这些接口并使用 `stellar-enclosure-tianshu-list-client` 委托天枢；相关身份、资源绑定与返回模型见天枢的列表模板文档。注册/激活和显式角色授权仍是部署前置条件。
+
 ```sh
 scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target backend
 scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target backend --plan "$BACKEND_PLAN_ID"

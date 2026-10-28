@@ -185,10 +185,12 @@ public final class FrontendGenerationService {
         model.put("actions", actions);
         String directory = "src/features/" + feature + "/";
         List<String> selectedTemplates = new ArrayList<>(List.of("types", "api", "api-test", "permissions", "routes", "page", "form", "detail"));
+        if (!((List<Map<String, Object>>) model.get("resultFields")).isEmpty()) selectedTemplates.add("page-test");
         if (Boolean.TRUE.equals(model.get("hasDecimal"))) selectedTemplates.addAll(List.of("decimal", "decimal-test"));
         for (String template : selectedTemplates) {
             String filename = switch (template) {
                 case "page", "form", "detail" -> stem + Character.toUpperCase(template.charAt(0)) + template.substring(1) + ".tsx";
+                case "page-test" -> stem + "Page.test.tsx";
                 case "routes" -> feature + ".routes.tsx";
                 case "api-test" -> feature + ".api.test.ts";
                 case "decimal-test" -> feature + ".decimal.test.ts";
