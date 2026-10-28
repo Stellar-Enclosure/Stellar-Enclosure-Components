@@ -12,7 +12,7 @@ PostgreSQL 本地事务，再通过 HTTP、RabbitMQ 或自定义通道异步投�
 
 | 模块 | 用途 |
 |---|---|
-| `stellar-enclosure-component-transactional-outbox-starter` | CQE Outbox API、基于 MP 的 PostgreSQL 存储、技术与可选业务 Statemachine、轮询、重试、清理、投递适配、受管 DDL、维护迁移、指标和测试 |
+| `stellar-enclosure-component-transactional-outbox-starter` | CQE Outbox API、MP 与单库 JDBC PostgreSQL 存储、技术与可选业务 Statemachine、轮询、重试、清理、投递适配、受管 DDL、维护迁移、指标和测试 |
 
 单测仍按组件包路径放在 `src/test/java` 下；集成测试和可执行示例统一放在
 `src/test/java/top/egon/cola/component/outbox/integration` 下，并通过 Maven
@@ -27,7 +27,7 @@ Failsafe 执行。
 
 1. `enqueue` 在调用方当前业务事务中写入 outbox 记录。
 2. 提交后事件只作为降低延迟的唤醒提示。
-3. 轮询先查候选记录，再通过 PostgreSQL `FOR UPDATE SKIP LOCKED` 和版本条件领取到期或租约过期的记录。
+3. 轮询领取到期或租约过期的记录时跳过被其他事务锁住的行：JDBC 使用 `FOR UPDATE SKIP LOCKED`；MP 使用 advisory lock、`FOR UPDATE NOWAIT` 和版本条件，锁冲突时回滚当前分组事务并排除被锁行后重试。高竞争批次可能产生多次有界重试。
 4. 对外投递在数据库事务之外执行。
 5. 重试、租约恢复和带 owner 条件的更新使记录依次处于
    `PENDING`、`PROCESSING`、`RETRY_WAIT`、`SUCCEEDED` 或 `DEAD`。
@@ -39,17 +39,64 @@ Failsafe 执行。
 可选的 `idempotencyKey` 会在对应记录仍保留时阻止重复 outbox 记录。同一个 key
 如果对应不同的消息内容会直接报冲突，不会静默接受；`availableAt` 不参与内容指纹。
 
+## 单数据库 JDBC 存储
+
+默认仍为 `MYBATIS_PLUS`。独立流程引擎等只使用一个普通 PostgreSQL `DataSource` 的宿主可选择 `JDBC`。
+如果宿主本身不使用 MP，应排除这两个 MP 专用传递依赖；已有 MP 宿主的默认依赖关系保持不变。
+新 Store 使用独立的 `0.0.2-SNAPSHOT` 版本；消费前从源码构建或发布该版本，不覆盖已有 `0.0.1` 制品：
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-transactional-outbox-starter</artifactId>
+    <version>0.0.2-SNAPSHOT</version>
+    <exclusions>
+        <exclusion>
+            <groupId>top.egon</groupId>
+            <artifactId>stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter</artifactId>
+        </exclusion>
+        <exclusion>
+            <groupId>top.egon</groupId>
+            <artifactId>stellar-enclosure-component-common-id-starter</artifactId>
+        </exclusion>
+    </exclusions>
+</dependency>
+```
+
+```yaml
+egon:
+  cola:
+    component:
+      transactional-outbox:
+        storage:
+          type: JDBC
+          data-source-bean-name: businessDataSource
+          transaction-manager-bean-name: businessTransactionManager
+          jdbc:
+            schema: egon_outbox
+          validate-schema: true
+```
+
+当数据源和事务管理器能够唯一确定时，可省略 Bean 名称。`enqueue` 必须处于绑定到同一个数据源的业务事务中，
+worker 使用独立事务。JDBC 模式不会自动建表或修复表结构。先在新建的专属 schema 中，以该 schema 为迁移默认
+schema 执行未修改的 `db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql`，
+再启用只读结构校验。若使用已有旧 schema，切换运行模式前须停止旧生产者和 worker，并明确评估数据和所有权。
+
+V1 的技术幂等键全局唯一，表中没有租户列。多租户宿主必须从可信授权上下文获取租户，构造消息时使用
+`TenantScopedOutboxKey.of(tenantId, operation, commandId)`，并在业务事件契约中携带可信租户；该工具不执行鉴权。
+租约过期后，即使尚未被其他 worker 重新领取，旧 owner 也不能确认成功、重试或写死信。投递仍为至少一次。
+
 ## 状态机与 CQE
 
 Starter 使用两个职责分离的 Spring Statemachine：
 
 | 状态机 | 所有者 | 决策范围 | 已提交事实的权威存储 |
 |---|---|---|---|
-| Outbox 生命周期 | 本 Starter，始终启用 | 是否允许入队、领取、回收、重试、完成或进入死信状态 | 基于 MP 的 `egon_outbox.egon_cola_outbox_message` 行 |
+| Outbox 生命周期 | 本 Starter，始终启用 | 是否允许入队、领取、回收、重试、完成或进入死信状态 | 当前存储实现的 outbox 行 |
 | 业务事件 | 消费方应用，可选启用 | 已发生的业务事实能否推进已注册聚合状态 | 应用业务行与事件 receipt，在同一事务写入 |
 
 生命周期状态包括 `__NEW__`、`PENDING`、`PROCESSING`、`RETRY_WAIT`、`SUCCEEDED` 和
-`DEAD`。状态机决定迁移是否合法；数据库的 owner/version 条件仍决定哪个 worker
+`DEAD`。状态机决定迁移是否合法；数据库的 owner、租约及 MP 模式下的版本条件决定哪个 worker
 可以提交。`DELIVERY_RETRYABLE` 根据尝试次数选择 `RETRY_WAIT` 或 `DEAD`。Store 的
 显式 `SCHEDULE_RETRY` 操作只负责在 Dispatcher 已决定目标状态后安排下一次重试。
 
@@ -317,7 +364,7 @@ Outbox 受管 DDL 完成后会等待副本回放到主库 WAL 位置，等待时
 `egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints`；该配置只接受
 已核验的前序指纹，新增版本必须尚未执行，以便记录新拓扑。若新增版本已在旧拓扑执行，需要另行
 规划新的版本化迁移，不能修改历史。Common MP 的业务表迁移和跨组数据迁移仍需独立规划。
-领取、完成和清理按组分别开启事务；某组故障后，已领取但尚未交付的消息会在租约到期后恢复。
+MP 领取、完成和清理按组分别开启事务；某组故障后，已领取但尚未交付的消息会在租约到期后恢复。
 直接调用 `OutboxStore` 完成、重试或死信时，多组模式必须传入领取结果的 `shardSlot`；旧的无槽位
 重载仅适用于单组，避免相同内部 ID 在不同库中产生歧义。
 旧表搬迁需要读取即时一致的来源和目标，在 `SHARDING_READWRITE` 下会以
@@ -326,7 +373,7 @@ Outbox 受管 DDL 完成后会等待副本回放到主库 WAL 位置，等待时
 
 如果存在旧数据，不要复制旧 `V1` 文件启动切换。保持
 `db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql` 不变，并将旧表保留在原 schema。
-旧 schema 仅作为显式、只读搬迁来源，不用于运行期 Store。
+对于 MP 运行模式，旧 schema 仅作为显式、只读搬迁来源。
 
 受控搬迁时，先停止**所有**新旧生产者和 worker，并等待在途事务结束。随后在每个新实例启用
 `migration-mode: true`。该本地开关拒绝新的 `enqueue`、`submitDue` 和 `submitMessageIds` 调用；它不能停止其他副本或旧进程。

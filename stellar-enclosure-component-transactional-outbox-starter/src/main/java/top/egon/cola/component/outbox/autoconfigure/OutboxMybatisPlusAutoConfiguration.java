@@ -8,16 +8,16 @@ import org.mybatis.spring.transaction.SpringManagedTransactionFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration;
-import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaShardingAutoConfiguration;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaPostgreDdlRunner;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingDataSourceBootstrapper.LogicalDataSourceFactory;
@@ -50,9 +50,13 @@ import java.util.Set;
 
 /** Registers the managed DDL hook before Common builds the logical datasource. */
 @Slf4j
-@AutoConfiguration(value = "top.egon.cola.component.outbox.autoconfigure.OutboxMybatisPlusAutoConfiguration", after = EgonColaMybatisPlusAutoConfiguration.class, before = EgonColaShardingAutoConfiguration.class)
+@AutoConfiguration(value = "top.egon.cola.component.outbox.autoconfigure.OutboxMybatisPlusAutoConfiguration",
+        afterName = "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration",
+        beforeName = "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaShardingAutoConfiguration")
 @ConditionalOnProperty(prefix = "egon.cola.component.transactional-outbox", name = "enabled",
         havingValue = "true", matchIfMissing = true)
+@Conditional(OutboxStorageTypeCondition.MybatisPlus.class)
+@ConditionalOnClass(name = "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration")
 @MapperScan(basePackageClasses = OutboxMessageDAO.class,
         sqlSessionFactoryRef = "${egon.cola.component.transactional-outbox.storage.mp.sql-session-factory-bean-name:sqlSessionFactory}")
 public class OutboxMybatisPlusAutoConfiguration {

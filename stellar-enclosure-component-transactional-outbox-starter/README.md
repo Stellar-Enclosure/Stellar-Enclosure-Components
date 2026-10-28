@@ -13,7 +13,7 @@ The component has one Maven module:
 
 | Module | Purpose |
 |---|---|
-| `stellar-enclosure-component-transactional-outbox-starter` | Public CQE outbox API, MP-backed PostgreSQL store, technical and optional business Statemachines, polling, retry, cleanup, delivery adapters, managed DDL, maintenance migration, metrics, and tests |
+| `stellar-enclosure-component-transactional-outbox-starter` | Public CQE outbox API, MP and single-database JDBC PostgreSQL stores, technical and optional business Statemachines, polling, retry, cleanup, delivery adapters, managed DDL, maintenance migration, metrics, and tests |
 
 Unit tests remain in the regular component-package directories under
 `src/test/java`; integration tests and executable samples are grouped
@@ -30,8 +30,11 @@ The guarantee is **at least once**, not exactly once:
 
 1. `enqueue` stores the outbox row in the caller's active business transaction.
 2. An after-commit event is only a low-latency wake-up hint.
-3. Polling selects candidates and claims due or expired rows with PostgreSQL
-   `FOR UPDATE SKIP LOCKED` and a version condition.
+3. Polling claims due or expired rows without waiting for rows held by another
+   worker: JDBC uses `FOR UPDATE SKIP LOCKED`; MP uses an advisory lock and
+   `FOR UPDATE NOWAIT` and a version condition; a lock conflict rolls back the
+   group transaction and retries that batch without the locked row. A heavily
+   contended batch can therefore require several bounded retries.
 4. Delivery runs outside the database transaction.
 5. Retry, lease recovery, and owner-conditioned updates move a row through
    `PENDING`, `PROCESSING`, `RETRY_WAIT`, `SUCCEEDED`, or `DEAD`.
@@ -47,18 +50,76 @@ in the table. Reusing the same key with different message content fails instead
 of silently accepting a conflict. `availableAt` is intentionally excluded from
 that content fingerprint.
 
+## Single-Database JDBC Store
+
+The default remains `MYBATIS_PLUS`. Select `JDBC` for a host with one ordinary
+PostgreSQL `DataSource`, such as an independent process-engine service. A host
+that does not otherwise use MP should exclude the two MP-specific transitive
+dependencies; this keeps the existing default dependency graph intact for MP hosts.
+The new store is in `0.0.2-SNAPSHOT`; build it from source or publish that distinct
+version before consuming it, rather than overwriting an existing `0.0.1` artifact:
+
+```xml
+<dependency>
+    <groupId>top.egon</groupId>
+    <artifactId>stellar-enclosure-component-transactional-outbox-starter</artifactId>
+    <version>0.0.2-SNAPSHOT</version>
+    <exclusions>
+        <exclusion>
+            <groupId>top.egon</groupId>
+            <artifactId>stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter</artifactId>
+        </exclusion>
+        <exclusion>
+            <groupId>top.egon</groupId>
+            <artifactId>stellar-enclosure-component-common-id-starter</artifactId>
+        </exclusion>
+    </exclusions>
+</dependency>
+```
+
+```yaml
+egon:
+  cola:
+    component:
+      transactional-outbox:
+        storage:
+          type: JDBC
+          data-source-bean-name: businessDataSource
+          transaction-manager-bean-name: businessTransactionManager
+          jdbc:
+            schema: egon_outbox
+          validate-schema: true
+```
+
+Bean names may be omitted when the selected data source and transaction manager
+are unambiguous. `enqueue` requires an active transaction bound to that exact
+data source; workers use separate transactions. JDBC mode never creates or
+repairs tables. Provision a fresh owned schema using the unchanged
+`db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql`
+with that schema as the migration's default schema, then enable the read-only
+schema check. For an existing legacy schema, stop its old writers and workers
+and explicitly assess the data and ownership before changing runtime mode.
+
+V1 has a globally unique technical idempotency key and no tenant column. A
+multi-tenant host must obtain the tenant from its trusted authorization context
+and use `TenantScopedOutboxKey.of(tenantId, operation, commandId)` when building
+the message. Carry the trusted tenant in the business event contract as well;
+this helper is not an authorization check. A stale worker cannot acknowledge,
+retry or dead-letter after its lease expires, even before another worker reclaims
+the row. Delivery remains at least once.
+
 ## State Machines and CQE
 
 The starter uses two independent Spring Statemachines with different owners:
 
 | Machine | Owner | What it decides | Where the committed fact lives |
 |---|---|---|---|
-| Outbox lifecycle | This starter, always enabled | Whether an outbox message may be enqueued, claimed, reclaimed, retried, completed, or dead-lettered | The MP-backed `egon_outbox.egon_cola_outbox_message` row remains authoritative |
+| Outbox lifecycle | This starter, always enabled | Whether an outbox message may be enqueued, claimed, reclaimed, retried, completed, or dead-lettered | The configured store's outbox row remains authoritative |
 | Business event | The consuming application, opt-in | Whether an already-occurred business fact may advance one registered aggregate state | The application's business row and durable event receipt, written in one transaction |
 
 The lifecycle machine has `__NEW__`, `PENDING`, `PROCESSING`, `RETRY_WAIT`,
 `SUCCEEDED`, and `DEAD` states. It owns transition decisions; the database's
-owner/version checks still decide which worker can commit. `DELIVERY_RETRYABLE`
+owner, lease and, in MP mode, version checks decide which worker can commit. `DELIVERY_RETRYABLE`
 selects `RETRY_WAIT` or `DEAD` from the attempt budget. The Store's explicit
 `SCHEDULE_RETRY` operation only schedules a retry after the Dispatcher has chosen
 that target.
@@ -376,7 +437,7 @@ prior Outbox `ddl_history` fingerprint and configure
 The new migration must still be pending to record the new topology; if already
 applied under the old topology, plan a new versioned migration rather than editing
 history. Business-table and cross-group data migrations require separate planning.
-Claims, completion, and cleanup use separate transactions per group; if a later
+MP claims, completion, and cleanup use separate transactions per group; if a later
 group fails, already-claimed messages recover after their lease expires. Direct
 `OutboxStore` completion, retry, and dead-letter calls must pass the claimed
 record's `shardSlot` in multi-group mode; old overloads remain available for a
@@ -387,7 +448,7 @@ incompatible with strict routing if its repository locks business rows using
 If legacy rows exist, do not start cutover by copying the old `V1` file. Leave
 `db/transactional-outbox/postgresql/V1__create_transactional_outbox_schema.sql`
 unchanged and keep the old table in its original schema. The old schema is an
-explicit, read-only migration source; it is not used by the runtime Store.
+explicit, read-only migration source for the MP runtime Store.
 
 For a controlled migration, stop **all** old and new producers and workers and
 wait for in-flight transactions to finish. Then set `migration-mode: true` on

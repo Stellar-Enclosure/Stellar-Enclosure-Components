@@ -3,6 +3,7 @@ package top.egon.cola.component.outbox.autoconfigure;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.core.Ordered;
 import org.springframework.util.unit.DataSize;
+import top.egon.cola.component.common.core.enums.EgonEnum;
 
 import java.net.URI;
 import java.time.Duration;
@@ -105,9 +106,23 @@ public class TransactionalOutboxProperties {
 
     public static class Storage {
 
+        private StorageType type = StorageType.MYBATIS_PLUS;
+        private final Jdbc jdbc = new Jdbc();
         private String dataSourceBeanName;
         private String transactionManagerBeanName;
         private boolean validateSchema = true;
+
+        public StorageType getType() {
+            return type;
+        }
+
+        public void setType(StorageType type) {
+            this.type = type;
+        }
+
+        public Jdbc getJdbc() {
+            return jdbc;
+        }
 
         public String getDataSourceBeanName() {
             return dataSourceBeanName;
@@ -131,6 +146,34 @@ public class TransactionalOutboxProperties {
 
         public void setValidateSchema(boolean validateSchema) {
             this.validateSchema = validateSchema;
+        }
+
+        public enum StorageType implements EgonEnum {
+            MYBATIS_PLUS(0, "MYBATIS_PLUS"),
+            JDBC(1, "JDBC");
+
+            private final int code;
+            private final String message;
+
+            StorageType(int code, String message) {
+                this.code = code;
+                this.message = message;
+            }
+
+            @Override public int getCode() { return code; }
+            @Override public String getMessage() { return message; }
+        }
+
+        public static class Jdbc {
+            private String schema = "egon_outbox";
+
+            public String getSchema() {
+                return schema;
+            }
+
+            public void setSchema(String schema) {
+                this.schema = schema;
+            }
         }
     }
 

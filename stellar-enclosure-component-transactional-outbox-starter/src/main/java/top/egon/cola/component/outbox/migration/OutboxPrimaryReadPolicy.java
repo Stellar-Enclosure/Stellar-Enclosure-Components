@@ -21,9 +21,10 @@ final class OutboxPrimaryReadPolicy {
                     + " WHERE shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL AND (message_id = ? OR idempotency_key = ?)"
                     + " ORDER BY id FOR UPDATE"),
             canonical("SELECT pg_try_advisory_xact_lock(id) FROM " + TABLE
-                    + " WHERE id = ? AND shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL FOR UPDATE SKIP LOCKED"),
+                    + " WHERE id = ? AND shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL FOR UPDATE NOWAIT"),
             canonical("SELECT " + COLUMNS + " FROM " + TABLE
-                    + " WHERE id = ? AND shard_slot = ? AND status = 'PROCESSING' AND locked_by = ? AND tenant_id = 0"
+                    + " WHERE id = ? AND shard_slot = ? AND status = 'PROCESSING' AND locked_by = ?"
+                    + " AND locked_until > clock_timestamp() AND tenant_id = 0"
                     + " AND deleted_at IS NULL FOR UPDATE"),
             canonical("SELECT script,type,version,checksum,route_fingerprint,tenant_id"
                     + " FROM egon_outbox.ddl_history ORDER BY version"),

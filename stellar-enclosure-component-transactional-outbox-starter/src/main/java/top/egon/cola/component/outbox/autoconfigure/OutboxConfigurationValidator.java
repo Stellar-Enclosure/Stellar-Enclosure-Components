@@ -41,6 +41,14 @@ public class OutboxConfigurationValidator extends BaseValidator {
     }
 
     private void validateCore(TransactionalOutboxProperties properties) {
+        if (properties.getStorage().getType() == null) {
+            throw invalid("storage.type");
+        }
+        if (properties.getStorage().getType() == TransactionalOutboxProperties.Storage.StorageType.JDBC
+                && (properties.getStorage().getJdbc().getSchema() == null
+                    || !properties.getStorage().getJdbc().getSchema().matches("[a-z_][a-z0-9_]{0,62}"))) {
+            throw invalid("storage.jdbc.schema");
+        }
         positive(properties.getPolling().getFixedDelay(), "polling.fixed-delay");
         positive(properties.getPolling().getBatchSize(), "polling.batch-size");
         positive(properties.getPolling().getConcurrency(), "polling.concurrency");

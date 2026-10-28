@@ -20,6 +20,10 @@ public class OutboxTransactionGuard {
     @Qualifier("dataSource")
     private final DataSource selectedDataSource;
 
+    public boolean usesDataSource(DataSource dataSource) {
+        return selectedDataSource == dataSource;
+    }
+
     public void requireSelectedTransaction() {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new OutboxTransactionRequiredException(

@@ -97,7 +97,7 @@ class PostgresqlOutboxRecoveryIntegrationTest extends PostgresqlOutboxTestSuppor
     void shouldRejectCompletionFromAnOldClaimToken() {
         store.enqueue(newRecord("message-1"));
         OutboxRecord oldClaim =
-                store.claimDue(1, "node-a:old-token", Duration.ofMillis(1)).getFirst();
+                store.claimDue(1, "node-a:old-token", Duration.ofSeconds(60)).getFirst();
         jdbcTemplate.update("""
                 update egon_outbox.egon_cola_outbox_message
                 set locked_until = clock_timestamp() - interval '1 second'

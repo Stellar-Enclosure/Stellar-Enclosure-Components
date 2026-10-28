@@ -14,7 +14,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.core.AliasRegistry;
 import org.springframework.statemachine.StateMachine;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleStateMachineFactory;
@@ -24,10 +23,10 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 
-@AutoConfiguration(after = {
-        EgonColaMybatisPlusAutoConfiguration.class,
-        TransactionalOutboxAutoConfiguration.class
-}, afterName = "org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration")
+@AutoConfiguration(after = TransactionalOutboxAutoConfiguration.class, afterName = {
+        "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration",
+        "org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration"
+})
 @EnableConfigurationProperties(OutboxStateMachineProperties.class)
 @ConditionalOnClass(StateMachine.class)
 @ConditionalOnBean(TransactionalOutboxProperties.class)
@@ -90,7 +89,9 @@ public class OutboxStateMachineAutoConfiguration {
                     outboxPropertiesNames[0],
                     "outboxStateMachineOutboxProperties"
             );
-            registerAliasIfAvailable(beanFactory, aliases, "egonColaMybatisPlusClock", "outboxStateMachineClock");
+            String clockName = beanFactory.containsBean("egonColaMybatisPlusClock")
+                    ? "egonColaMybatisPlusClock" : "outboxJdbcClock";
+            registerAliasIfAvailable(beanFactory, aliases, clockName, "outboxStateMachineClock");
             String objectMapperName = selectObjectMapper(beanFactory);
             if (objectMapperName != null) {
                 registerAliasIfAvailable(

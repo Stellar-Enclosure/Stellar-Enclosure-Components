@@ -33,19 +33,42 @@ abstract class PostgresqlOutboxTestSupport {
     static PlatformTransactionManager transactionManager;
     static ObjectMapper objectMapper;
     private static Path nativeRulesFile;
+    private static String ownedLocalTestUrl;
 
     @BeforeAll
     static synchronized void initializePostgresql() throws Exception {
-        Assumptions.assumeTrue(
-                Boolean.parseBoolean(System.getenv("EGON_OUTBOX_TEST_POSTGRES_ENABLED")),
-                "Set EGON_OUTBOX_TEST_POSTGRES_ENABLED=true with explicit permission to run PostgreSQL integration tests"
-        );
-        PostgreSQLContainer<?> postgresql = postgresql();
-        if (!postgresql.isRunning()) {
-            postgresql.start();
+        String localUrl = System.getProperty("egon.outbox.test.postgres.url");
+        String jdbcUrl;
+        String username;
+        String password;
+        PGSimpleDataSource physicalDataSource;
+        if (localUrl != null && !localUrl.isBlank()) {
+            if (!localUrl.matches("jdbc:postgresql://127\\.0\\.0\\.1:[0-9]{1,5}/outbox_it_[a-z0-9_]{1,40}")) {
+                throw new IllegalArgumentException("PostgreSQL tests require an explicit loopback outbox_it_ database");
+            }
+            jdbcUrl = localUrl;
+            username = System.getProperty("user.name");
+            password = "";
+            physicalDataSource = new PGSimpleDataSource();
+            physicalDataSource.setURL(jdbcUrl);
+            physicalDataSource.setUser(username);
+            Integer existing = new JdbcTemplate(physicalDataSource).queryForObject(
+                    "SELECT count(*) FROM pg_namespace WHERE nspname='egon_outbox'", Integer.class);
+            if (existing != 0 && !localUrl.equals(ownedLocalTestUrl)) {
+                throw new IllegalStateException("PostgreSQL tests require a fresh database without an outbox schema");
+            }
+            ownedLocalTestUrl = localUrl;
+        } else {
+            Assumptions.assumeTrue(Boolean.parseBoolean(System.getenv("EGON_OUTBOX_TEST_POSTGRES_ENABLED")),
+                    "Set EGON_OUTBOX_TEST_POSTGRES_ENABLED=true to run PostgreSQL container integration tests");
+            PostgreSQLContainer<?> postgresql = postgresql();
+            if (!postgresql.isRunning()) postgresql.start();
+            physicalDataSource = containerDataSource(postgresql);
+            jdbcUrl = postgresql.getJdbcUrl();
+            username = postgresql.getUsername();
+            password = postgresql.getPassword();
         }
-        new JdbcTemplate(containerDataSource(postgresql)).execute("CREATE SCHEMA IF NOT EXISTS egon_outbox");
-        PGSimpleDataSource physicalDataSource = containerDataSource(postgresql);
+        new JdbcTemplate(physicalDataSource).execute("CREATE SCHEMA IF NOT EXISTS egon_outbox");
         physicalDataSource.setCurrentSchema("egon_outbox");
         physicalJdbcTemplate = new JdbcTemplate(physicalDataSource);
 
@@ -77,9 +100,9 @@ abstract class PostgresqlOutboxTestSupport {
         properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].logical-name", "primary");
         properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].role", "PRIMARY");
         properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].driver-class-name", "org.postgresql.Driver");
-        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].jdbc-url", postgresql.getJdbcUrl());
-        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].username", postgresql.getUsername());
-        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].password", postgresql.getPassword());
+        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].jdbc-url", jdbcUrl);
+        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].username", username);
+        properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].password", password);
         properties.put("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[0]", "egon_cola_outbox_message");
         properties.put("egon.cola.component.transactional-outbox.enabled", "true");
         properties.put("egon.cola.component.transactional-outbox.node-id", "outbox-test");

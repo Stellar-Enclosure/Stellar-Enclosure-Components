@@ -149,7 +149,7 @@
           AND shard_slot = #{_outboxSlot}
           AND tenant_id = 0
           AND deleted_at IS NULL
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE NOWAIT
     </select>
 
     <update id="updateClaim">
@@ -181,6 +181,7 @@
           AND shard_slot = #{_outboxSlot}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
+          AND locked_until &gt; clock_timestamp()
           AND tenant_id = 0
           AND deleted_at IS NULL
         FOR UPDATE
@@ -204,6 +205,7 @@
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
+          AND locked_until &gt; clock_timestamp()
           AND tenant_id = 0
           AND deleted_at IS NULL
     </update>
@@ -227,6 +229,7 @@
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
+          AND locked_until &gt; clock_timestamp()
           AND tenant_id = 0
           AND deleted_at IS NULL
     </update>
@@ -249,6 +252,7 @@
           AND version = #{version}
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
+          AND locked_until &gt; clock_timestamp()
           AND tenant_id = 0
           AND deleted_at IS NULL
     </update>

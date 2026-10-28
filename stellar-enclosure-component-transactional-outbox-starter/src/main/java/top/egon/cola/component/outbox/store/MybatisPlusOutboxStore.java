@@ -35,6 +35,8 @@ import java.util.Objects;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
+import java.util.function.BiFunction;
+import java.sql.SQLException;
 
 /** MyBatis-Plus implementation of the existing public outbox storage contract. */
 @Slf4j
@@ -144,10 +146,9 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         for (int slot : rotatedSlots()) {
             int remaining = limit - result.size();
             if (remaining == 0) { break; }
-            result.addAll(inWorkerTransaction("Failed to claim due outbox messages", slot, () -> {
-                List<OutboxMessagePO> candidates = repository.selectDueCandidates(candidateScanLimit(remaining));
-                return claim(candidates, remaining, leaseOwner, leaseDuration);
-            }));
+            List<OutboxMessagePO> candidates = inWorkerTransaction("Failed to select due outbox messages", slot,
+                    () -> repository.selectDueCandidates(candidateScanLimit(remaining)));
+            result.addAll(claim(candidates, remaining, leaseOwner, leaseDuration, slot));
         }
         return List.copyOf(result);
     }
@@ -167,11 +168,9 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         for (int slot : rotatedSlots()) {
             int remaining = limit - result.size();
             if (remaining == 0) { break; }
-            result.addAll(inWorkerTransaction("Failed to claim selected outbox messages", slot, () -> {
-                List<OutboxMessagePO> candidates = repository.selectByMessageIdsCandidates(
-                        messageIds, candidateScanLimit(remaining));
-                return claim(candidates, remaining, leaseOwner, leaseDuration);
-            }));
+            List<OutboxMessagePO> candidates = inWorkerTransaction("Failed to select outbox messages", slot,
+                    () -> repository.selectByMessageIdsCandidates(messageIds, candidateScanLimit(remaining)));
+            result.addAll(claim(candidates, remaining, leaseOwner, leaseDuration, slot));
         }
         return List.copyOf(result);
     }
@@ -256,21 +255,17 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         for (int slot : rotatedSlots()) {
             int remaining = limit - total;
             if (remaining == 0) { break; }
-            total += inWorkerTransaction("Failed to clean up outbox messages", slot, () -> {
-            List<OutboxMessagePO> candidates = repository.selectExpiredSucceededCandidates(
-                    retention.toMillis(), candidateScanLimit(remaining));
-            int deleted = 0;
-            for (OutboxMessagePO candidate : candidates) {
-                if (deleted >= remaining) {
-                    break;
+            List<OutboxMessagePO> candidates = inWorkerTransaction("Failed to select completed outbox messages", slot,
+                    () -> repository.selectExpiredSucceededCandidates(retention.toMillis(), candidateScanLimit(remaining)));
+            total += inWorkerTransactionSkippingLocked("Failed to clean up outbox messages", slot, candidates, 0,
+                    (available, contention) -> {
+                int deleted = 0;
+                for (OutboxMessagePO candidate : available) {
+                    if (deleted >= remaining) break;
+                    acquireCandidate(candidate, contention);
+                    deleted += repository.deleteSucceededByIdVersion(candidate.getId(), candidate.getVersion(), retention.toMillis());
                 }
-                if (!repository.tryAcquireTransactionLock(candidate.getId())) {
-                    continue;
-                }
-                deleted += repository.deleteSucceededByIdVersion(
-                        candidate.getId(), candidate.getVersion(), retention.toMillis());
-            }
-            return deleted;
+                return deleted;
             });
         }
         return total;
@@ -320,33 +315,29 @@ public class MybatisPlusOutboxStore implements OutboxStore {
             List<OutboxMessagePO> candidates,
             int requestedLimit,
             String leaseOwner,
-            Duration leaseDuration
+            Duration leaseDuration,
+            int shardSlot
     ) {
-        java.util.ArrayList<OutboxRecord> claimed = new java.util.ArrayList<>(Math.min(requestedLimit, candidates.size()));
-        for (OutboxMessagePO candidate : candidates) {
-            if (claimed.size() >= requestedLimit) {
-                break;
+        return inWorkerTransactionSkippingLocked("Failed to claim outbox messages", shardSlot, candidates, List.of(),
+                (available, contention) -> {
+            List<OutboxRecord> claimed = new ArrayList<>(Math.min(requestedLimit, available.size()));
+            for (OutboxMessagePO candidate : available) {
+                if (claimed.size() >= requestedLimit) break;
+                acquireCandidate(candidate, contention);
+                OutboxLifecycleSignalEnum signal = candidate.getStatus() == OutboxStatus.PROCESSING
+                        ? OutboxLifecycleSignalEnum.RECLAIM : OutboxLifecycleSignalEnum.CLAIM;
+                OutboxStatus target = lifecycle.evaluate(candidate.getStatus().getMessage(), signal,
+                        candidate.getAttemptCount(), candidate.getMaxAttempts());
+                int changed = repository.updateClaim(candidate.getId(), candidate.getVersion(),
+                        candidate.getStatus(), target, leaseOwner, leaseDuration.toMillis(), clock.instant(),
+                        TECHNICAL_USER_ID);
+                if (changed == 0) continue;
+                OutboxMessagePO updated = repository.selectProcessingForUpdate(candidate.getId(), leaseOwner);
+                if (updated == null) throw new OutboxStorageException("Claimed outbox message could not be reloaded");
+                claimed.add(toRecord(updated));
             }
-            if (!repository.tryAcquireTransactionLock(candidate.getId())) {
-                continue;
-            }
-            OutboxLifecycleSignalEnum signal = candidate.getStatus() == OutboxStatus.PROCESSING
-                    ? OutboxLifecycleSignalEnum.RECLAIM : OutboxLifecycleSignalEnum.CLAIM;
-            OutboxStatus target = lifecycle.evaluate(candidate.getStatus().getMessage(), signal,
-                    candidate.getAttemptCount(), candidate.getMaxAttempts());
-            int changed = repository.updateClaim(candidate.getId(), candidate.getVersion(),
-                    candidate.getStatus(), target, leaseOwner, leaseDuration.toMillis(), clock.instant(),
-                    TECHNICAL_USER_ID);
-            if (changed == 0) {
-                continue;
-            }
-            OutboxMessagePO updated = repository.selectProcessingForUpdate(candidate.getId(), leaseOwner);
-            if (updated == null) {
-                throw new OutboxStorageException("Claimed outbox message could not be reloaded");
-            }
-            claimed.add(toRecord(updated));
-        }
-        return List.copyOf(claimed);
+            return List.copyOf(claimed);
+        });
     }
 
     private int candidateScanLimit(int requestedLimit) {
@@ -387,6 +378,56 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         } catch (DataAccessException failure) {
             throw storageFailure(publicMessage, failure);
         }
+    }
+
+    /** A NOWAIT error aborts PostgreSQL's transaction, so retry the entire batch after excluding that row. */
+    private <T> T inWorkerTransactionSkippingLocked(String publicMessage, int shardSlot,
+            List<OutboxMessagePO> candidates, T empty, BiFunction<List<OutboxMessagePO>, LockContention, T> operation) {
+        List<OutboxMessagePO> remaining = new ArrayList<>(candidates);
+        while (!remaining.isEmpty()) {
+            LockContention contention = new LockContention();
+            try {
+                return inWorkerTransaction(publicMessage, shardSlot, () -> operation.apply(remaining, contention));
+            } catch (RuntimeException failure) {
+                if (!contention.matches(failure)) throw failure;
+                remaining.removeIf(candidate -> candidate.getId().equals(contention.id));
+            }
+        }
+        return empty;
+    }
+
+    private void acquireCandidate(OutboxMessagePO candidate, LockContention contention) {
+        try {
+            if (repository.tryAcquireTransactionLock(candidate.getId())) return;
+            OutboxStorageException blocked = new OutboxStorageException("Outbox row is already claimed");
+            contention.record(candidate.getId(), blocked);
+            throw blocked;
+        } catch (RuntimeException failure) {
+            if (isLockUnavailable(failure)) contention.record(candidate.getId(), failure);
+            throw failure;
+        }
+    }
+
+    private static final class LockContention {
+        private Long id;
+        private RuntimeException expected;
+
+        private void record(Long id, RuntimeException failure) {
+            this.id = id;
+            this.expected = failure;
+        }
+
+        private boolean matches(RuntimeException failure) {
+            return id != null && expected != null && (failure == expected || failure.getCause() == expected);
+        }
+    }
+
+    private static boolean isLockUnavailable(Throwable failure) {
+        Throwable cause = failure;
+        for (int depth = 0; cause != null && depth < 32; depth++, cause = cause.getCause()) {
+            if (cause instanceof SQLException sql && "55P03".equals(sql.getSQLState())) return true;
+        }
+        return false;
     }
 
     private OutboxRecord toRecord(OutboxMessagePO message) {

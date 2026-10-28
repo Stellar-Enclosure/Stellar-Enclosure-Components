@@ -12,6 +12,7 @@
     </parent>
 
     <artifactId>stellar-enclosure-component-transactional-outbox-starter</artifactId>
+    <version>0.0.2-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>stellar-enclosure-component-transactional-outbox-starter</name>
     <description>Spring Boot starter for Stellar Enclosure transactional outbox.</description>
@@ -20,21 +21,33 @@
         <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>top.egon</groupId>
+                <artifactId>stellar-enclosure-components-bom</artifactId>
+                <version>${project.parent.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <dependency>
             <groupId>top.egon</groupId>
             <artifactId>stellar-enclosure-component-common-id-starter</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>top.egon</groupId>
             <artifactId>stellar-enclosure-component-common-core</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>top.egon</groupId>
             <artifactId>stellar-enclosure-component-common-mybatis-plus-sharding-jdbc-ext-spring-boot-starter</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.statemachine</groupId>

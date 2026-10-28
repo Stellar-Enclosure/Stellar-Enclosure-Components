@@ -93,6 +93,7 @@ class ComponentContractGovernanceTest {
 
     private static final List<String> VALIDATOR_TYPES = List.of(
             OUTBOX_PACKAGE + ".store.OutboxSchemaValidator",
+            OUTBOX_PACKAGE + ".store.JdbcOutboxSchemaValidator",
             OUTBOX_PACKAGE + ".persistence.OutboxSchemaMetadataValidator",
             OUTBOX_PACKAGE + ".aop.TransactionalMessageMethodValidator",
             OUTBOX_PACKAGE + ".autoconfigure.OutboxConfigurationValidator",
@@ -225,7 +226,7 @@ class ComponentContractGovernanceTest {
     void handwrittenEnumsImplementTheCommonEnumContract() throws Exception {
         List<String> headers = enumHeaders(MAIN_SOURCES);
 
-        assertThat(headers).as("本模块手写enum清单").hasSize(4);
+        assertThat(headers).as("本模块手写enum清单").hasSize(5);
         List<String> missingContract = new ArrayList<>();
         for (String header : headers) {
             if (!header.contains(EgonEnum.class.getSimpleName())
@@ -242,6 +243,7 @@ class ComponentContractGovernanceTest {
         assertThat(OutboxStatus.values()).extracting(Enum::name).containsExactly(
                 "PENDING", "PROCESSING", "RETRY_WAIT", "SUCCEEDED", "DEAD");
         assertThat(codes(OutboxStatus.class)).containsExactly(0, 1, 2, 3, 4);
+        assertThat(codes(TransactionalOutboxProperties.Storage.StorageType.class)).containsExactly(0, 1);
         assertThat(invoke(OutboxStatus.class, OutboxStatus.DEAD, "getMessage"))
                 .as("REQ-004 message 使用原常量名").isEqualTo("DEAD");
         assertThat(DeliveryResult.Kind.values()).extracting(Enum::name)
@@ -337,7 +339,11 @@ class ComponentContractGovernanceTest {
                 "top/egon/cola/component/outbox/serialization/JacksonOutboxMessageSerializer.java"));
         assertThat(codec).as("codec 仍按原 Jackson 协议编解码载荷")
                 .contains("objectMapper.writeValueAsString");
-        assertThat(validatorText())
+        String jdbcSchemaProbe = read(MAIN_SOURCES.resolve(
+                "top/egon/cola/component/outbox/store/JdbcOutboxSchemaValidator.java"));
+        assertThat(jdbcSchemaProbe).contains("pg_catalog.pg_index", "information_schema.columns")
+                .doesNotContain("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "ALTER ", "DROP ");
+        assertThat(validatorText().replace(jdbcSchemaProbe, ""))
                 .as("输入失败不得触发 DAO/缓存/MQ 副作用")
                 .doesNotContain("JdbcTemplate")
                 .doesNotContain("RabbitTemplate")
