@@ -16,7 +16,7 @@ The component owns configuration validation, ADK graph compilation, an immutable
 | Spring Boot | 4.1.2 |
 | Spring AI | 2.0.2 |
 | Google ADK | 1.13.0 |
-| Session storage | Session service of the ADK `InMemoryRunner`, process-local and in-memory |
+| Session storage | `AgentFlowService` uses the ADK `InMemoryRunner`; a host may supply an ADK `BaseSessionService` to `AgentFlowSessionRunner` |
 
 Spring AI provider starters and provider credentials are deliberately not included. A host supplies one or more named `ChatModel` beans.
 
@@ -130,6 +130,8 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
 
 `execute` makes a non-streaming model call and returns an immutable `List<Event>` in ADK emission order. `executeStream` requests ADK SSE mode and requires a host model that supports `ChatModel.stream`; it does not silently retry an unsupported stream as another model call. It is lazy: no session lookup, guard acquisition, or model call happens until subscription, and every subscription represents one execution.
 
+Hosts that own a different ADK `BaseSessionService` may construct `AgentFlowSessionRunner(rootAgent, appName, sessionService, plugins)` directly. It uses the same cancellation and trace propagation as `AgentFlowInMemoryRunner`; the host owns session authorization, concurrency, persistence and Runner lifecycle. Its artifact and memory services remain in-memory defaults. This constructor does not change the default `AgentFlowService` registry or install a database adapter.
+
 Streamed text events are partial deltas followed by a complete final response. Consumers can append the partial deltas, then treat the final response as a replacement snapshot rather than appending it again. A child Agent's final response does not by itself mean the whole workflow has completed. The adapter preserves reported usage, including a usage-only tail, and leaves counters absent when the provider's `Usage` reports null; it cannot distinguish an unknown count that the provider has already converted to zero.
 
 When a named `ChatModel` supplies `ToolCallback` entries in its default `ToolCallingChatOptions`, the starter snapshots and registers them as native ADK tools while the flow is built. The adapter requires a native ADK tool context internally, but removes the reserved `adk_tool_context` entry before invoking the host callback; its string result is returned as `{"result": "..."}`. Spring AI MCP callbacks can forward other configured tool-context values as remote metadata, so hosts must control those values. The native ADK loop owns tool execution and honors `returnDirect`. The host must authorize and govern each tool; changing the model's callback list requires rebuilding the flow.
@@ -145,7 +147,7 @@ When a named `ChatModel` supplies `ToolCallback` entries in its default `ToolCal
 - The adapter requests model frames with bounded demand and fails explicitly after 100,000 response frames or 4,000,000 accumulated UTF-16 text/tool-argument code units. ADK's internal step cache and provider buffers may still retain data while a downstream consumer is slow; this is not end-to-end backpressure or a total memory bound. Missing or duplicate streamed tool-call IDs fail before the tool is executed.
 - A custom `InMemoryRunner` subclass must implement the overload accepting `RunConfig` to customize streaming execution; the three-argument override remains in use for synchronous `execute`.
 - There is no retry in the component (`no retry`); the host owns retry policy and idempotency decisions.
-- Sessions are process-local and in-memory. They are not durable, replicated, or recoverable after process restart. A timeout or cancel does not roll back events already accepted by ADK.
+- Default `AgentFlowService` sessions are process-local and in-memory. They are not durable, replicated, or recoverable after process restart; a host-supplied session service defines its own storage guarantees. A timeout or cancel does not roll back events already accepted by ADK.
 - `close` changes the guard to closing, rejects new operations, waits up to `shutdown-timeout`, then attempts every Runner close and cancels remaining starter-managed model subscriptions. It is idempotent and does not claim graceful completion after the bound expires.
 
 ## Boundaries and logging

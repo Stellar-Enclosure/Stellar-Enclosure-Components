@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 /**
  * Carries one cancellation signal through ADK's invocation context. ADK 1.13 caches each
@@ -40,18 +41,7 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
             ContextKey.named("agent-flow-invocation-cancellation");
     private static final ContextKey<TraceContext> TRACE_KEY = ContextKey.named("agent-flow-trace-context");
 
-    private final Object monitor = new Object();
-    private final Set<InvocationCancellation> active = ConcurrentHashMap.newKeySet();
-    private boolean closing;
-    private final Completable closeOperation = Completable.defer(() -> {
-        List<InvocationCancellation> pending;
-        synchronized (monitor) {
-            closing = true;
-            pending = List.copyOf(active);
-        }
-        pending.forEach(InvocationCancellation::cancel);
-        return super.close();
-    }).cache();
+    private final RunnerLifecycle lifecycle = new RunnerLifecycle(() -> super.close());
 
     public AgentFlowInMemoryRunner(BaseAgent agent, String appName) {
         this(agent, appName, List.of());
@@ -62,7 +52,7 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
         super(agent, appName, withCancellationPlugin(plugins));
     }
 
-    private static List<Plugin> withCancellationPlugin(List<Plugin> plugins) {
+    static List<Plugin> withCancellationPlugin(List<Plugin> plugins) {
         List<Plugin> all = new ArrayList<>();
         all.add(new CancellationPlugin());
         all.addAll(List.copyOf(plugins));
@@ -72,47 +62,74 @@ public class AgentFlowInMemoryRunner extends InMemoryRunner {
     @Override
     public Flowable<Event> runAsync(String userId, String sessionId, Content message, RunConfig config,
                                     Map<String, Object> stateDelta) {
-        return Flowable.defer(() -> {
-            Context context = Context.current().with(TRACE_KEY, TraceContext.capture());
-            try (Scope ignored = context.makeCurrent()) {
-                return super.runAsync(userId, sessionId, message, config, stateDelta)
-                        .compose(Tracing.withContext(context));
-            }
-        });
+        return lifecycle.runAsync(() -> super.runAsync(userId, sessionId, message, config, stateDelta));
     }
 
     @Override
     protected Flowable<Event> runAsyncImpl(Session session, Content message, RunConfig config,
                                            Map<String, Object> stateDelta) {
-        return Flowable.defer(() -> {
-            TraceContext captured = Context.current().get(TRACE_KEY);
-            InvocationCancellation cancellation = new InvocationCancellation(
-                    captured == null ? TraceContext.capture() : captured);
-            synchronized (monitor) {
-                if (closing) {
-                    return Flowable.error(new IllegalStateException("Agent Flow runner is closing"));
-                }
-                active.add(cancellation);
-            }
-            Context context = Context.current().with(CANCELLATION_KEY, cancellation);
-            try (Scope ignored = context.makeCurrent()) {
-                return super.runAsyncImpl(session, message, config, stateDelta)
-                        .compose(Tracing.withContext(context))
-                        .doFinally(() -> {
-                            cancellation.cancel();
-                            active.remove(cancellation);
-                        });
-            } catch (RuntimeException failure) {
-                active.remove(cancellation);
-                cancellation.cancel();
-                throw failure;
-            }
-        });
+        return lifecycle.runAsyncImpl(() -> super.runAsyncImpl(session, message, config, stateDelta));
     }
 
     @Override
     public Completable close() {
-        return closeOperation;
+        return lifecycle.close();
+    }
+
+    /** Shared by the native in-memory runner and the runner with a host-provided session service. */
+    static final class RunnerLifecycle {
+        private final Object monitor = new Object();
+        private final Set<InvocationCancellation> active = ConcurrentHashMap.newKeySet();
+        private final Completable closeOperation;
+        private boolean closing;
+
+        RunnerLifecycle(Supplier<Completable> parentClose) {
+            closeOperation = Completable.defer(() -> {
+                List<InvocationCancellation> pending;
+                synchronized (monitor) {
+                    closing = true;
+                    pending = List.copyOf(active);
+                }
+                pending.forEach(InvocationCancellation::cancel);
+                return parentClose.get();
+            }).cache();
+        }
+
+        Flowable<Event> runAsync(Supplier<Flowable<Event>> invocation) {
+            return Flowable.defer(() -> {
+                Context context = Context.current().with(TRACE_KEY, TraceContext.capture());
+                try (Scope ignored = context.makeCurrent()) {
+                    return invocation.get().compose(Tracing.withContext(context));
+                }
+            });
+        }
+
+        Flowable<Event> runAsyncImpl(Supplier<Flowable<Event>> invocation) {
+            return Flowable.defer(() -> {
+                TraceContext captured = Context.current().get(TRACE_KEY);
+                InvocationCancellation cancellation = new InvocationCancellation(
+                        captured == null ? TraceContext.capture() : captured);
+                synchronized (monitor) {
+                    if (closing) {
+                        return Flowable.error(new IllegalStateException("Agent Flow runner is closing"));
+                    }
+                    active.add(cancellation);
+                }
+                Context context = Context.current().with(CANCELLATION_KEY, cancellation);
+                try (Scope ignored = context.makeCurrent()) {
+                    return invocation.get().compose(Tracing.withContext(context)).doFinally(() -> {
+                        cancellation.cancel();
+                        active.remove(cancellation);
+                    });
+                } catch (RuntimeException failure) {
+                    active.remove(cancellation);
+                    cancellation.cancel();
+                    throw failure;
+                }
+            });
+        }
+
+        Completable close() { return closeOperation; }
     }
 
     static InvocationCancellation currentCancellation() {

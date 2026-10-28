@@ -16,7 +16,7 @@
 | Spring Boot | 4.1.2 |
 | Spring AI | 2.0.2 |
 | Google ADK | 1.13.0 |
-| Session 存储 | ADK `InMemoryRunner` 自带的 session service，进程内、in-memory |
+| Session 存储 | `AgentFlowService` 使用 ADK `InMemoryRunner`；宿主也可向 `AgentFlowSessionRunner` 提供 ADK `BaseSessionService` |
 
 组件不会带入 Spring AI provider starter 或 provider 凭据。宿主需要提供一个或多个具名 `ChatModel` Bean。
 
@@ -130,6 +130,8 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
 
 `execute` 使用非流式模型调用，并按 ADK 发出顺序返回不可变的 `List<Event>`。`executeStream` 请求 ADK SSE 模式，要求宿主模型支持 `ChatModel.stream`；不支持时不会静默重试成另一次模型调用。它是惰性的：订阅之前不会查询 Session、获取 guard 或调用模型，每次订阅都代表一次执行。
 
+拥有其他 ADK `BaseSessionService` 的宿主可以直接构造 `AgentFlowSessionRunner(rootAgent, appName, sessionService, plugins)`。它复用 `AgentFlowInMemoryRunner` 的取消与追踪传播，Session 授权、并发、持久化和 Runner 生命周期由宿主负责；Artifact 与 Memory 仍使用内存默认实现。该构造入口不会改变默认 `AgentFlowService` Registry，也不会自动安装数据库适配器。
+
 流式文本先发出 partial 增量，再发出完整 final 响应。消费者可以追加 partial 增量，随后将 final 视为替换快照，而不是再次追加。子 Agent 的 final 不代表整个工作流已结束。适配器保留已报告的 usage（包括只有 usage 的尾帧）；provider 的 `Usage` 返回 null 时会保留缺失，但若 provider 已把未知计数转换为零，组件无法区分。
 
 当具名 `ChatModel` 的默认 `ToolCallingChatOptions` 包含 `ToolCallback` 时，starter 在构建 Flow 时将这些回调快照并注册为 ADK 原生工具。适配器在内部要求原生 ADK 工具上下文，但调用宿主回调前会移除保留的 `adk_tool_context` 条目；字符串结果以 `{"result": "..."}` 返回。Spring AI MCP 回调可能将其他配置的工具上下文值作为远程元数据，宿主必须控制这些值。工具循环由 ADK 执行，并保留 `returnDirect` 语义。宿主仍需为每个工具执行授权与治理；修改回调列表后需要重新构建 Flow。
@@ -145,7 +147,7 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
 - 适配器有界地请求模型帧；累计超过 100,000 帧或 4,000,000 个文本/工具参数 UTF-16 代码单元时明确失败。ADK 内部步骤缓存和 provider 缓冲仍可能在下游消费缓慢时保留数据，这不是端到端背压或总内存上限。流式工具调用 ID 缺失或重复时，在执行工具前失败。
 - 自定义 `InMemoryRunner` 子类需要实现接受 `RunConfig` 的重载才能自定义流式执行；同步 `execute` 仍使用原来的三个参数重载。
 - 组件没有自动重试（`no retry`），重试策略和幂等决策由宿主负责。
-- Session 是进程内的 in-memory 状态，不持久化、不复制，进程重启后不能恢复。timeout 或 cancel 不会回滚 ADK 已接受的事件。
+- 默认 `AgentFlowService` 的 Session 是进程内 in-memory 状态，不持久化、不复制，进程重启后不能恢复；宿主提供的 session service 自行定义存储保证。timeout 或 cancel 不会回滚 ADK 已接受的事件。
 - `close` 把 guard 切换到 closing，拒绝新操作，在 `shutdown-timeout` 内等待，然后尝试关闭全部 Runner，并取消仍在运行的 starter 模型订阅。它是幂等的，超时后不宣称优雅完成。
 
 ## 边界与日志
