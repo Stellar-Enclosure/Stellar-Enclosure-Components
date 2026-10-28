@@ -10,7 +10,10 @@ public enum CodegenProfileEnum {
 
     LIGHT("light"),
     WEB("web"),
-    SERVICE("service");
+    SERVICE("service"),
+    LIGHT_OPEN("light-open"),
+    WEB_OPEN("web-open"),
+    SERVICE_OPEN("service-open");
 
     private final String code;
 
@@ -24,7 +27,7 @@ public enum CodegenProfileEnum {
     }
 
     /**
-     * Accepts only the documented lower-case codes. Agent, open and traditional profiles are rejected.
+     * Accepts only the documented lower-case codes. Agent and traditional profiles are rejected.
      *
      * @param value external project type
      * @return matching profile
@@ -44,5 +47,13 @@ public enum CodegenProfileEnum {
 
     public boolean allowsController() {
         return this == LIGHT || this == WEB;
+    }
+
+    public boolean isOpen() {
+        return this == LIGHT_OPEN || this == WEB_OPEN || this == SERVICE_OPEN;
+    }
+
+    public boolean isLight() {
+        return this == LIGHT || this == LIGHT_OPEN;
     }
 }

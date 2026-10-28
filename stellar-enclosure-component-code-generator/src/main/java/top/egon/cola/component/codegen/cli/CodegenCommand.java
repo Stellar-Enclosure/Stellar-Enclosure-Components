@@ -119,7 +119,7 @@ public class CodegenCommand {
         body.put("engine", "freemarker");
         body.put("engineVersion", "2.3.35");
         body.put("templateSetDigest", templates.getTemplateSetDigest());
-        body.put("profiles", List.of("light", "web", "service"));
+        body.put("profiles", List.of("light", "web", "service", "light-open", "web-open", "service-open"));
         List<String> artifacts = new ArrayList<>(List.of("po", "dao", "mapper-xml", "repo",
                 "domain-model", "domain-query", "command", "query", "result", "converter",
                 "domain-service", "domain-impl", "manage", "manage-impl", "controller", "event"));

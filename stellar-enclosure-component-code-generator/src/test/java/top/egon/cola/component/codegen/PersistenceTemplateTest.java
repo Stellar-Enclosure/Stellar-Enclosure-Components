@@ -51,8 +51,9 @@ class PersistenceTemplateTest {
     }
 
     @Test
-    void threeProfilesRenderPersistenceAndJavaCompiles(@TempDir Path output) throws Exception {
-        for (CodegenProfileEnum profile : List.of(CodegenProfileEnum.LIGHT, CodegenProfileEnum.WEB, CodegenProfileEnum.SERVICE)) {
+    void nativeAndOpenProfilesRenderPersistenceAndJavaCompiles(@TempDir Path output) throws Exception {
+        for (CodegenProfileEnum profile : List.of(CodegenProfileEnum.LIGHT, CodegenProfileEnum.WEB, CodegenProfileEnum.SERVICE,
+                CodegenProfileEnum.LIGHT_OPEN, CodegenProfileEnum.WEB_OPEN, CodegenProfileEnum.SERVICE_OPEN)) {
             CodegenConfigBO config = config(profile, List.of("po", "dao", "mapper-xml", "repo"));
             assertTrue(scope.validate(config, orders).isEmpty(), profile.code());
             Map<String, String> rendered = render(config);
@@ -81,7 +82,7 @@ class PersistenceTemplateTest {
             }
             assertTrue(rendered.get("po").contains("extends EgonModel<OrdersPO>"));
             assertFalse(rendered.get("po").contains("private Long id"));
-            if (profile == CodegenProfileEnum.LIGHT) {
+            if (profile.isLight()) {
                 assertTrue(path(config, "po").startsWith("src/main/java/"));
             } else {
                 assertTrue(path(config, "po").startsWith("order-service-infrastructure/"));
@@ -91,6 +92,10 @@ class PersistenceTemplateTest {
         assertFalse(ProjectLayoutStrategy.resolve(CodegenProfileEnum.SERVICE).allows("controller"));
         assertTrue(ProjectLayoutStrategy.resolve(CodegenProfileEnum.WEB).allows("controller"));
         compile(render(config(CodegenProfileEnum.LIGHT, List.of("po", "dao", "repo"))), output);
+        for (CodegenProfileEnum open : List.of(CodegenProfileEnum.LIGHT_OPEN, CodegenProfileEnum.WEB_OPEN, CodegenProfileEnum.SERVICE_OPEN)) {
+            assertFalse(ProjectLayoutStrategy.resolve(open).allows("controller"));
+            compile(render(config(open, List.of("po", "dao", "repo"))), output.resolve(open.code()));
+        }
         assertFalse(Files.exists(Path.of("target", "codegen-persistence-no-write")));
     }
 
@@ -230,7 +235,7 @@ class PersistenceTemplateTest {
                 .outputRoot("target/codegen-persistence-no-write")
                 .artifacts(new ArrayList<>(artifacts))
                 .tables(new ArrayList<>(List.of("orders")));
-        if (profile != CodegenProfileEnum.LIGHT) {
+        if (!profile.isLight()) {
             builder.roots(new LinkedHashMap<>(Map.of(
                     "infrastructure", "order-service-infrastructure",
                     "domain", "order-service-domain",

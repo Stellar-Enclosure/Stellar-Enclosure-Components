@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import top.egon.cola.component.codegen.model.CodegenConfigBO;
 import top.egon.cola.component.codegen.model.CodegenPlanBO;
 import top.egon.cola.component.codegen.model.CodegenProfileEnum;
+import top.egon.cola.component.codegen.profile.ProjectLayoutStrategy;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 
 import javax.lang.model.SourceVersion;
@@ -145,6 +146,10 @@ public class CodegenConfigValidator {
             diagnostics.add(diagnostic(UNSUPPORTED_ARTIFACT, "/artifacts",
                     "service profile does not generate controller"));
         }
+        if (config.getProfile() != null && config.getProfile().isOpen()
+                && !ProjectLayoutStrategy.PERSISTENCE.containsAll(seen)) {
+            diagnostics.add(diagnostic(UNSUPPORTED_ARTIFACT, "/artifacts", "open profiles currently support persistence artifacts only"));
+        }
         diagnostics.addAll(checkEvents(config, seen));
         diagnostics.addAll(checkInput(config, seen));
         diagnostics.addAll(checkRoots(config, seen));
@@ -179,7 +184,7 @@ public class CodegenConfigValidator {
         if (!artifacts.contains("command") && !artifacts.contains("event")) {
             diagnostics.add(diagnostic(CONFIG_REQUIRED, "/artifacts", "event generation requires the event or command artifact"));
         }
-        if (config.getProfile() != CodegenProfileEnum.LIGHT
+        if (config.getProfile() != null && !config.getProfile().isLight()
                 && (config.getRoots() == null || blank(config.getRoots().get("adapter")))) {
             diagnostics.add(diagnostic(CONFIG_REQUIRED, "/modulePaths/adapter", "event generation requires an adapter module path"));
         }
@@ -384,7 +389,7 @@ public class CodegenConfigValidator {
     }
 
     private static List<CodegenPlanBO.DiagnosticBO> checkRoots(CodegenConfigBO config, Set<String> artifacts) {
-        if (config.getProfile() != CodegenProfileEnum.WEB && config.getProfile() != CodegenProfileEnum.SERVICE) {
+        if (config.getProfile() == null || config.getProfile().isLight()) {
             return List.of();
         }
         Map<String, String> roots = config.getRoots();

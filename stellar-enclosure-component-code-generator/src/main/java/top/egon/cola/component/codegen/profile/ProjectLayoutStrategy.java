@@ -35,7 +35,19 @@ public interface ProjectLayoutStrategy {
             case LIGHT -> LightLayout.INSTANCE;
             case WEB -> WebLayout.INSTANCE;
             case SERVICE -> ServiceLayout.INSTANCE;
+            case LIGHT_OPEN -> new OpenLayout(profile, LightLayout.INSTANCE);
+            case WEB_OPEN -> new OpenLayout(profile, WebLayout.INSTANCE);
+            case SERVICE_OPEN -> new OpenLayout(profile, ServiceLayout.INSTANCE);
         };
+    }
+
+    /** Open projects share persistence layout but do not provide the native security contract. */
+    record OpenLayout(CodegenProfileEnum profile, ProjectLayoutStrategy delegate) implements ProjectLayoutStrategy {
+        @Override public boolean allows(String artifact) { return PERSISTENCE.contains(artifact); }
+        @Override public String packageName(CodegenConfigBO config, String artifact) { return delegate.packageName(config, artifact); }
+        @Override public String relativePath(CodegenConfigBO config, String artifact, String fileName) {
+            return delegate.relativePath(config, artifact, fileName);
+        }
     }
 
     @Slf4j

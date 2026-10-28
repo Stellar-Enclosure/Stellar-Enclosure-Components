@@ -64,6 +64,30 @@ class CodegenCommandTest {
     }
 
     @Test
+    void openProfilesGeneratePersistenceButRejectNativeCrud(@TempDir Path root) throws Exception {
+        for (String profile : List.of("light-open", "web-open", "service-open")) {
+            Path project = root.resolve(profile);
+            Files.createDirectories(project);
+            Path config = writeConfig(project);
+            ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+            document.put("projectType", profile);
+            mapper.writeValue(config.toFile(), document);
+            Invocation plan = invoke("plan", "--config", config.toString());
+            assertEquals(0, plan.code(), plan.err());
+            String planId = mapper.readTree(plan.out()).path("planId").asText();
+            Invocation apply = invoke("apply", "--config", config.toString(), "--plan", planId);
+            assertEquals(0, apply.code(), apply.err());
+            String module = profile.equals("light-open") ? "" : "order-service-infrastructure/";
+            assertTrue(Files.exists(project.resolve(module + "src/main/java/com/example/order/infrastructure/order/po/OrdersPO.java")));
+            document.putArray("artifacts").add("backend-crud");
+            mapper.writeValue(config.toFile(), document);
+            Invocation rejected = invoke("plan", "--config", config.toString());
+            assertEquals(2, rejected.code());
+            assertTrue(rejected.err().contains("UNSUPPORTED_ARTIFACT"));
+        }
+    }
+
+    @Test
     void alterInputStopsPlanningForAgentOwnedChange(@TempDir Path root) throws Exception {
         Path config = writeConfig(root);
         Path schema = root.resolve("schema.sql");
