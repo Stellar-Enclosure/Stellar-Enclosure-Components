@@ -1,5 +1,6 @@
 package top.egon.cola.component.agentflow.execution;
 
+import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.adk.sessions.Session;
@@ -109,11 +110,15 @@ public class DefaultAgentFlowService implements AgentFlowService, AutoCloseable 
 
     @Override
     public List<Event> execute(AgentFlowExecutionCommand command) {
-        return List.copyOf(executeStream(command).toList().blockingGet());
+        return List.copyOf(execute(command, RunConfig.StreamingMode.NONE).toList().blockingGet());
     }
 
     @Override
     public Flowable<Event> executeStream(AgentFlowExecutionCommand command) {
+        return execute(command, RunConfig.StreamingMode.SSE);
+    }
+
+    private Flowable<Event> execute(AgentFlowExecutionCommand command, RunConfig.StreamingMode mode) {
         return Flowable.defer(() -> {
             try {
                 validationUtils.validate(command);
@@ -124,9 +129,16 @@ public class DefaultAgentFlowService implements AgentFlowService, AutoCloseable 
                 try {
                     requireSession(runtime.runner(), command.flowId(), command.userId(), command.sessionId());
                     AtomicInteger eventCount = new AtomicInteger();
-                    return runtime.runner().runAsync(command.userId(), command.sessionId(), command.content())
+                    RunConfig runConfig = RunConfig.builder().setStreamingMode(mode).build();
+                    Flowable<Long> deadline = Flowable.timer(properties.executionTimeout().toMillis(),
+                                    TimeUnit.MILLISECONDS)
+                            .flatMap(ignored -> Flowable.error(new TimeoutException("Agent Flow deadline exceeded")));
+                    Flowable<Event> execution = mode == RunConfig.StreamingMode.NONE
+                            ? runtime.runner().runAsync(command.userId(), command.sessionId(), command.content())
+                            : runtime.runner().runAsync(command.userId(), command.sessionId(), command.content(), runConfig);
+                    return execution
                             .doOnNext(event -> eventCount.incrementAndGet())
-                            .timeout(properties.executionTimeout().toMillis(), TimeUnit.MILLISECONDS)
+                            .takeUntil(deadline)
                             .doOnComplete(() -> log.debug(
                                     "Agent Flow execution stage=EXECUTION outcome=SUCCESS eventCount={}",
                                     eventCount.get()))

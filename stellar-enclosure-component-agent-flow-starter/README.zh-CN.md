@@ -6,7 +6,7 @@
 
 `stellar-enclosure-component-agent-flow-starter` 是一个扁平化的 Spring Boot 组件，用于按配置编译和运行 Agent Flow 树。它把宿主提供的 Spring AI `ChatModel` 与 Google ADK 的 `LlmAgent`、`SequentialAgent`、`ParallelAgent`、`LoopAgent` 和 `InMemoryRunner` 组合起来，不引入参考项目的 DDD 包结构。
 
-组件负责配置校验、ADK 图编译、不可变运行时 Registry、进程内 Session、按 tuple 的执行互斥、同步事件收集、流式 cancel 和有界 close。宿主应用负责 provider 实现、凭据、工具、MCP、HTTP、认证和持久化决策。
+组件负责配置校验、ADK 图编译、不可变运行时 Registry、进程内 Session、按 tuple 的执行互斥、同步事件收集、流式 cancel 和有界 close。宿主应用负责 provider 实现、凭据、工具授权、MCP、HTTP、认证和持久化决策。
 
 ## 版本矩阵
 
@@ -15,7 +15,7 @@
 | Java | 25 |
 | Spring Boot | 4.1.2 |
 | Spring AI | 2.0.2 |
-| Google ADK | 0.7.0 |
+| Google ADK | 1.13.0 |
 | Session 存储 | ADK `InMemoryRunner` 自带的 session service，进程内、in-memory |
 
 组件不会带入 Spring AI provider starter 或 provider 凭据。宿主需要提供一个或多个具名 `ChatModel` Bean。
@@ -128,17 +128,24 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
         "research-flow", "tenant-a:user-42", session.sessionId()));
 ```
 
-`execute` 复用流式管线，返回保持 ADK emission 顺序的不可变 `List<Event>`。`executeStream` 是惰性的：返回时不会查询 Session、获取 guard 或调用模型，只有订阅时才开始；每次订阅都代表一次执行。
+`execute` 使用非流式模型调用，并按 ADK 发出顺序返回不可变的 `List<Event>`。`executeStream` 请求 ADK SSE 模式，要求宿主模型支持 `ChatModel.stream`；不支持时不会静默重试成另一次模型调用。它是惰性的：订阅之前不会查询 Session、获取 guard 或调用模型，每次订阅都代表一次执行。
+
+流式文本先发出 partial 增量，再发出完整 final 响应。消费者可以追加 partial 增量，随后将 final 视为替换快照，而不是再次追加。子 Agent 的 final 不代表整个工作流已结束。适配器保留已报告的 usage（包括只有 usage 的尾帧）；provider 的 `Usage` 返回 null 时会保留缺失，但若 provider 已把未知计数转换为零，组件无法区分。
+
+当具名 `ChatModel` 的默认 `ToolCallingChatOptions` 包含 `ToolCallback` 时，starter 在构建 Flow 时将这些回调快照并注册为 ADK 原生工具。适配器在内部要求原生 ADK 工具上下文，但调用宿主回调前会移除保留的 `adk_tool_context` 条目；字符串结果以 `{"result": "..."}` 返回。Spring AI MCP 回调可能将其他配置的工具上下文值作为远程元数据，宿主必须控制这些值。工具循环由 ADK 执行，并保留 `returnDirect` 语义。宿主仍需为每个工具执行授权与治理；修改回调列表后需要重新构建 Flow。
 
 ## 执行与生命周期语义
 
 - 执行 guard 的 key 是 `(flowId, userId, sessionId)`。相同 tuple 互斥，不同 tuple 可以并行。
 - `AgentFlowSessionBusyException` 立即失败。delete 和 execute 使用同一个 guard，避免检查后再操作的竞态。
-- `execution-timeout` 是一次执行的总 wall-clock deadline。超时抛出 `AgentFlowExecutionTimeoutException`，dispose 上游订阅并释放 tuple lease。
-- 调用方 cancel 会 dispose 流并释放 lease，不伪造 error。上游失败会包装为保留 cause 的 `AgentFlowExecutionException`。
+- `execution-timeout` 是 Session 校验后的执行总 deadline。超时抛出 `AgentFlowExecutionTimeoutException`，dispose 上游订阅并释放 tuple lease。
+- 调用方 cancel 会 dispose 流并释放 lease，不伪造 error。starter 的 `AgentFlowInMemoryRunner` 会跨 ADK 缓存步骤通知正在运行的模型订阅；直接创建原生 ADK `InMemoryRunner` 不包含这层传播。上游失败会包装为保留 cause 的 `AgentFlowExecutionException`。
+- 取消和超时不能撤销已经开始的工具或远程请求。流终止时 tuple lease 就会释放；若外部工作忽略中断而继续，宿主必须自行保护重入和业务副作用。
+- 适配器有界地请求模型帧；累计超过 100,000 帧或 4,000,000 个文本/工具参数 UTF-16 代码单元时明确失败。ADK 内部步骤缓存和 provider 缓冲仍可能在下游消费缓慢时保留数据，这不是端到端背压或总内存上限。流式工具调用 ID 缺失或重复时，在执行工具前失败。
+- 自定义 `InMemoryRunner` 子类需要实现接受 `RunConfig` 的重载才能自定义流式执行；同步 `execute` 仍使用原来的三个参数重载。
 - 组件没有自动重试（`no retry`），重试策略和幂等决策由宿主负责。
 - Session 是进程内的 in-memory 状态，不持久化、不复制，进程重启后不能恢复。timeout 或 cancel 不会回滚 ADK 已接受的事件。
-- `close` 把 guard 切换到 closing，拒绝新操作，在 `shutdown-timeout` 内等待，然后尝试关闭全部 Runner。它是幂等的，超时后不宣称优雅完成。
+- `close` 把 guard 切换到 closing，拒绝新操作，在 `shutdown-timeout` 内等待，然后尝试关闭全部 Runner，并取消仍在运行的 starter 模型订阅。它是幂等的，超时后不宣称优雅完成。
 
 ## 边界与日志
 
@@ -154,8 +161,8 @@ configuration -> validation -> ADK graph compilation -> registry -> session exec
 
 ## 升级与验证门禁
 
-当前验证的兼容线是 Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 0.7.0。升级 Spring AI 或 ADK 后必须重新执行 focused tests、runtime dependency tree 检查和 Components reactor 测试。没有新的 Spec，不要向 starter 加入 `google-adk-dev`、provider starter、Web、MCP、JDBC 或 Flyway 依赖。
+当前兼容线是 Java 25 + Spring Boot 4.1.2 + Spring AI 2.0.2 + Google ADK 1.13.0。升级 Spring AI 或 ADK 后必须重新执行 focused tests、runtime dependency tree 检查和 Components reactor 测试。没有新的 Spec，不要向 starter 加入 `google-adk-dev`、provider starter、Web、MCP、JDBC 或 Flyway 依赖。
 
 ```bash
-./mvnw -B -ntp -pl stellar-enclosure-components/stellar-enclosure-component-agent-flow-starter -am test
+./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

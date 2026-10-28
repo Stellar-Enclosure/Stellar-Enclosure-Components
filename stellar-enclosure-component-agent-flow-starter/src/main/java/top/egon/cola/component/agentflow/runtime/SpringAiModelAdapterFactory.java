@@ -1,12 +1,19 @@
 package top.egon.cola.component.agentflow.runtime;
 
 import com.google.adk.models.BaseLlm;
-import com.google.adk.models.springai.SpringAI;
+import com.google.adk.tools.BaseTool;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.tool.ToolCallback;
 import top.egon.cola.component.agentflow.common.exception.AgentFlowConfigurationException;
 
-/** Creates the official Google ADK Spring AI adapter for a host-provided model. */
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/** Adapts a host-provided Spring AI model and its declared tools to ADK. */
 @Slf4j
 public class SpringAiModelAdapterFactory {
 
@@ -18,9 +25,29 @@ public class SpringAiModelAdapterFactory {
             throw new AgentFlowConfigurationException("properties", "modelName", "model name is required");
         }
         try {
-            return new SpringAI(chatModel, modelName.trim());
+            return new SpringAiModelAdapter(chatModel, modelName.trim());
         } catch (RuntimeException failure) {
             throw new AgentFlowConfigurationException("properties", "modelName", "Spring AI adapter creation failed", failure);
         }
+    }
+
+    public List<BaseTool> createTools(ChatModel chatModel) {
+        if (chatModel == null) {
+            throw new AgentFlowConfigurationException("properties", "chatModel", "ChatModel bean is required");
+        }
+        if (!(chatModel.getOptions() instanceof ToolCallingChatOptions options)
+                || options.getToolCallbacks() == null) {
+            return List.of();
+        }
+        List<BaseTool> tools = new ArrayList<>();
+        Set<String> names = new HashSet<>();
+        for (ToolCallback callback : options.getToolCallbacks()) {
+            SpringAiToolAdapter tool = new SpringAiToolAdapter(callback, options.getToolContext());
+            if (!names.add(tool.name())) {
+                throw new AgentFlowConfigurationException("properties", tool.name(), "duplicate tool name");
+            }
+            tools.add(tool);
+        }
+        return List.copyOf(tools);
     }
 }

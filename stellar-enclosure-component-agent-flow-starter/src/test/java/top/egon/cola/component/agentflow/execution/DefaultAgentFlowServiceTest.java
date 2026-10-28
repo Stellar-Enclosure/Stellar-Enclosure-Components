@@ -2,6 +2,7 @@ package top.egon.cola.component.agentflow.execution;
 
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.InvocationContext;
+import com.google.adk.agents.RunConfig;
 import com.google.adk.events.Event;
 import com.google.adk.runner.InMemoryRunner;
 import com.google.genai.types.Content;
@@ -271,6 +272,11 @@ class DefaultAgentFlowServiceTest {
 
         @Override
         public Flowable<Event> runAsync(String userId, String sessionId, Content newMessage) {
+            return scripted.get();
+        }
+
+        @Override
+        public Flowable<Event> runAsync(String userId, String sessionId, Content newMessage, RunConfig runConfig) {
             return scripted.get();
         }
     }

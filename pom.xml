@@ -75,7 +75,7 @@
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-ai.version>2.0.2</spring-ai.version>
-        <google-adk.version>0.7.0</google-adk.version>
+        <google-adk.version>1.13.0</google-adk.version>
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
         <shardingsphere.version>5.5.3</shardingsphere.version>
         <redisson.version>4.8.0</redisson.version>

@@ -792,7 +792,7 @@ stellar-enclosure-component-agent-flow-starter/
         └── org.springframework.boot.autoconfigure.AutoConfiguration.imports
 ```
 
-该 starter 的输入是宿主具名 `ChatModel` 与组件配置，输出是内部 Java `AgentFlowService` 和 ADK `Event`/`Flowable<Event>`。它只提供本地能力边界：不提供 provider、HTTP、MCP、database、UI、凭据管理、持久化 Session 或远程恢复。宿主负责 provider 连接和认证上下文；Agent Flow 采用 Google ADK 0.7.0、Spring AI 2.0.2，兼容基线为 Java 25 / Spring Boot 4.1.2；本次完成编译和离线验证，宿主运行验收仍需独立执行。
+该 starter 的输入是宿主具名 `ChatModel` 与组件配置，输出是内部 Java `AgentFlowService` 和 ADK `Event`/`Flowable<Event>`。它只提供本地能力边界：不提供 provider、HTTP、MCP、database、UI、凭据管理、持久化 Session 或远程恢复。宿主负责 provider 连接和认证上下文；Agent Flow 采用 Google ADK 1.13.0、Spring AI 2.0.2，兼容基线为 Java 25 / Spring Boot 4.1.2；宿主运行验收仍需独立执行。
 
 
 ---

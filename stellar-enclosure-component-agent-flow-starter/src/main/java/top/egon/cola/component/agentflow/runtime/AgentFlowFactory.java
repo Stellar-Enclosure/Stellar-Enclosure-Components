@@ -3,6 +3,7 @@ package top.egon.cola.component.agentflow.runtime;
 import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.runner.InMemoryRunner;
+import com.google.adk.tools.BaseTool;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.model.ChatModel;
@@ -42,8 +43,9 @@ public class AgentFlowFactory {
             if (chatModel == null) {
                 throw new AgentFlowConfigurationException(flowId, config.chatModelBeanName(), "ChatModel bean is missing");
             }
-            BaseAgent root = buildRoot(flowId, config, modelAdapterFactory.create(chatModel, config.modelName()));
-            runner = new InMemoryRunner(root, flowId);
+            BaseAgent root = buildRoot(flowId, config, modelAdapterFactory.create(chatModel, config.modelName()),
+                    modelAdapterFactory.createTools(chatModel));
+            runner = new AgentFlowInMemoryRunner(root, flowId);
             return new AgentFlowCompilationBO(flowId, root, runner);
         } catch (AgentFlowConfigurationException failure) {
             closeQuietly(runner, failure);
@@ -54,7 +56,8 @@ public class AgentFlowFactory {
         }
     }
 
-    private BaseAgent buildRoot(String flowId, AgentFlowConfigDTO config, com.google.adk.models.BaseLlm model) {
+    private BaseAgent buildRoot(String flowId, AgentFlowConfigDTO config, com.google.adk.models.BaseLlm model,
+                                List<BaseTool> tools) {
         Map<String, BaseAgent> agents = new HashMap<>();
         for (AgentConfigDTO agentConfig : config.agents()) {
             try {
@@ -62,7 +65,8 @@ public class AgentFlowFactory {
                         .name(agentConfig.name())
                         .description(agentConfig.description())
                         .model(model)
-                        .instruction(agentConfig.instruction());
+                        .instruction(agentConfig.instruction())
+                        .tools(tools);
                 if (agentConfig.outputKey() != null) {
                     builder.outputKey(agentConfig.outputKey());
                 }

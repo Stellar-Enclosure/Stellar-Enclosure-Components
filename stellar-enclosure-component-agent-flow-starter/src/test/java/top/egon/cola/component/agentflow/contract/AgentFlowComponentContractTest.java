@@ -37,7 +37,7 @@ class AgentFlowComponentContractTest {
 
         assertEquals(1, count(parent, "<module>stellar-enclosure-component-agent-flow-starter</module>"));
         assertTrue(parent.contains("<spring-ai.version>2.0.2</spring-ai.version>"));
-        assertTrue(parent.contains("<google-adk.version>0.7.0</google-adk.version>"));
+        assertTrue(parent.contains("<google-adk.version>1.13.0</google-adk.version>"));
         assertTrue(parent.contains("<artifactId>spring-ai-bom</artifactId>"));
         assertTrue(parent.contains("<artifactId>google-adk-spring-ai</artifactId>"));
     }
@@ -95,7 +95,7 @@ class AgentFlowComponentContractTest {
                 "execute",
                 "executeStream",
                 "Spring AI 2.0.2",
-                "Google ADK 0.7.0",
+                "Google ADK 1.13.0",
                 "Flowable<Event>",
                 "AgentFlowSessionBusyException",
                 "AgentFlowExecutionTimeoutException",
@@ -134,7 +134,7 @@ class AgentFlowComponentContractTest {
                 "shutdown-timeout",
                 "executeStream",
                 "Spring AI 2.0.2",
-                "Google ADK 0.7.0",
+                "Google ADK 1.13.0",
                 "no retry",
                 "in-memory"
         };
