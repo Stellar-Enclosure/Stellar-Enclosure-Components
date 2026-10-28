@@ -71,8 +71,12 @@ public class CodegenConfigValidator {
             diagnostics.add(diagnostic(CONFIG_REQUIRED, pointer(violation.getPropertyPath().toString()),
                     violation.getMessage()));
         }
-        if (config.getConfigVersion() != null && config.getConfigVersion() != 1) {
-            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/configVersion", "configVersion must be 1"));
+        if (config.getConfigVersion() != null && config.getConfigVersion() != 1 && config.getConfigVersion() != 2) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/configVersion", "configVersion must be 1 or 2"));
+        }
+        if (config.getConfigVersion() != null && ((config.getConfigVersion() == 1 && config.getFrontend() != null)
+                || (config.getConfigVersion() == 2 && config.getFrontend() == null))) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/frontend", "frontend configuration requires configVersion 2"));
         }
         diagnostics.addAll(crossChecks(config));
         if (!diagnostics.isEmpty()) {
@@ -148,6 +152,11 @@ public class CodegenConfigValidator {
         diagnostics.addAll(checkExistingTypes(seen, config.getExistingTypes()));
         diagnostics.addAll(checkFieldPolicies(config, seen));
         diagnostics.addAll(checkDomainMethods(config, seen));
+        if (config.getApiContract() != null && config.getApiContract().getGeneratedDefinitions() != null
+                && !config.getApiContract().getGeneratedDefinitions().isEmpty()
+                && (config.getConfigVersion() == null || config.getConfigVersion() != 2 || !seen.contains("controller"))) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/apiContract/generatedDefinitions", "generated definitions require configVersion 2 and a controller"));
+        }
         diagnostics.addAll(checkApiContract(config, seen));
         return diagnostics;
     }
@@ -572,6 +581,19 @@ public class CodegenConfigValidator {
                     }
                 }
             }
+            if (api.getGeneratedDefinitions() != null && !api.getGeneratedDefinitions().isEmpty()) {
+                Set<String> labels = new LinkedHashSet<>();
+                Set<String> foldedCodes = new LinkedHashSet<>();
+                declaredPermissions.forEach(code -> foldedCodes.add(code.toLowerCase(java.util.Locale.ROOT)));
+                api.getGeneratedDefinitions().forEach((code, definition) -> {
+                    if (!safeCode(code) || !declaredPermissions.add(code) || !foldedCodes.add(code.toLowerCase(java.util.Locale.ROOT)) || definition == null
+                            || !safeDefinitionText(definition.getMeaning()) || !safeI18n(definition.getLabelPage())
+                            || !safeI18n(definition.getLabelKey()) || !safeDefinitionText(definition.getDefaultText())
+                            || !labels.add((definition.getLabelPage() + ":" + definition.getLabelKey()).toLowerCase(java.util.Locale.ROOT))) {
+                        diagnostics.add(diagnostic(CONFIG_REQUIRED, "/apiContract/generatedDefinitions", "generated permission definitions must have unique codes, labels and explicit meaning"));
+                    }
+                });
+            }
         }
         if (api != null && api.getTables() != null) {
             for (String table : api.getTables().keySet()) {
@@ -648,6 +670,11 @@ public class CodegenConfigValidator {
 
     private static boolean safeCode(String value) {
         return !blank(value) && value.length() <= 128 && value.matches("[A-Za-z][A-Za-z0-9._:-]*");
+    }
+
+    private static boolean safeDefinitionText(String value) {
+        return !blank(value) && value.length() <= 1024 && value.equals(value.trim())
+                && !value.contains("\\") && value.chars().noneMatch(Character::isISOControl);
     }
 
     private static boolean safeI18n(String value) {

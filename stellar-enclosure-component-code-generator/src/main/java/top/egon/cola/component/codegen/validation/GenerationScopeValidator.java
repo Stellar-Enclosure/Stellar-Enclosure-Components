@@ -216,12 +216,12 @@ public class GenerationScopeValidator {
         model.put("pageConverterType", stem + "PageQueryConverter");
         model.put("applicationConverterPackage", layout.packageName(config, "application-converter"));
         model.put("domainFields", policyFields(table, unionPolicies(policies)));
-        model.put("createFields", policyFields(table, list(policies, "create")));
-        model.put("updateFields", policyFields(table, list(policies, "update")));
+        model.put("createFields", wirePolicyFields(config, table, list(policies, "create")));
+        model.put("updateFields", wirePolicyFields(config, table, list(policies, "update")));
         model.put("createColumns", list(policies, "create"));
         model.put("updateColumns", list(policies, "update"));
-        model.put("resultFields", policyFields(table, list(policies, "result")));
-        model.put("filterFields", policyFields(table, list(policies, "filter")));
+        model.put("resultFields", wirePolicyFields(config, table, list(policies, "result")));
+        model.put("filterFields", wirePolicyFields(config, table, list(policies, "filter")));
         model.put("sortFields", policyFields(table, list(policies, "sort")));
         List<String> sortColumns = new ArrayList<>(list(policies, "sort"));
         if (!sortColumns.contains("id")) sortColumns.add("id");
@@ -339,6 +339,7 @@ public class GenerationScopeValidator {
         Set<String> declared = new java.util.LinkedHashSet<>();
         if (api.getPermissionReferences() != null) declared.addAll(api.getPermissionReferences());
         if (api.getLocalPermissions() != null) declared.addAll(api.getLocalPermissions());
+        if (api.getGeneratedDefinitions() != null) declared.addAll(api.getGeneratedDefinitions().keySet());
         for (String field : required) {
             CodegenConfigBO.ApiFieldBO value = entry.getFields().get(field);
             if (value == null || (output.contains(field) && (blank(value.getResultKey()) || !declared.contains(value.getPermission())))
@@ -533,9 +534,28 @@ public class GenerationScopeValidator {
                     "javaType", javaType == null ? "String" : javaType.startsWith("java.") ? javaType : simple(javaType),
                     "jsonType", jsonType(javaType),
                     "nullable", String.valueOf(!Boolean.FALSE.equals(column.getNullable())),
-                    "length", column.getLength() == null ? "" : column.getLength().toString()));
+                    "length", column.getLength() == null ? "" : column.getLength().toString(),
+                    "precision", column.getPrecision() == null ? "" : column.getPrecision().toString(),
+                    "scale", column.getScale() == null ? "" : column.getScale().toString()));
         }
         return List.copyOf(fields);
+    }
+
+    private static List<Map<String, String>> wirePolicyFields(CodegenConfigBO config, CodegenSchemaBO.TableBO table, List<String> names) {
+        List<Map<String, String>> fields = policyFields(table, names);
+        if (config.getFrontend() == null || config.getFrontend().getTables() == null) return fields;
+        CodegenConfigBO.FrontendTableBO frontend = config.getFrontend().getTables().get(table.getLogicalName());
+        if (frontend == null || frontend.getFields() == null) return fields;
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Map<String, String> field : fields) {
+            CodegenConfigBO.FrontendFieldBO ui = frontend.getFields().get(field.get("column"));
+            if (ui != null && "decimal".equals(ui.getControl()) && "java.math.BigDecimal".equals(field.get("javaType"))) {
+                Map<String, String> copy = new LinkedHashMap<>(field);
+                copy.put("jsonType", "STRING");
+                result.add(Map.copyOf(copy));
+            } else result.add(field);
+        }
+        return List.copyOf(result);
     }
 
     private static String jsonType(String javaType) {

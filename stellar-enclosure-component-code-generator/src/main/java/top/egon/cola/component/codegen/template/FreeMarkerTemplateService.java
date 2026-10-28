@@ -39,12 +39,22 @@ public class FreeMarkerTemplateService {
 
     private final Map<String, CatalogEntry> catalog;
 
+    private final String templateRoot;
+
     @Getter
     private final String templateSetDigest;
 
     public FreeMarkerTemplateService() {
+        this("backend");
+    }
+
+    public FreeMarkerTemplateService(String target) {
+        if (!"backend".equals(target) && !"frontend".equals(target)) {
+            throw new IllegalArgumentException("unsupported template target");
+        }
+        this.templateRoot = "templates/" + target;
         Configuration cfg = new Configuration(Configuration.VERSION_2_3_35);
-        cfg.setClassLoaderForTemplateLoading(FreeMarkerTemplateService.class.getClassLoader(), "templates/backend");
+        cfg.setClassLoaderForTemplateLoading(FreeMarkerTemplateService.class.getClassLoader(), templateRoot);
         cfg.setDefaultEncoding(StandardCharsets.UTF_8.name());
         cfg.setTemplateExceptionHandler(TemplateExceptionHandler.RETHROW_HANDLER);
         cfg.setLogTemplateExceptions(false);
@@ -88,7 +98,7 @@ public class FreeMarkerTemplateService {
 
     private Map<String, CatalogEntry> loadCatalog() {
         try {
-            JsonNode root = MAPPER.readTree(readBytes("templates/backend/catalog.json"));
+            JsonNode root = MAPPER.readTree(readBytes(templateRoot + "/catalog.json"));
             if (root.path("formatVersion").asInt() != 1
                     || !"freemarker".equals(root.path("engine").asText())
                     || !"2.3.35".equals(root.path("engineVersion").asText())) {
@@ -97,7 +107,7 @@ public class FreeMarkerTemplateService {
             Map<String, CatalogEntry> entries = new LinkedHashMap<>();
             for (JsonNode node : root.path("entries")) {
                 String resource = node.path("templateResource").asText();
-                if (FreeMarkerTemplateService.class.getClassLoader().getResource("templates/backend/" + resource) == null) {
+                if (FreeMarkerTemplateService.class.getClassLoader().getResource(templateRoot + "/" + resource) == null) {
                     throw new TemplateRenderException(TEMPLATE_ERROR, node.path("id").asText(), null,
                             "catalog resource is missing");
                 }
@@ -117,11 +127,11 @@ public class FreeMarkerTemplateService {
     private String digestCatalog() {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(readBytes("templates/backend/catalog.json"));
+            digest.update(readBytes(templateRoot + "/catalog.json"));
             for (CatalogEntry entry : catalog.values().stream()
                     .sorted(java.util.Comparator.comparing(CatalogEntry::id)).toList()) {
                 digest.update(entry.id().getBytes(StandardCharsets.UTF_8));
-                digest.update(readBytes("templates/backend/" + entry.resource()));
+                digest.update(readBytes(templateRoot + "/" + entry.resource()));
             }
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException | IOException exception) {

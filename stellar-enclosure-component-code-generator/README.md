@@ -3,7 +3,7 @@
 [English](README.md) | [中文](README.zh-CN.md)
 
 An offline development tool. It reads PostgreSQL DDL, an MP-SDJ manifest or explicit standalone
-event definitions and generates backend code for native Light, Web and Service. It does not start Spring, does not connect
+event definitions and generates backend code for native Light, Web and Service, and React Admin CRUD code for Light/Web HTTP contracts. It does not start Spring, does not connect
 to a database, and does not modify the target project's POM.
 
 `org.freemarker:freemarker:2.3.35` is the only approved template engine, and it exists only inside
@@ -65,7 +65,35 @@ the current CLI.
 
 Dependencies outside the selection must exist at their canonical source paths or be explicitly declared in `existingTypeMappings`; PO/DAO may use an existing mapped type, while other mappings must match the fully qualified type used by generated code. Table-qualified keys such as `orders.domain-service` are supported. Missing dependencies return `MISSING_TYPE`; an explicit external mapping is a caller assertion, so compile the target project to check its actual classpath and signatures.
 
-`configVersion` is `1`; profiles are native `light`, `web`, and `service`. Unknown JSON keys are rejected. Input mode is `schema`, `manifest`, or `event` for standalone events only. DDL modes require explicit `logicalTables`. Global `fieldPolicies` may be overridden per table with `tableFieldPolicies`; invalid, duplicate or colliding fields are rejected before planning, including filter properties named `page`, `pageNo` or `pageSize`. `sort` defines fixed ascending columns; `id ASC` is appended for stable pagination. It is not a client-supplied sort parameter. HTTP paging accepts `pageNo` / `pageSize` or `page.pageNo` / `page.pageSize`; conflicting aliases are rejected.
+`configVersion` 1 retains the backend-only contract; version 2 additionally requires a `frontend` section. Profiles are native `light`, `web`, and `service`. Unknown JSON keys are rejected. Input mode is `schema`, `manifest`, or `event` for standalone events only. DDL modes require explicit `logicalTables`. Global `fieldPolicies` may be overridden per table with `tableFieldPolicies`; invalid, duplicate or colliding fields are rejected before planning, including filter properties named `page`, `pageNo` or `pageSize`. `sort` defines fixed ascending columns; `id ASC` is appended for stable pagination. It is not a client-supplied sort parameter. HTTP paging accepts `pageNo` / `pageSize` or `page.pageNo` / `page.pageSize`; conflicting aliases are rejected.
+
+## React Admin generation
+
+Create the React project with the `stellar-enclosure-archetype-react-admin` archetype first. Extend an existing Light/Web `backend-crud` configuration to version 2 with a distinct frontend output root and explicit page/field labels:
+
+```json
+{
+  "configVersion": 2,
+  "frontend": {
+    "outputRoot": "../order-admin-web",
+    "tables": {
+      "orders": {
+        "title": "订单管理",
+        "route": "/orders",
+        "fields": {"code": {"label": "订单编号", "control": "text"}}
+      }
+    }
+  }
+}
+```
+
+This is a fragment: keep the existing DDL, `logicalTables`, `fieldPolicies`, `domainMethods`, `apiContract`, backend `outputRoot` and module paths. Every create/update/result/filter field needs a frontend label. Controls may be `text`, `number`, `switch`, `date` (LocalDate), `decimal` (BigDecimal), or `select` for a string field with an explicit `options` object mapping values to labels; omitted controls use the wire type. BigDecimal UI fields require the explicit `decimal` control: version 2 then emits a string JSON contract on both DTO and VO so decimal values retain their precision. Regenerate and review the backend and frontend together when changing this wire contract. OAuth scopes, permission codes, API/field keys and business rules remain explicit backend inputs.
+
+`frontend.responseMode` selects the HTTP success contract: `result-record` unwraps the Light archetype's `ResultRecord`, while `direct` consumes the Web archetype's direct response. The default follows the selected backend profile; explicitly set it if the target has a customized response wrapper. DELETE accepts a successful empty response without replaying the write.
+
+Use `--target backend` (the default) or `--target frontend` on `plan`, `apply`, `check` and `recover`. The same config and DDL feed both targets; each output root has its own lock, state, plan ID and recovery. Applying one repository does not atomically apply the other. The frontend plan emits API/types, a list page, form, detail, static permissions, routes and metadata. The template-owned static permission registry collects previously generated features without overwriting manually changed files. Configure the permission producer and register/activate manifests through the existing delivery workflow; generated resources alone do not grant roles.
+
+For new permissions, version 2 may declare `apiContract.generatedDefinitions` as a map from permission code to `{meaning, labelPage, labelKey, defaultText}`. It emits an owned `@PermissionDefinition` and Chinese source message for each entry. These codes must not also appear in `permissionReferences` or `localPermissions`; existing external definitions continue to be referenced explicitly. The target project must include the Permission-as-Code compiler and registration pipeline.
 
 ## CQERS, business ports and HTTP authorization
 

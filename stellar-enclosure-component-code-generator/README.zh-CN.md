@@ -45,7 +45,35 @@ scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths
 
 `artifacts` 可以逐项选择，`pojo` 和 `mapper` 分别是 `po` 和 `mapper-xml` 的别名。未选中的依赖必须已存在于规范源码路径，或通过 `existingTypeMappings` 显式声明；PO/DAO 可映射到已有类型，其余类型映射须与生成器引用的完整类名一致，可使用 `orders.domain-service` 等按表声明的键。未声明且找不到源码时返回 `MISSING_TYPE`。映射是调用方对外部类型的声明，生成器不能证明它已在目标工程 classpath 上或具有兼容方法，仍须编译目标工程。
 
-`configVersion` 为 `1`，`projectType` 为 `light` / `web` / `service`；未知 JSON 属性会被拒绝。`input.mode` 为 `schema`（按顺序读取 `schemaFiles`）、`manifest`（按资源根目录读取带 SHA-256 的清单），或仅用于独立事件的 `event`。DDL 模式必须显式选择 `logicalTables`；每张表使用全局 `fieldPolicies`，也可通过 `tableFieldPolicies.<表名>` 覆盖。无效、重复或冲突的字段在计划前拒绝；筛选字段不能与分页属性 `page`、`pageNo`、`pageSize` 冲突。`sort` 是固定升序列清单，生成 SQL 会追加 `id ASC` 作为稳定的分页顺序；它不是客户端可自由指定的排序参数。HTTP 分页支持 `pageNo` / `pageSize` 和 `page.pageNo` / `page.pageSize`，同一参数的两种写法同时出现且值不一致时拒绝。
+`configVersion` 为 `1` 时保持原有后端配置；版本 `2` 增加必填的 `frontend` 配置。`projectType` 为 `light` / `web` / `service`；未知 JSON 属性会被拒绝。`input.mode` 为 `schema`（按顺序读取 `schemaFiles`）、`manifest`（按资源根目录读取带 SHA-256 的清单），或仅用于独立事件的 `event`。DDL 模式必须显式选择 `logicalTables`；每张表使用全局 `fieldPolicies`，也可通过 `tableFieldPolicies.<表名>` 覆盖。无效、重复或冲突的字段在计划前拒绝；筛选字段不能与分页属性 `page`、`pageNo`、`pageSize` 冲突。`sort` 是固定升序列清单，生成 SQL 会追加 `id ASC` 作为稳定的分页顺序；它不是客户端可自由指定的排序参数。HTTP 分页支持 `pageNo` / `pageSize` 和 `page.pageNo` / `page.pageSize`，同一参数的两种写法同时出现且值不一致时拒绝。
+
+## React Admin 业务代码生成
+
+先用 `stellar-enclosure-archetype-react-admin` 生成 React 工程，再将已有 Light/Web `backend-crud` 配置升级为版本 2，并增加独立的前端输出目录和每张表的页面、字段信息：
+
+```json
+{
+  "configVersion": 2,
+  "frontend": {
+    "outputRoot": "../order-admin-web",
+    "tables": {
+      "orders": {
+        "title": "订单管理",
+        "route": "/orders",
+        "fields": {"code": {"label": "订单编号", "control": "text"}}
+      }
+    }
+  }
+}
+```
+
+这是配置片段，仍须保留 DDL、`logicalTables`、`fieldPolicies`、`domainMethods`、`apiContract`、后端 `outputRoot` 和模块路径。新增、修改、返回、筛选字段均须明确配置前端标签。`control` 支持 `text`、`number`、`switch`、`date`（LocalDate）、`decimal`（BigDecimal）和字符串 `select`；`select` 须通过 `options` 显式提供值与标签的映射。省略控件时根据后端 JSON 类型选择。BigDecimal 页面字段必须显式使用 `decimal`：版本 2 会同时将后端 DTO/VO 的 JSON 类型设为字符串，保留小数精度；更改这个接口契约时须同时重新生成并审阅前后端。OAuth scope、权限码、API/字段资源和业务规则继续使用显式后端契约。
+
+`frontend.responseMode` 可选择 `result-record`（解包 Light 模板的 `ResultRecord`）或 `direct`（直接读取 Web 模板响应）。默认根据后端 profile 选择；目标工程自定义响应包装时须显式指定。DELETE 可以接受空的成功响应，写入不会自动重放。
+
+`plan`、`apply`、`check`、`recover` 可传 `--target backend` 或 `--target frontend`，默认后端。两端使用同一配置与 DDL，但分别维护生成计划、状态和锁；跨仓库写入不是一个原子事务。前端生成 API、类型、列表、表单、详情、路由和静态权限声明，模板拥有的权限聚合文件会保留之前生成的模块。人工修改的文件发生冲突时不覆盖。权限清单仍需经构建、注册和激活流程，生成代码不会自动授予角色。
+
+版本 2 可在 `apiContract.generatedDefinitions` 中以权限码为键配置 `{meaning, labelPage, labelKey, defaultText}`，为新权限生成 `@PermissionDefinition` 和中文默认文案。同一权限码不能同时放在 `permissionReferences` 或 `localPermissions` 中；已有其他生产者的权限继续显式引用。目标工程仍需接入权限编译器和注册流程。
 
 ## CQERS、领域端口与 HTTP 授权
 

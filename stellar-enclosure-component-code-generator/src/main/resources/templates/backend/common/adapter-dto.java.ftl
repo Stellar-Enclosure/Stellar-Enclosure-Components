@@ -33,7 +33,7 @@ import top.egon.cola.component.common.core.pojo.PageQuery;
 [#if dtoKind == "create"]
 public class [=createDtoType] implements BasePojo {
 [#list createFields as field]
-[#if field.javaType?starts_with("java.time.")]
+[#if field.javaType?starts_with("java.time.") || (field.javaType == "java.math.BigDecimal" && field.jsonType == "STRING")]
     @JsonFormat(shape = JsonFormat.Shape.STRING)
 [/#if]
     @PermissionResource(key = "[=apiFields[field.javaName].createKey]", type = ResourceType.FIELD, labelPage = "[=apiFields[field.javaName].labelPage]", labelKey = "[=apiFields[field.javaName].labelKey]")
@@ -60,7 +60,7 @@ public class [=updateDtoType] implements BasePojo {
     @Min(0)
     private Long expectedVersion;
 [#list updateFields as field]
-[#if field.javaType?starts_with("java.time.")]
+[#if field.javaType?starts_with("java.time.") || (field.javaType == "java.math.BigDecimal" && field.jsonType == "STRING")]
     @JsonFormat(shape = JsonFormat.Shape.STRING)
 [/#if]
     @PermissionResource(key = "[=apiFields[field.javaName].updateKey]", type = ResourceType.FIELD, labelPage = "[=apiFields[field.javaName].labelPage]", labelKey = "[=apiFields[field.javaName].labelKey]")

@@ -82,6 +82,67 @@ public class CodegenConfigBO {
     @Valid
     private EventsBO events;
 
+    @Valid
+    private FrontendBO frontend;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class FrontendBO {
+        private String outputRoot;
+        private String responseMode;
+        @Builder.Default
+        private Map<String, FrontendTableBO> tables = new LinkedHashMap<>();
+
+        FrontendBO snapshot() {
+            Map<String, FrontendTableBO> copy = new LinkedHashMap<>();
+            if (tables != null) tables.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+            return FrontendBO.builder().outputRoot(outputRoot).responseMode(responseMode).tables(copy).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class FrontendTableBO {
+        private String title;
+        private String route;
+        @Builder.Default
+        private Map<String, FrontendFieldBO> fields = new LinkedHashMap<>();
+
+        FrontendTableBO snapshot() {
+            Map<String, FrontendFieldBO> copy = new LinkedHashMap<>();
+            if (fields != null) fields.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+            return FrontendTableBO.builder().title(title).route(route).fields(copy).build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class FrontendFieldBO {
+        private String label;
+        private String control;
+        @Builder.Default
+        private Map<String, String> options = new LinkedHashMap<>();
+
+        FrontendFieldBO snapshot() {
+            return FrontendFieldBO.builder().label(label).control(control).options(copyMap(options)).build();
+        }
+    }
+
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
@@ -169,6 +230,9 @@ public class CodegenConfigBO {
         private List<String> localPermissions = new ArrayList<>();
 
         @Builder.Default
+        private Map<String, PermissionDefinitionBO> generatedDefinitions = new LinkedHashMap<>();
+
+        @Builder.Default
         private Map<String, ApiTableBO> tables = new LinkedHashMap<>();
 
         ApiContractBO snapshot() {
@@ -181,8 +245,28 @@ public class CodegenConfigBO {
                     .transportBean(transportBean)
                     .permissionReferences(copyList(permissionReferences))
                     .localPermissions(copyList(localPermissions))
+                    .generatedDefinitions(copyPermissionDefinitions(generatedDefinitions))
                     .tables(copyApiTables(tables))
                     .build();
+        }
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    @JsonInclude(JsonInclude.Include.ALWAYS)
+    @JsonPropertyOrder(alphabetic = true)
+    public static class PermissionDefinitionBO {
+        private String meaning;
+        private String labelPage;
+        private String labelKey;
+        private String defaultText;
+
+        PermissionDefinitionBO snapshot() {
+            return PermissionDefinitionBO.builder().meaning(meaning).labelPage(labelPage)
+                    .labelKey(labelKey).defaultText(defaultText).build();
         }
     }
 
@@ -380,6 +464,7 @@ public class CodegenConfigBO {
                 .domainMethods(copyDomainMethods(domainMethods))
                 .apiContract(apiContract == null ? null : apiContract.snapshot())
                 .events(events == null ? null : events.snapshot())
+                .frontend(frontend == null ? null : frontend.snapshot())
                 .build();
     }
 
@@ -397,6 +482,12 @@ public class CodegenConfigBO {
 
     private static Map<String, ApiTableBO> copyApiTables(Map<String, ApiTableBO> values) {
         Map<String, ApiTableBO> copy = new LinkedHashMap<>();
+        if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+        return copy;
+    }
+
+    private static Map<String, PermissionDefinitionBO> copyPermissionDefinitions(Map<String, PermissionDefinitionBO> values) {
+        Map<String, PermissionDefinitionBO> copy = new LinkedHashMap<>();
         if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
         return copy;
     }

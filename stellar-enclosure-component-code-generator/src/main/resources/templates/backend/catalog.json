@@ -3,6 +3,7 @@
   "engine": "freemarker",
   "engineVersion": "2.3.35",
   "entries": [
+    {"id":"permission-definition","artifact":"permission-definition","templateResource":"common/permission-definition.java.ftl","allowedProfiles":["light","web"],"targetPathPattern":"{package}/{type}.java","requiredTypes":[]},
     {
       "id": "probe",
       "artifact": "probe",

@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "engine": "freemarker",
+  "engineVersion": "2.3.35",
+  "entries": [
+    {"id":"types","artifact":"frontend-types","templateResource":"react-admin/types.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.types.ts"},
+    {"id":"api","artifact":"frontend-api","templateResource":"react-admin/api.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.api.ts"},
+    {"id":"api-test","artifact":"frontend-api-test","templateResource":"react-admin/api.test.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.api.test.ts"},
+    {"id":"decimal","artifact":"frontend-decimal","templateResource":"react-admin/decimal.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.decimal.ts"},
+    {"id":"decimal-test","artifact":"frontend-decimal-test","templateResource":"react-admin/decimal.test.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.decimal.test.ts"},
+    {"id":"permissions","artifact":"frontend-permissions","templateResource":"react-admin/permissions.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.permissions.ts"},
+    {"id":"routes","artifact":"frontend-routes","templateResource":"react-admin/routes.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{feature}.routes.tsx"},
+    {"id":"page","artifact":"frontend-page","templateResource":"react-admin/page.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Page.tsx"},
+    {"id":"form","artifact":"frontend-form","templateResource":"react-admin/form.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Form.tsx"},
+    {"id":"detail","artifact":"frontend-detail","templateResource":"react-admin/detail.tsx.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/features/{feature}/{type}Detail.tsx"},
+    {"id":"registry","artifact":"frontend-registry","templateResource":"react-admin/registry.ts.ftl","allowedProfiles":["light","web"],"targetPathPattern":"src/generated/permissions.ts"}
+  ]
+}

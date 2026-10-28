@@ -25,6 +25,15 @@ class PermissionProcessorIntegrationTest {
 
     @Test
     void generatedResourcesCompileIntoRealPermissionFragment(@TempDir Path root) throws Exception {
+        compileAndInspect(root, false);
+    }
+
+    @Test
+    void generatedPermissionDefinitionCompilesIntoRealPermissionFragment(@TempDir Path root) throws Exception {
+        compileAndInspect(root, true);
+    }
+
+    private void compileAndInspect(Path root, boolean generateDefinition) throws Exception {
         String processorClasspath = System.getProperty("codegen.permissionProcessorClasspath", "");
         Assumptions.assumeTrue(!processorClasspath.isBlank(),
                 "set codegen.permissionProcessorClasspath to the real processor and target runtime classpath");
@@ -42,7 +51,16 @@ class PermissionProcessorIntegrationTest {
         for (int index = references.size() - 1; index >= 0; index--) {
             if ("fixture:orders:read".equals(references.get(index).asText())) references.remove(index);
         }
-        document.withObject("/apiContract").putArray("localPermissions").add("fixture:orders:read");
+        if (generateDefinition) {
+            document.put("configVersion", 2);
+            document.putObject("frontend").putObject("tables").putObject("orders").putObject("fields")
+                    .putObject("amount").put("control", "decimal");
+            ObjectNode definition = document.withObject("/apiContract").putObject("generatedDefinitions").putObject("fixture:orders:read");
+            definition.put("meaning", "Read order fields").put("labelPage", "fixture.orders")
+                    .put("labelKey", "permission.read").put("defaultText", "读取订单字段");
+        } else {
+            document.withObject("/apiContract").putArray("localPermissions").add("fixture:orders:read");
+        }
         Path config = root.resolve("codegen.json");
         mapper.writeValue(config.toFile(), document);
         CodegenCommand command = new CodegenCommand();
@@ -63,14 +81,16 @@ class PermissionProcessorIntegrationTest {
                     public static RuntimeException zeroRows(String operation, Long id, Long version) { return new IllegalStateException(); }
                 }
                 """);
-        Path localPermission = root.resolve("src/main/java/com/example/codegenfixture/support/FixturePermissionDefinition.java");
-        Files.writeString(localPermission, """
+        if (!generateDefinition) {
+            Path localPermission = root.resolve("src/main/java/com/example/codegenfixture/support/FixturePermissionDefinition.java");
+            Files.writeString(localPermission, """
                 package com.example.codegenfixture.support;
                 import top.egon.cola.platform.tianquan.jianshen.contract.permission.annotation.PermissionDefinition;
                 @PermissionDefinition(code = "fixture:orders:read", meaning = "Read order fields",
                         labelPage = "fixture.orders", labelKey = "permission.read")
                 public final class FixturePermissionDefinition { }
                 """);
+        }
         Path classes = root.resolve("compiled");
         Files.createDirectories(classes);
         Path repository = Path.of(System.getProperty("maven.repo.local", Path.of(System.getProperty("user.home"), ".m2/repository").toString()));
@@ -98,10 +118,12 @@ class PermissionProcessorIntegrationTest {
         assertEquals(18, fragment.path("resources").size());
         JsonNode resultDate = null;
         JsonNode updateCode = null;
+        JsonNode resultAmount = null;
         JsonNode page = null;
         for (JsonNode resource : fragment.path("resources")) {
             if ("fixture.field.orders.result.dueDate".equals(resource.path("key").asText())) resultDate = resource;
             if ("fixture.field.orders.update.code".equals(resource.path("key").asText())) updateCode = resource;
+            if ("fixture.field.orders.result.amount".equals(resource.path("key").asText())) resultAmount = resource;
             if ("fixture.api.orders.page".equals(resource.path("key").asText())) page = resource;
         }
         assertTrue(resultDate != null && updateCode != null && page != null);
@@ -113,5 +135,18 @@ class PermissionProcessorIntegrationTest {
                         new com.fasterxml.jackson.core.type.TypeReference<java.util.Set<String>>() { }));
         assertEquals(6, fragment.path("permissionReferences").size());
         assertEquals("fixture:orders:read", fragment.path("permissionDefinitions").get(0).path("code").asText());
+        if (generateDefinition) {
+            assertTrue(fragment.path("messages").size() > 0);
+            assertEquals("STRING", resultAmount.path("fieldPolicy").path("valueType").asText());
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{classes.toUri().toURL()}, getClass().getClassLoader())) {
+                Class<?> view = loader.loadClass("com.example.codegenfixture.adapter.codegenfixture.pojo.vo.OrdersVO");
+                Object value = view.getConstructor().newInstance();
+                view.getMethod("setAmount", java.math.BigDecimal.class).invoke(value, new java.math.BigDecimal("12345678901234567890.12"));
+                assertEquals("12345678901234567890.12", mapper.readTree(mapper.writeValueAsBytes(value)).path("amount").asText());
+                Class<?> dto = loader.loadClass("com.example.codegenfixture.adapter.codegenfixture.pojo.dto.CreateOrdersDTO");
+                Object request = mapper.readValue("{\"amount\":\"12345678901234567890.12\"}", dto);
+                assertEquals(new java.math.BigDecimal("12345678901234567890.12"), dto.getMethod("getAmount").invoke(request));
+            }
+        }
     }
 }

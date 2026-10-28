@@ -29,7 +29,7 @@ public class [=viewType] implements BasePojo {
     private Long version;
 [#list resultFields as field]
 
-[#if field.javaType?starts_with("java.time.")]
+[#if field.javaType?starts_with("java.time.") || (field.javaType == "java.math.BigDecimal" && field.jsonType == "STRING")]
     @JsonFormat(shape = JsonFormat.Shape.STRING)
 [/#if]
     @PermissionResource(key = "[=apiFields[field.javaName].resultKey]", type = ResourceType.FIELD, labelPage = "[=apiFields[field.javaName].labelPage]", labelKey = "[=apiFields[field.javaName].labelKey]")

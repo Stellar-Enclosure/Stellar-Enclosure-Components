@@ -11,6 +11,7 @@ import top.egon.cola.component.codegen.model.CodegenPlanBO;
 import top.egon.cola.component.codegen.model.CodegenSchemaBO;
 import top.egon.cola.component.codegen.profile.ProjectLayoutStrategy;
 import top.egon.cola.component.codegen.template.FreeMarkerTemplateService;
+import top.egon.cola.component.codegen.template.FrontendGenerationService;
 import top.egon.cola.component.codegen.update.GenerationApplyService;
 import top.egon.cola.component.codegen.update.GenerationPlanService;
 import top.egon.cola.component.codegen.update.GenerationStateRepository;
@@ -54,6 +55,7 @@ public class CodegenCommand {
     private final DdlSchemaService schemas = new DdlSchemaService(new PostgreDdlAdapter());
     private final GenerationScopeValidator scope = new GenerationScopeValidator();
     private final FreeMarkerTemplateService templates = new FreeMarkerTemplateService();
+    private final FrontendGenerationService frontend = new FrontendGenerationService();
     private final GenerationStateRepository states = new GenerationStateRepository();
     private final OutputPathValidator paths = new OutputPathValidator();
     private final GenerationPlanService plans = new GenerationPlanService(states, paths);
@@ -80,6 +82,13 @@ public class CodegenCommand {
                 }
                 flags.put(token, args[++index]);
             }
+            String target = flags.getOrDefault("--target", "backend");
+            if (!Set.of("backend", "frontend").contains(target)) {
+                return error(out, err, 2, "CONFIG_REQUIRED", "target must be backend or frontend");
+            }
+            if ("frontend".equals(target) && "retire-legacy".equals(args[0])) {
+                return error(out, err, 2, "CONFIG_REQUIRED", "frontend retirement requires an explicit migration");
+            }
             return switch (args[0]) {
                 case "templates" -> templates(out);
                 case "plan" -> plan(flags, out, err);
@@ -90,6 +99,9 @@ public class CodegenCommand {
                 default -> error(out, err, 2, "CONFIG_REQUIRED", "unknown command");
             };
         } catch (Exception exception) {
+            if (exception instanceof FrontendGenerationService.FrontendConfigurationException failure) {
+                return error(out, err, 2, "CONFIG_REQUIRED", failure.getMessage());
+            }
             if (exception instanceof OutputPathValidator.PathValidationException failure) {
                 return error(out, err, 2, failure.getCode(), failure.getMessage());
             }
@@ -114,6 +126,8 @@ public class CodegenCommand {
         artifacts.sort(String::compareTo);
         body.put("artifacts", artifacts);
         body.put("presets", List.of("persistence-crud", "backend-crud"));
+        body.put("frontendPreset", "react-admin");
+        body.put("frontendTemplateSetDigest", frontend.templateDigest());
         body.put("eventConfiguration", "events.definitions");
         body.put("eventActions", List.of("create", "update", "delete", "delegate"));
         body.put("planFormatVersion", CodegenPlanBO.FORMAT_VERSION);
@@ -126,7 +140,7 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
-        List<GenerationPlanService.RenderedFile> rendered = render(loaded.config(), loaded.schema());
+        List<GenerationPlanService.RenderedFile> rendered = render(loaded);
         List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), rendered);
         if (!legacy.isEmpty()) {
             return error(out, err, 4, "LEGACY_LAYOUT_CONFLICT",
@@ -137,7 +151,7 @@ public class CodegenCommand {
             return error(out, err, 4, "EVENT_SCOPE_CONFLICT",
                     "review previously generated event paths before changing their scope: " + String.join(", ", omittedEvents));
         }
-        CodegenPlanBO plan = buildPlan(loaded.config(), loaded.schema(), rendered);
+        CodegenPlanBO plan = buildPlan(loaded, rendered);
         Files.createDirectories(planFile(loaded.root(), plan.getPlanId()).getParent());
         MAPPER.writeValue(planFile(loaded.root(), plan.getPlanId()).toFile(), plan);
         Map<String, Object> body = summary(plan);
@@ -156,7 +170,7 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
-        List<GenerationPlanService.RenderedFile> rendered = render(loaded.config(), loaded.schema());
+        List<GenerationPlanService.RenderedFile> rendered = render(loaded);
         List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), rendered);
         if (!legacy.isEmpty()) {
             return error(out, err, 4, "LEGACY_LAYOUT_CONFLICT",
@@ -181,13 +195,13 @@ public class CodegenCommand {
                 if (fresh.code() != 0) {
                     return null;
                 }
-                List<GenerationPlanService.RenderedFile> freshFiles = render(fresh.config(), fresh.schema());
+                List<GenerationPlanService.RenderedFile> freshFiles = render(fresh);
                 if (!legacyLayoutConflicts(fresh.root(), fresh.config(), freshFiles).isEmpty()
                         || !omittedEventPaths(fresh.root(), fresh.config(), freshFiles).isEmpty()) {
                     return null;
                 }
                 return new GenerationApplyService.CurrentInputs(fresh.schema().getInputFingerprint(),
-                        configFingerprint(fresh.config()), templates.getTemplateSetDigest(),
+                        configFingerprint(fresh.config()), templateDigest(fresh.target()),
                         componentFingerprint(), freshFiles);
             } catch (Exception failure) {
                 throw new IllegalStateException("generation inputs changed", failure);
@@ -209,7 +223,7 @@ public class CodegenCommand {
         if (loaded.code() != 0) {
             return loaded.code();
         }
-        List<GenerationPlanService.RenderedFile> files = render(loaded.config(), loaded.schema());
+        List<GenerationPlanService.RenderedFile> files = render(loaded);
         List<String> legacy = legacyLayoutConflicts(loaded.root(), loaded.config(), files);
         List<String> omittedEvents = omittedEventPaths(loaded.root(), loaded.config(), files);
         boolean drift = !legacy.isEmpty() || !omittedEvents.isEmpty();
@@ -238,7 +252,7 @@ public class CodegenCommand {
             if (!reviewed.isEmpty()) {
                 summary.put("retirementReview", new GenerationApplyService.RetirementReview(
                         loaded.schema().getInputFingerprint(), configFingerprint(loaded.config()), states.fingerprint(state),
-                        templates.getTemplateSetDigest(), componentFingerprint(), reviewed.stream().sorted().toList()));
+                        templateDigest(loaded.target()), componentFingerprint(), reviewed.stream().sorted().toList()));
             }
         }
         out.println(MAPPER.writeValueAsString(summary));
@@ -295,11 +309,11 @@ public class CodegenCommand {
                         .equals(loaded.root().toAbsolutePath().normalize())) {
                     return null;
                 }
-                List<GenerationPlanService.RenderedFile> files = render(fresh.config(), fresh.schema());
+                List<GenerationPlanService.RenderedFile> files = render(fresh);
                 Set<String> eligible = new LinkedHashSet<>(legacyLayoutConflicts(fresh.root(), fresh.config(), files));
                 eligible.addAll(omittedEventPaths(fresh.root(), fresh.config(), files));
                 return new GenerationApplyService.RetirementInputs(fresh.schema().getInputFingerprint(),
-                        configFingerprint(fresh.config()), templates.getTemplateSetDigest(), componentFingerprint(), eligible);
+                        configFingerprint(fresh.config()), templateDigest(fresh.target()), componentFingerprint(), eligible);
             } catch (Exception failure) {
                 throw new IllegalStateException("generation inputs changed", failure);
             }
@@ -318,12 +332,19 @@ public class CodegenCommand {
         return value != null && value.matches("[0-9a-f]{64}");
     }
 
-    private CodegenPlanBO buildPlan(CodegenConfigBO config, CodegenSchemaBO schema,
-                                    List<GenerationPlanService.RenderedFile> rendered) {
-        Path root = Path.of(config.getOutputRoot());
-        return plans.plan(root, rendered, config.getProfile(), schema.getInputFingerprint(),
-                configFingerprint(config), schema.getVersionChecksumPrefix(), templates.getTemplateSetDigest(),
+    private CodegenPlanBO buildPlan(Loaded loaded, List<GenerationPlanService.RenderedFile> rendered) {
+        return plans.plan(loaded.root(), rendered, loaded.config().getProfile(), loaded.schema().getInputFingerprint(),
+                configFingerprint(loaded.config()), loaded.schema().getVersionChecksumPrefix(), templateDigest(loaded.target()),
                 componentFingerprint(), List.of());
+    }
+
+    private String templateDigest(String target) {
+        return "frontend".equals(target) ? frontend.templateDigest() : templates.getTemplateSetDigest();
+    }
+
+    private List<GenerationPlanService.RenderedFile> render(Loaded loaded) {
+        return "frontend".equals(loaded.target()) ? frontend.render(loaded.config(), loaded.schema(), loaded.root())
+                : render(loaded.config(), loaded.schema());
     }
 
     private List<String> legacyLayoutConflicts(Path root, CodegenConfigBO config,
@@ -538,6 +559,19 @@ public class CodegenCommand {
                     layout.relativePath(config, "permission-mvc-config", type + ".java"),
                     "permission-mvc-config", "__security__", templates.render("permission-mvc-config", model)));
         }
+        if (config.getArtifacts().contains("controller") && config.getApiContract() != null
+                && config.getApiContract().getGeneratedDefinitions() != null) {
+            config.getApiContract().getGeneratedDefinitions().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+                String name = "GeneratedPermission" + GenerationPlanService.sha256(entry.getKey().getBytes(StandardCharsets.UTF_8)).substring(0, 20);
+                var definition = entry.getValue();
+                Map<String, Object> model = Map.of("permissionPackage", layout.packageName(config, "controller"),
+                        "permissionType", name, "codeJson", jsonLiteral(entry.getKey()),
+                        "meaningJson", jsonLiteral(definition.getMeaning()), "labelPageJson", jsonLiteral(definition.getLabelPage()),
+                        "labelKeyJson", jsonLiteral(definition.getLabelKey()), "defaultTextJson", jsonLiteral(definition.getDefaultText()));
+                files.add(new GenerationPlanService.RenderedFile(layout.relativePath(config, "controller", name + ".java"),
+                        "permission-definition", entry.getKey(), templates.render("permission-definition", model)));
+            });
+        }
         for (GenerationPlanService.RenderedFile file : files) {
             if (file.relativePath().endsWith(".java")) {
                 paths.checkJavaSource(file.relativePath(), file.bytes());
@@ -562,18 +596,33 @@ public class CodegenCommand {
     }
 
     private Loaded load(Map<String, String> flags, PrintStream out, PrintStream err) throws Exception {
+        String target = flags.getOrDefault("--target", "backend");
         if (!flags.containsKey("--config")) {
             error(out, err, 2, "CONFIG_REQUIRED", "--config is required");
-            return new Loaded(2, null, null, null);
+            return new Loaded(2, null, null, null, target);
         }
         CodegenConfigBO config = MAPPER.readValue(Path.of(flags.get("--config")).toFile(), CodegenConfigBO.class);
         List<CodegenPlanBO.DiagnosticBO> diagnostics = configValidator.validate(config);
         if (!diagnostics.isEmpty()) {
             err.println(MAPPER.writeValueAsString(Map.of("code", diagnostics.get(0).getCode(), "message", diagnostics.get(0).getMessage())));
-            return new Loaded(codeFor(diagnostics.get(0).getCode()), null, null, null);
+            return new Loaded(codeFor(diagnostics.get(0).getCode()), null, null, null, target);
         }
         config = configValidator.normalize(config);
         Path root = Path.of(config.getOutputRoot());
+        if ("frontend".equals(target)) {
+            if (config.getConfigVersion() == null || config.getConfigVersion() != 2 || config.getFrontend() == null
+                    || config.getFrontend().getOutputRoot() == null || config.getFrontend().getOutputRoot().isBlank()) {
+                return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "frontend target requires configVersion 2 and frontend.outputRoot"), null, null, null, target);
+            }
+            Path frontendRoot = Path.of(config.getFrontend().getOutputRoot()).toAbsolutePath().normalize();
+            Path backendRoot = root.toAbsolutePath().normalize();
+            if (Files.exists(frontendRoot)) frontendRoot = frontendRoot.toRealPath();
+            if (Files.exists(backendRoot)) backendRoot = backendRoot.toRealPath();
+            if (frontendRoot.startsWith(backendRoot) || backendRoot.startsWith(frontendRoot)) {
+                return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "frontend and backend output roots must be separate"), null, null, null, target);
+            }
+            root = frontendRoot;
+        }
         GenerationStateRepository.StateBO state = states.load(root);
         List<String> observedPrefix = new ArrayList<>();
         if (state.getVersionChecksumPrefix() != null && !state.getVersionChecksumPrefix().isBlank()) {
@@ -588,14 +637,14 @@ public class CodegenCommand {
                 .versionChecksumPrefix(state.getVersionChecksumPrefix()).build()
                 : schemas.read(config, Map.of(), observedPrefix);
         if (!eventOnly && (config.getTables() == null || config.getTables().isEmpty())) {
-            return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logicalTables is required"), null, null, null);
+            return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logicalTables is required"), null, null, null, target);
         }
         List<CodegenSchemaBO.TableBO> selected = new ArrayList<>();
         for (String tableName : config.getTables()) {
             CodegenSchemaBO.TableBO match = schema.getTables().stream()
                     .filter(table -> tableName.equals(table.getLogicalName())).findFirst().orElse(null);
             if (match == null) {
-                return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logical table is absent: " + tableName), null, null, null);
+                return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logical table is absent: " + tableName), null, null, null, target);
             }
             selected.add(match);
         }
@@ -603,9 +652,9 @@ public class CodegenCommand {
         List<CodegenPlanBO.DiagnosticBO> scopeDiagnostics = scope.validate(config, schema);
         if (!scopeDiagnostics.isEmpty()) {
             err.println(MAPPER.writeValueAsString(Map.of("code", scopeDiagnostics.get(0).getCode(), "message", scopeDiagnostics.get(0).getMessage())));
-            return new Loaded(3, null, null, null);
+            return new Loaded(3, null, null, null, target);
         }
-        return new Loaded(0, config, schema, root);
+        return new Loaded(0, config, schema, root, target);
     }
 
     private static String configFingerprint(CodegenConfigBO config) {
@@ -614,6 +663,11 @@ public class CodegenCommand {
         } catch (IOException exception) {
             throw new IllegalStateException("configuration fingerprint failed", exception);
         }
+    }
+
+    private static String jsonLiteral(String value) {
+        try { return MAPPER.writeValueAsString(value); }
+        catch (IOException exception) { throw new IllegalStateException("literal serialization failed", exception); }
     }
 
     private static String componentFingerprint() {
@@ -680,6 +734,6 @@ public class CodegenCommand {
         return code;
     }
 
-    private record Loaded(int code, CodegenConfigBO config, CodegenSchemaBO schema, Path root) {
+    private record Loaded(int code, CodegenConfigBO config, CodegenSchemaBO schema, Path root, String target) {
     }
 }
