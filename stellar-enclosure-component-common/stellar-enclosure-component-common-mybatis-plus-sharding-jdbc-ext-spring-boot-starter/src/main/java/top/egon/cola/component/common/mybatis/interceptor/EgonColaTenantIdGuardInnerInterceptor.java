@@ -89,7 +89,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
             LifecycleScopeEnum.ALL_PARENT, this::validateHistoryPolicy,
             LifecycleScopeEnum.PAGE, this::validatePagePolicy,
             LifecycleScopeEnum.COUNT, this::validatePagePolicy,
-            LifecycleScopeEnum.MONOTONE_DELETE, (policy, context) -> { },
+            LifecycleScopeEnum.MONOTONE_DELETE, this::validateMonotonePolicy,
             LifecycleScopeEnum.RESTORE, (policy, context) -> { },
             LifecycleScopeEnum.PURGE_ID, this::validatePurgePolicy,
             LifecycleScopeEnum.PURGE_PARENT, this::validatePurgePolicy);
@@ -193,7 +193,9 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
             if (tenants == null || tenants.size() != 1 || !tenants.contains(tenant)) {
                 throw new IllegalStateException("TENANT_CONTEXT_MISMATCH");
             }
-            if (policy != null && (historyPolicy(policy) || purgePolicy(policy))) {
+            boolean monotoneHistory = policy != null && policy.scope() == LifecycleScopeEnum.MONOTONE_DELETE
+                    && shape.scopes().size() == 2 && scope == shape.scopes().get(1);
+            if (policy != null && (historyPolicy(policy) || purgePolicy(policy) || monotoneHistory)) {
                 // The exact policy validates every scope, including the recycled parent proof.
             } else if (historyRead) {
                 validateHistoricalRead(statement, shape, scope, sql);
@@ -251,6 +253,10 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
                 || statement.getResource() == null || !statement.getResource().contains(".xml")) {
             throw new IllegalStateException("LIFECYCLE_STATEMENT_POLICY_INVALID");
         }
+        LifecycleSqlContextBO context = new LifecycleSqlContextBO(statement, shape, sql);
+        if (policy.scope() == LifecycleScopeEnum.MONOTONE_DELETE) {
+            policyChecks.get(policy.scope()).accept(policy, context);
+        }
         for (TableScopeBO scope : shape.scopes()) {
             Set<Object> tenants = values(scope.isolation(), scope, "tenant_id", shape, sql,
                     statement.getConfiguration(), false, new HashSet<>());
@@ -258,11 +264,28 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
                 throw new IllegalStateException("TENANT_CONTEXT_MISMATCH");
             }
         }
-        if (policy.scope() != LifecycleScopeEnum.PURGE_PARENT && shape.scopes().size() != 1) {
+        if (policy.scope() != LifecycleScopeEnum.PURGE_PARENT && policy.scope() != LifecycleScopeEnum.MONOTONE_DELETE
+                && shape.scopes().size() != 1) {
             throw new IllegalStateException("LIFECYCLE_SCOPE_REQUIRED");
         }
-        policyChecks.get(policy.scope()).accept(policy, new LifecycleSqlContextBO(statement, shape, sql));
+        if (policy.scope() != LifecycleScopeEnum.MONOTONE_DELETE) {
+            policyChecks.get(policy.scope()).accept(policy, context);
+        }
         return policy;
+    }
+
+    private void validateMonotonePolicy(LifecyclePolicySnapshotBO policy, LifecycleSqlContextBO context) {
+        int scopeCount = context.shape().scopes().size();
+        if (scopeCount == 1) {
+            return;
+        }
+        if (scopeCount != 2 || !(context.shape().statement() instanceof Update update)) {
+            throw new IllegalStateException("LIFECYCLE_SCOPE_REQUIRED");
+        }
+        Expression deletedAt = assigned(update, "deleted_at");
+        if (deletedAt == null || !monotoneDeletion(update, context.statement(), context.sql(), deletedAt)) {
+            throw new IllegalStateException("LOGIC_DELETE_TIMESTAMP_REQUIRED");
+        }
     }
 
     private void validateHistoryPolicy(LifecyclePolicySnapshotBO policy, LifecycleSqlContextBO context) {

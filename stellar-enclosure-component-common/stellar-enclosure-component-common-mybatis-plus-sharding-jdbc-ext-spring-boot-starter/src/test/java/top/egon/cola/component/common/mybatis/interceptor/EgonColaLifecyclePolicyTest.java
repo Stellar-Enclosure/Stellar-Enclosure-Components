@@ -112,11 +112,45 @@ class EgonColaLifecyclePolicyTest {
         String formula = "GREATEST((CURRENT_TIMESTAMP AT TIME ZONE 'UTC'), COALESCE((SELECT MAX(history.deleted_at) + INTERVAL '0.000001' SECOND FROM item history WHERE history.tenant_id = ? AND history.sn = ?), (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')))";
         String sql = "UPDATE item SET deleted_at=" + formula + ", version=version+1, update_user_id=?, update_time=? WHERE tenant_id=? AND id=? AND version=? AND sn=? AND deleted_at IS NULL";
         Object[] params = {"historyTenant", 41L, "historySn", "sn", "actor", "actor", "time", Instant.parse("2026-01-01T00:00:00Z"), "tenant", 41L, "id", 1L, "version", 3L, "sn", "sn"};
-        assertThat(proveWithId(id, guard, SqlCommandType.UPDATE, sql, params)).hasSize(1);
+        var routes = proveWithId(id, guard, SqlCommandType.UPDATE, sql, params);
+        assertThat(routes).hasSize(2);
+        assertThat(routes).extracting(route -> route.query().logicalTable()).containsExactly("item", "item");
+        assertThat(routes).extracting(EgonColaTenantIdGuardInnerInterceptor.ScopedRouteQuery::writeTarget)
+                .containsExactly(true, false);
         assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE, sql.replace("0.000001", "1"), params)).hasMessage("LOGIC_DELETE_TIMESTAMP_REQUIRED");
         Object[] wrongTenant = params.clone();
         wrongTenant[1] = 42L;
         assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE, sql, wrongTenant)).hasMessage("LOGIC_DELETE_TIMESTAMP_REQUIRED");
+        Object[] wrongBusinessKey = params.clone();
+        wrongBusinessKey[3] = "other";
+        assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE, sql, wrongBusinessKey)).hasMessage("LOGIC_DELETE_TIMESTAMP_REQUIRED");
+        assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE,
+                sql.replace("FROM item history", "FROM other_item history"), params)).hasMessage("LOGIC_DELETE_TIMESTAMP_REQUIRED");
+        String extraScope = sql + " AND EXISTS (SELECT 1 FROM other_item x WHERE x.tenant_id=? AND x.deleted_at IS NULL)";
+        Object[] extraParameters = java.util.Arrays.copyOf(params, params.length + 2);
+        extraParameters[params.length] = "extraTenant";
+        extraParameters[params.length + 1] = 41L;
+        assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE, extraScope, extraParameters))
+                .hasMessage("LIFECYCLE_SCOPE_REQUIRED");
+        assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE,
+                sql.replace(", version=version+1", ", note=(SELECT 1 FROM other_item x WHERE x.tenant_id=41), version=version+1"), params))
+                .hasMessage("LIFECYCLE_SCOPE_REQUIRED");
+        assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE,
+                sql.replace(" AND deleted_at IS NULL", ""), params)).hasMessage("ACTIVE_PREDICATE_REQUIRED");
+        var unregistered = new EgonColaTenantIdGuardInnerInterceptor(() -> "actor", new EgonColaMybatisPlusProperties());
+        unregistered.snapshotLifecycleStatements();
+        assertThatThrownBy(() -> proveWithId(id, unregistered, SqlCommandType.UPDATE, sql, params))
+                .hasMessage("ACTIVE_PREDICATE_REQUIRED");
+    }
+
+    @Test
+    void monotonePolicyRetainsSingleScopeTimestampBehavior() {
+        String id = "test.LifecycleMapper.deleteVersionedById";
+        var guard = guard(LifecycleScopeEnum.MONOTONE_DELETE, id);
+        String sql = "UPDATE item SET deleted_at=(CURRENT_TIMESTAMP AT TIME ZONE 'UTC'), version=version+1, update_user_id=?, update_time=? "
+                + "WHERE tenant_id=? AND id=? AND version=? AND deleted_at IS NULL";
+        assertThat(proveWithId(id, guard, SqlCommandType.UPDATE, sql, "actor", "actor", "time", Instant.parse("2026-01-01T00:00:00Z"),
+                "tenant", 41L, "id", 1L, "version", 3L)).hasSize(1);
     }
 
     @Test
@@ -135,11 +169,11 @@ class EgonColaLifecyclePolicyTest {
         assertThatThrownBy(() -> proveWithId(id, guard, SqlCommandType.UPDATE, sql.replace("deletion_kind=NULL", "name=NULL"), params)).hasMessage("LIFECYCLE_RESTORE_SHAPE_REQUIRED");
     }
 
-    private static java.util.List<?> prove(EgonColaTenantIdGuardInnerInterceptor guard, SqlCommandType command, String text, Object... parameters) {
+    private static java.util.List<EgonColaTenantIdGuardInnerInterceptor.ScopedRouteQuery> prove(EgonColaTenantIdGuardInnerInterceptor guard, SqlCommandType command, String text, Object... parameters) {
         return proveWithId(ID, guard, command, text, parameters);
     }
 
-    private static java.util.List<?> proveWithId(String id, EgonColaTenantIdGuardInnerInterceptor guard, SqlCommandType command, String text, Object... parameters) {
+    private static java.util.List<EgonColaTenantIdGuardInnerInterceptor.ScopedRouteQuery> proveWithId(String id, EgonColaTenantIdGuardInnerInterceptor guard, SqlCommandType command, String text, Object... parameters) {
         Configuration configuration = new Configuration();
         java.util.List<ParameterMapping> mappings = new ArrayList<>();
         Map<String, Object> values = new LinkedHashMap<>();
