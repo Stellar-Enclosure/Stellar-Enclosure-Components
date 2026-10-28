@@ -80,6 +80,64 @@ class CodegenCommandTest {
     }
 
     @Test
+    void cliResolvesExplicitPhysicalMappingsAndRejectsConflicts(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        Path schema = root.resolve("shards.sql");
+        String original = Files.readString(Path.of("src/test/resources/ddl/schema.sql"));
+        Files.writeString(schema, original.replace("orders", "orders_0") + "\n"
+                + original.replace("orders", "orders_1"));
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        ObjectNode input = document.withObject("/input");
+        input.putArray("schemaFiles").add(schema.toString());
+        input.putObject("logicalPhysicalMappings").putArray("orders").add("orders_0").add("orders_1");
+        mapper.writeValue(config.toFile(), document);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        String planId = mapper.readTree(plan.out()).path("planId").asText();
+        assertEquals(0, invoke("apply", "--config", config.toString(), "--plan", planId).code());
+        assertTrue(Files.readString(root.resolve("order-service-infrastructure/src/main/java/com/example/order/infrastructure/order/po/OrdersPO.java"))
+                .contains("@TableName(\"orders\")"));
+
+        input.withObject("/logicalPhysicalMappings").putArray("orders").add("orders_0").add("orders_0");
+        mapper.writeValue(config.toFile(), document);
+        Invocation duplicate = invoke("plan", "--config", config.toString());
+        assertEquals(2, duplicate.code());
+        assertTrue(duplicate.err().contains("physical table names must be unique"));
+    }
+
+    @Test
+    void changingReviewedSnapshotInvalidatesCliPlan(@TempDir Path root) throws Exception {
+        Path config = writeConfig(root);
+        Path migration = root.resolve("migration.sql");
+        Files.writeString(migration, "ALTER TABLE orders ADD COLUMN code VARCHAR(64);\n");
+        String migrationHash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(Files.readAllBytes(migration)));
+        String history = "20261028_001:" + migrationHash;
+        String historyHash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(history.getBytes(StandardCharsets.UTF_8)));
+        Path manifest = root.resolve("manifest.json");
+        Files.writeString(manifest, """
+                {"family":"web","scripts":[{"version":"20261028_001","path":"migration.sql","sha256":"%s"}]}
+                """.formatted(migrationHash));
+        Path snapshot = root.resolve("snapshot.sql");
+        Files.copy(Path.of("src/test/resources/ddl/schema.sql"), snapshot);
+        ObjectNode document = (ObjectNode) mapper.readTree(config.toFile());
+        ObjectNode input = document.withObject("/input");
+        input.put("mode", "manifest").put("resourceRoot", root.toString()).put("manifest", "manifest.json")
+                .put("snapshotManifestFingerprint", historyHash);
+        input.putArray("schemaFiles");
+        input.putArray("schemaSnapshotFiles").add("snapshot.sql");
+        mapper.writeValue(config.toFile(), document);
+        Invocation plan = invoke("plan", "--config", config.toString());
+        assertEquals(0, plan.code(), plan.err());
+        String planId = mapper.readTree(plan.out()).path("planId").asText();
+        Files.writeString(snapshot, Files.readString(snapshot) + "\n-- updated snapshot\n");
+        Invocation apply = invoke("apply", "--config", config.toString(), "--plan", planId);
+        assertEquals(6, apply.code(), apply.err());
+        assertFalse(Files.exists(root.resolve("order-service-infrastructure")));
+    }
+
+    @Test
     void launcherBlocksMissingClasspath() throws Exception {
         Path script = Path.of("../scripts/stellar-enclosure-codegen.sh").toAbsolutePath().normalize();
         if (!Files.exists(script)) {

@@ -162,12 +162,23 @@ public class CodegenConfigBO {
 
         private String manifest;
 
+        @Builder.Default
+        private Map<String, List<String>> logicalPhysicalMappings = new LinkedHashMap<>();
+
+        @Builder.Default
+        private List<String> schemaSnapshotFiles = new ArrayList<>();
+
+        private String snapshotManifestFingerprint;
+
         InputBO snapshot() {
             return InputBO.builder()
                     .mode(mode)
                     .resourceRoot(resourceRoot)
                     .schemaFiles(copyList(schemaFiles))
                     .manifest(manifest)
+                    .logicalPhysicalMappings(copyMappings(logicalPhysicalMappings))
+                    .schemaSnapshotFiles(copyList(schemaSnapshotFiles))
+                    .snapshotManifestFingerprint(snapshotManifestFingerprint)
                     .build();
         }
     }
@@ -471,6 +482,12 @@ public class CodegenConfigBO {
     private static Map<String, FieldPoliciesBO> copyPolicies(Map<String, FieldPoliciesBO> values) {
         Map<String, FieldPoliciesBO> copy = new LinkedHashMap<>();
         if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : value.snapshot()));
+        return copy;
+    }
+
+    private static Map<String, List<String>> copyMappings(Map<String, List<String>> values) {
+        Map<String, List<String>> copy = new LinkedHashMap<>();
+        if (values != null) values.forEach((key, value) -> copy.put(key, value == null ? null : copyList(value)));
         return copy;
     }
 

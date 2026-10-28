@@ -120,6 +120,44 @@ class PostgreDdlAdapterTest {
     }
 
     @Test
+    void reviewedSnapshotIsBoundToManifestAndItsOwnBytes(@TempDir Path temp) throws Exception {
+        Path script = temp.resolve("db/egon-mp/V20260922_001__orders.sql");
+        Files.createDirectories(script.getParent());
+        Files.writeString(script, "ALTER TABLE orders ADD COLUMN note VARCHAR(32);\n");
+        String hash = sha256(Files.readAllBytes(script));
+        Files.writeString(temp.resolve("db/egon-mp/repository-manifest.json"), manifestJson(hash));
+        Path snapshot = temp.resolve("snapshot.sql");
+        Files.copy(Path.of("src/test/resources/ddl/schema.sql"), snapshot);
+        String history = "20260922_001:" + hash;
+        CodegenConfigBO config = CodegenConfigBO.builder().input(CodegenConfigBO.InputBO.builder()
+                .mode("manifest").resourceRoot(temp.toString()).manifest("db/egon-mp/repository-manifest.json")
+                .schemaSnapshotFiles(List.of("snapshot.sql"))
+                .snapshotManifestFingerprint(sha256(history.getBytes(StandardCharsets.UTF_8))).build()).build();
+
+        CodegenSchemaBO first = service.read(config);
+        assertEquals(history, first.getVersionChecksumPrefix());
+        assertEquals("orders", table(first, "orders").getLogicalName());
+        Files.writeString(snapshot, Files.readString(snapshot) + "\n-- reviewed change\n");
+        assertFalse(first.getInputFingerprint().equals(service.read(config).getInputFingerprint()));
+
+        config.getInput().setSnapshotManifestFingerprint("a".repeat(64));
+        assertEquals(DdlSchemaService.CHECKSUM_DRIFT,
+                assertThrows(DdlParseException.class, () -> service.read(config)).getCode());
+        config.getInput().setSnapshotManifestFingerprint(sha256(history.getBytes(StandardCharsets.UTF_8)));
+        Files.writeString(script, "ALTER TABLE orders ADD COLUMN changed VARCHAR(32);\n");
+        assertEquals(DdlSchemaService.CHECKSUM_DRIFT,
+                assertThrows(DdlParseException.class, () -> service.read(config)).getCode());
+    }
+
+    @Test
+    void mappingsCannotOverwriteAnUnmappedLogicalTable() throws Exception {
+        String sql = "CREATE TABLE orders (id BIGINT); CREATE TABLE orders_0 (id BIGINT);";
+        DdlParseException failure = assertThrows(DdlParseException.class,
+                () -> service.read(configSql(sql), Map.of("orders", List.of("orders_0")), List.of()));
+        assertEquals(DdlSchemaService.PHYSICAL_SCHEMA_MISMATCH, failure.getCode());
+    }
+
+    @Test
     void cannotMergeDifferentPhysicalSchemas() throws Exception {
         String sql = """
                 CREATE TABLE orders_0 (id BIGINT PRIMARY KEY, code VARCHAR(64));

@@ -303,13 +303,40 @@ public class CodegenConfigValidator {
             return List.of();
         }
         List<CodegenPlanBO.DiagnosticBO> diagnostics = new ArrayList<>();
+        Map<String, List<String>> mappings = input.getLogicalPhysicalMappings();
+        Set<String> physicalNames = new LinkedHashSet<>();
+        if (mappings != null) {
+            for (Map.Entry<String, List<String>> mapping : mappings.entrySet()) {
+                if (blank(mapping.getKey()) || config.getTables() == null || !config.getTables().contains(mapping.getKey())
+                        || mapping.getValue() == null || mapping.getValue().isEmpty()) {
+                    diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/logicalPhysicalMappings", "each mapping requires a selected logical table and physical tables"));
+                    continue;
+                }
+                for (String physical : mapping.getValue()) {
+                    if (blank(physical) || !physical.matches("[A-Za-z_][A-Za-z0-9_]*") || !physicalNames.add(physical)
+                            || (mappings.containsKey(physical) && !physical.equals(mapping.getKey()))) {
+                        diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/logicalPhysicalMappings", "physical table names must be unique identifiers"));
+                    }
+                }
+            }
+        }
+        boolean hasSnapshot = input.getSchemaSnapshotFiles() != null && !input.getSchemaSnapshotFiles().isEmpty();
+        boolean hasSnapshotFingerprint = !blank(input.getSnapshotManifestFingerprint());
+        if (hasSnapshot && input.getSchemaSnapshotFiles().stream().anyMatch(CodegenConfigValidator::blank)) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/schemaSnapshotFiles", "snapshot file names must be nonblank"));
+        }
+        if (hasSnapshot != hasSnapshotFingerprint || (hasSnapshotFingerprint
+                && !input.getSnapshotManifestFingerprint().matches("[0-9a-f]{64}"))) {
+            diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/schemaSnapshotFiles", "snapshot files require the matching manifest fingerprint"));
+        }
         if ("event".equals(input.getMode())) {
             boolean invalidEvent = config.getEvents() != null && config.getEvents().getDefinitions() != null
                     && config.getEvents().getDefinitions().stream().anyMatch(event -> event == null
                     || !"delegate".equals(event.getAction()) || !blank(event.getTable()));
             if (!artifacts.equals(Set.of("event")) || (config.getTables() != null && !config.getTables().isEmpty())
                     || (input.getSchemaFiles() != null && !input.getSchemaFiles().isEmpty())
-                    || !blank(input.getResourceRoot()) || !blank(input.getManifest()) || invalidEvent) {
+                    || !blank(input.getResourceRoot()) || !blank(input.getManifest()) || invalidEvent
+                    || (mappings != null && !mappings.isEmpty()) || hasSnapshot || hasSnapshotFingerprint) {
                 diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input", "event mode requires only table-independent delegate events and no DDL input"));
             }
             return diagnostics;
@@ -322,6 +349,9 @@ public class CodegenConfigValidator {
             if (!blank(input.getManifest())) {
                 diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/manifest",
                         "schema mode does not accept a manifest"));
+            }
+            if (hasSnapshot || hasSnapshotFingerprint) {
+                diagnostics.add(diagnostic(CONFIG_REQUIRED, "/input/schemaSnapshotFiles", "schema snapshots are supported only with a manifest"));
             }
             return diagnostics;
         }

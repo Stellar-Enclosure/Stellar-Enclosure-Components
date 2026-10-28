@@ -44,7 +44,8 @@ public class DdlSchemaService {
     private final PostgreDdlAdapter adapter;
 
     public CodegenSchemaBO read(CodegenConfigBO config) {
-        return read(config, Map.of(), List.of());
+        return read(config, config == null || config.getInput() == null ? Map.of()
+                : config.getInput().getLogicalPhysicalMappings(), List.of());
     }
 
     public CodegenSchemaBO read(
@@ -122,7 +123,23 @@ public class DdlSchemaService {
             scripts.add(new LoadedScript(path.toString(), new String(bytes, java.nio.charset.StandardCharsets.UTF_8)));
         }
         String prefixText = prefix.toString().trim();
-        return new LoadedInput(scripts, sha256(prefixText.getBytes(java.nio.charset.StandardCharsets.UTF_8)), prefixText);
+        String manifestFingerprint = sha256(prefixText.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (input.getSchemaSnapshotFiles() != null && !input.getSchemaSnapshotFiles().isEmpty()) {
+            if (!manifestFingerprint.equals(input.getSnapshotManifestFingerprint())) {
+                throw new DdlParseException(CHECKSUM_DRIFT, manifestPath.toString(), 1,
+                        "schema snapshot is not bound to the current manifest history");
+            }
+            List<LoadedScript> snapshot = new ArrayList<>();
+            StringBuilder fingerprint = new StringBuilder(manifestFingerprint);
+            for (String schemaFile : input.getSchemaSnapshotFiles()) {
+                Path path = resolve(input.getResourceRoot(), schemaFile);
+                byte[] bytes = readBytes(path);
+                fingerprint.append('\n').append(sha256(bytes));
+                snapshot.add(new LoadedScript(path.toString(), new String(bytes, java.nio.charset.StandardCharsets.UTF_8)));
+            }
+            return new LoadedInput(snapshot, fingerprint.toString(), prefixText);
+        }
+        return new LoadedInput(scripts, manifestFingerprint, prefixText);
     }
 
     private static EgonColaDdlManifestBO readManifest(Path path) {
@@ -148,9 +165,19 @@ public class DdlSchemaService {
         }
         Map<String, CodegenSchemaBO.TableBO> byName = new LinkedHashMap<>();
         for (CodegenSchemaBO.TableBO table : tables) {
-            byName.put(table.getLogicalName(), table);
+            if (byName.putIfAbsent(table.getLogicalName(), table) != null) {
+                throw new DdlParseException(PHYSICAL_SCHEMA_MISMATCH, table.getLogicalName(), 1,
+                        "duplicate table in schema input");
+            }
         }
         for (Map.Entry<String, List<String>> mapping : mappings.entrySet()) {
+            if (mapping.getKey() == null || mapping.getValue() == null || mapping.getValue().isEmpty()) {
+                throw new DdlParseException(MISSING_SCHEMA_BASELINE, mapping.getKey(), 1, "physical mapping is empty");
+            }
+            if (byName.containsKey(mapping.getKey()) && !mapping.getValue().contains(mapping.getKey())) {
+                throw new DdlParseException(PHYSICAL_SCHEMA_MISMATCH, mapping.getKey(), 1,
+                        "logical table conflicts with an existing schema table");
+            }
             List<CodegenSchemaBO.TableBO> physicals = new ArrayList<>();
             for (String physicalName : mapping.getValue()) {
                 CodegenSchemaBO.TableBO physical = byName.remove(physicalName);

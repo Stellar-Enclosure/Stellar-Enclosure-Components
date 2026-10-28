@@ -47,6 +47,10 @@ scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths
 
 `configVersion` 为 `1` 时保持原有后端配置；版本 `2` 增加必填的 `frontend` 配置。`projectType` 为 `light` / `web` / `service`；未知 JSON 属性会被拒绝。`input.mode` 为 `schema`（按顺序读取 `schemaFiles`）、`manifest`（按资源根目录读取带 SHA-256 的清单），或仅用于独立事件的 `event`。DDL 模式必须显式选择 `logicalTables`；每张表使用全局 `fieldPolicies`，也可通过 `tableFieldPolicies.<表名>` 覆盖。无效、重复或冲突的字段在计划前拒绝；筛选字段不能与分页属性 `page`、`pageNo`、`pageSize` 冲突。`sort` 是固定升序列清单，生成 SQL 会追加 `id ASC` 作为稳定的分页顺序；它不是客户端可自由指定的排序参数。HTTP 分页支持 `pageNo` / `pageSize` 和 `page.pageNo` / `page.pageSize`，同一参数的两种写法同时出现且值不一致时拒绝。
 
+物理分表 DDL 可通过 `input.logicalPhysicalMappings` 指定映射，例如 `{"school_classes":["school_classes_0","school_classes_1"]}`。各物理表必须存在且解析后的结构一致，生成 SQL 使用逻辑表名。该映射只描述表结构，运行时分片规则仍须单独配置；存在二级分片键时，须审查写入路由。
+
+离线解析器会拒绝无法解析的迁移语句，包括动态 SQL 和 ALTER。清单包含这类语句时，可由审阅者提供完整的最终 CREATE TABLE 结构 `input.schemaSnapshotFiles`，以及 `input.snapshotManifestFingerprint`：对清单中按顺序排列的 `version:sha256` 文本行（UTF-8，行间为 `\n`，末尾无换行）计算 SHA-256。使用快照前仍会核对每个迁移文件及已观察到的不可变历史，计划指纹也包含各快照文件的内容。快照是经过审阅的显式声明，不代表连接数据库或自动重放迁移；清单变化后须更新并重新审阅快照。
+
 ## React Admin 业务代码生成
 
 先用 `stellar-enclosure-archetype-react-admin` 生成 React 工程，再将已有 Light/Web `backend-crud` 配置升级为版本 2，并增加独立的前端输出目录和每张表的页面、字段信息：

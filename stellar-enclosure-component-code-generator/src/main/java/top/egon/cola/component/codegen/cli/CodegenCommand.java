@@ -635,7 +635,7 @@ public class CodegenCommand {
                 .inputFingerprint(state.getLatestObservedSchema() == null
                         ? GenerationPlanService.sha256("event-only".getBytes(StandardCharsets.UTF_8)) : state.getLatestObservedSchema())
                 .versionChecksumPrefix(state.getVersionChecksumPrefix()).build()
-                : schemas.read(config, Map.of(), observedPrefix);
+                : schemas.read(config, config.getInput().getLogicalPhysicalMappings(), observedPrefix);
         if (!eventOnly && (config.getTables() == null || config.getTables().isEmpty())) {
             return new Loaded(error(out, err, 2, "CONFIG_REQUIRED", "logicalTables is required"), null, null, null, target);
         }
