@@ -260,7 +260,7 @@
         WHERE shard_slot = #{_outboxSlot} AND tenant_id = 0 AND deleted_at IS NULL
           AND status = 'DEAD' AND last_error_code = 'OUTBOX_RETRY_EXHAUSTED'
           AND attempt_count &gt;= max_attempts
-          AND completed_at &lt;= clock_timestamp() - (CAST(#{cooldownMillis} AS BIGINT) * interval '0.001' second)
+          AND completed_at &lt;= clock_timestamp() - (#{cooldownMillis} * interval '1 millisecond')
         ORDER BY completed_at, id LIMIT #{limit}
     </select>
 
@@ -274,7 +274,7 @@
           AND id = #{id} AND version = #{version} AND status = 'DEAD'
           AND last_error_code = 'OUTBOX_RETRY_EXHAUSTED'
           AND attempt_count &gt;= max_attempts
-          AND completed_at &lt;= clock_timestamp() - (CAST(#{cooldownMillis} AS BIGINT) * interval '0.001' second)
+          AND completed_at &lt;= clock_timestamp() - (#{cooldownMillis} * interval '1 millisecond')
     </update>
 
     <select id="selectExpiredSucceededCandidates" resultMap="outboxMessageResultMap">
