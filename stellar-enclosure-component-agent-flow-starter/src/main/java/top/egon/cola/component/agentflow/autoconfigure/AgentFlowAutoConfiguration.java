@@ -178,10 +178,14 @@ public class AgentFlowAutoConfiguration {
     }
 
     @Bean
-    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow-registry", name = "enabled", havingValue = "false")
-    public SmartInitializingSingleton agentFlowRegistryDisabledGuard(@Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+    public SmartInitializingSingleton agentFlowRegistrySettingsGuard(@Qualifier("agentFlowProperties") AgentFlowProperties properties,
+                                                                     org.springframework.core.env.Environment environment) {
         return () -> {
-            if (!properties.flows().isEmpty()) {
+            String enabled = environment.getProperty("egon.cola.component.agent-flow-registry.enabled", "true");
+            if (!"true".equalsIgnoreCase(enabled) && !"false".equalsIgnoreCase(enabled)) {
+                throw new IllegalStateException("Agent Flow registry enabled must be true or false");
+            }
+            if ("false".equalsIgnoreCase(enabled) && !properties.flows().isEmpty()) {
                 throw new IllegalStateException("Agent Flow static flows cannot be configured while the registry is disabled");
             }
         };

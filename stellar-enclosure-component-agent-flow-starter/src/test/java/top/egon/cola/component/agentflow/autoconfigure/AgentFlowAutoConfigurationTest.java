@@ -77,6 +77,15 @@ class AgentFlowAutoConfigurationTest {
     }
 
     @Test
+    void rejects_an_invalid_registry_switch_instead_of_silently_ignoring_flows() {
+        contextRunner.withPropertyValues(concat(validProperties(), "egon.cola.component.agent-flow-registry.enabled=maybe"))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining("registry enabled must be true or false");
+                });
+    }
+
+    @Test
     void rejects_unknown_properties_before_compilation() {
         contextRunner.withPropertyValues(
                         concat(validProperties(), "egon.cola.component.agent-flow.unknown-setting=value"))
