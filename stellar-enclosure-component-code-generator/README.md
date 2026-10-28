@@ -93,6 +93,15 @@ This is a fragment: keep the existing DDL, `logicalTables`, `fieldPolicies`, `do
 
 Use `--target backend` (the default) or `--target frontend` on `plan`, `apply`, `check` and `recover`. The same config and DDL feed both targets; each output root has its own lock, state, plan ID and recovery. Applying one repository does not atomically apply the other. The frontend plan emits API/types, a list page, form, detail, static permissions, routes and metadata. The template-owned static permission registry collects previously generated features without overwriting manually changed files. Configure the permission producer and register/activate manifests through the existing delivery workflow; generated resources alone do not grant roles.
 
+```sh
+scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target backend
+scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target backend --plan "$BACKEND_PLAN_ID"
+scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target frontend
+scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target frontend --plan "$FRONTEND_PLAN_ID"
+```
+
+Set each plan ID from the corresponding `plan` JSON output after reviewing its file operations. The existing [backend example](src/test/resources/codegen-web.json) shows the other required configuration fields.
+
 For new permissions, version 2 may declare `apiContract.generatedDefinitions` as a map from permission code to `{meaning, labelPage, labelKey, defaultText}`. It emits an owned `@PermissionDefinition` and Chinese source message for each entry. These codes must not also appear in `permissionReferences` or `localPermissions`; existing external definitions continue to be referenced explicitly. The target project must include the Permission-as-Code compiler and registration pipeline.
 
 ## CQERS, business ports and HTTP authorization

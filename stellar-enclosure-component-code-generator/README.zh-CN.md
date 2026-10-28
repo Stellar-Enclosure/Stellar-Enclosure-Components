@@ -73,6 +73,15 @@ scripts/stellar-enclosure-codegen.sh retire-legacy --config codegen.json --paths
 
 `plan`、`apply`、`check`、`recover` 可传 `--target backend` 或 `--target frontend`，默认后端。两端使用同一配置与 DDL，但分别维护生成计划、状态和锁；跨仓库写入不是一个原子事务。前端生成 API、类型、列表、表单、详情、路由和静态权限声明，模板拥有的权限聚合文件会保留之前生成的模块。人工修改的文件发生冲突时不覆盖。权限清单仍需经构建、注册和激活流程，生成代码不会自动授予角色。
 
+```sh
+scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target backend
+scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target backend --plan "$BACKEND_PLAN_ID"
+scripts/stellar-enclosure-codegen.sh plan --config codegen.json --target frontend
+scripts/stellar-enclosure-codegen.sh apply --config codegen.json --target frontend --plan "$FRONTEND_PLAN_ID"
+```
+
+审阅每次 `plan` 输出的文件操作后，将对应 JSON 中的 `planId` 传给 `apply`。其余必填配置可参照[后端示例](src/test/resources/codegen-web.json)。
+
 版本 2 可在 `apiContract.generatedDefinitions` 中以权限码为键配置 `{meaning, labelPage, labelKey, defaultText}`，为新权限生成 `@PermissionDefinition` 和中文默认文案。同一权限码不能同时放在 `permissionReferences` 或 `localPermissions` 中；已有其他生产者的权限继续显式引用。目标工程仍需接入权限编译器和注册流程。
 
 ## CQERS、领域端口与 HTTP 授权
