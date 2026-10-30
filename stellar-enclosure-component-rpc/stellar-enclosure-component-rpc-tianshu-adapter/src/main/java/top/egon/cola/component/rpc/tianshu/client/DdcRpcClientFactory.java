@@ -32,6 +32,7 @@ import top.egon.cola.component.tianshu.api.client.DdcAiSyncClient;
 import top.egon.cola.component.tianshu.api.client.DdcConfigClient;
 import top.egon.cola.component.tianshu.api.client.DdcManagementClient;
 import top.egon.cola.component.tianshu.api.client.DdcPromptClient;
+import top.egon.cola.component.tianshu.model.ai.DdcAiClientScope;
 import top.egon.cola.component.tianshu.api.client.DdcServiceRegistryClient;
 import top.egon.cola.component.tianshu.api.client.DdcSkillClient;
 import top.egon.cola.component.tianshu.autoconfigure.properties.DdcProperties;
@@ -163,13 +164,14 @@ public final class DdcRpcClientFactory {
     }
 
     public DdcRpcClientHandle<DdcPromptClient> promptClient() {
+        var scope = new DdcAiClientScope(tenantProperties.requireTenantId(), ddcProperties.getBizCode(), ddcProperties.getEnv(), ddcProperties.getAppCode());
         RpcDirectClientHandle<DdcAiResourceRpc> direct = create(
                 DdcAiResourceRpc.class,
-                () -> rpcProperties.runtimeCredential());
+                () -> rpcProperties.runtimeCredential(), scope.tenantId());
         try {
             return new DdcRpcClientHandle<>(
-                    new RpcDdcPromptClient(direct.client(), aiProtoConverter,
-                            new DdcRpcStatusExceptionMapper(), ddcProperties),
+                    RpcDdcPromptClient.scoped(direct.client(), aiProtoConverter,
+                            new DdcRpcStatusExceptionMapper(), scope),
                     direct);
         } catch (RuntimeException failure) {
             direct.close();
@@ -178,13 +180,14 @@ public final class DdcRpcClientFactory {
     }
 
     public DdcRpcClientHandle<DdcSkillClient> skillClient() {
+        var scope = new DdcAiClientScope(tenantProperties.requireTenantId(), ddcProperties.getBizCode(), ddcProperties.getEnv(), ddcProperties.getAppCode());
         RpcDirectClientHandle<DdcAiResourceRpc> direct = create(
                 DdcAiResourceRpc.class,
-                () -> rpcProperties.runtimeCredential());
+                () -> rpcProperties.runtimeCredential(), scope.tenantId());
         try {
             return new DdcRpcClientHandle<>(
-                    new RpcDdcSkillClient(direct.client(), aiProtoConverter,
-                            new DdcRpcStatusExceptionMapper(), ddcProperties),
+                    RpcDdcSkillClient.scoped(direct.client(), aiProtoConverter,
+                            new DdcRpcStatusExceptionMapper(), scope),
                     direct);
         } catch (RuntimeException failure) {
             direct.close();
@@ -225,7 +228,11 @@ public final class DdcRpcClientFactory {
     private <T> RpcDirectClientHandle<T> create(
             Class<T> contractType,
             CredentialSupplier credentialSupplier) {
-        long tenantId = tenantProperties.requireTenantId();
+        return create(contractType, credentialSupplier, tenantProperties.requireTenantId());
+    }
+
+    private <T> RpcDirectClientHandle<T> create(
+            Class<T> contractType, CredentialSupplier credentialSupplier, long tenantId) {
         log.debug("Creating Tianshu RPC client contract={} tenantId={}",
                 contractType.getSimpleName(), tenantId);
         List<RpcClientInterceptorFactory> interceptors =

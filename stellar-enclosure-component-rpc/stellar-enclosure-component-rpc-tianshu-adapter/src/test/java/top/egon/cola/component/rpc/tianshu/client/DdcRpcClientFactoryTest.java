@@ -5,6 +5,7 @@ import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mapstruct.factory.Mappers;
 import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
 import top.egon.cola.component.tianshu.autoconfigure.properties.DdcProperties;
 import top.egon.cola.component.tianshu.autoconfigure.properties.DdcTenantProperties;
@@ -23,12 +24,25 @@ import top.egon.cola.component.rpc.tianshu.contract.proto.v1.GetServicesResponse
 import top.egon.cola.component.rpc.tianshu.contract.proto.v1.PullConfigRequest;
 import top.egon.cola.component.rpc.tianshu.contract.proto.v1.PullConfigResponse;
 
+import top.egon.cola.component.rpc.consumer.direct.RpcDirectClientFactory;
+import top.egon.cola.component.rpc.consumer.direct.RpcDirectClientHandle;
+import top.egon.cola.component.rpc.tianshu.client.ai.DdcAiProtoConverter;
+import top.egon.cola.component.rpc.tianshu.contract.DdcAiResourceRpc;
+import top.egon.cola.component.rpc.tianshu.security.DdcRpcClientInterceptorFactory;
+import top.egon.cola.component.tianshu.model.ai.DdcAiClientScope;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.when;
 
 class DdcRpcClientFactoryTest {
 
@@ -89,6 +103,43 @@ class DdcRpcClientFactoryTest {
         assertThatThrownBy(factory::registryClient)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("tenant-id");
+    }
+
+    @Test
+    void aiClientScopeAndAuthenticatedTransportShareOnePinnedTenantAndDoNotFollowPropertyMutation() {
+        var rpc = new DdcRpcProperties();
+        rpc.setTarget("localhost:19080");
+        rpc.getAuth().getRuntime().setAccessKey("fixture-runtime");
+        rpc.getAuth().getRuntime().setSecretKey("fixture-only");
+        var properties = new DdcProperties();
+        properties.setBizCode("biz"); properties.setEnv("test"); properties.setAppCode("app");
+        var tenant = new DdcTenantProperties(); tenant.setTenantId(101L);
+        var direct = mock(RpcDirectClientFactory.class);
+        @SuppressWarnings("unchecked") RpcDirectClientHandle<DdcAiResourceRpc> handle = mock(RpcDirectClientHandle.class);
+        var api = mock(DdcAiResourceRpc.class);
+        when(handle.client()).thenReturn(api);
+        when(api.getPrompt(any())).thenReturn(top.egon.cola.component.rpc.tianshu.contract.proto.v1.AiPromptResult.newBuilder()
+                .setResourceId("10").setResourceKey("review").setVersionId("11").setVersionNo(2)
+                .setContentSha256("a".repeat(64)).setTemplate("Review").build());
+        when(direct.create(eq(DdcAiResourceRpc.class), any(), anyList())).thenReturn(handle);
+        var factory = new DdcRpcClientFactory(rpc, properties, tenant,
+                new RpcProcessIdentity("test", "test", "127.0.0.1", 1, "instance-1"), direct, Mappers.getMapper(DdcAiProtoConverter.class));
+        var authenticatedTenants = new ArrayList<Long>();
+        try (var interceptors = mockConstruction(DdcRpcClientInterceptorFactory.class,
+                (interceptor, context) -> authenticatedTenants.add((Long) context.arguments().get(1)));
+             var prompt = factory.promptClient(); var skill = factory.skillClient()) {
+            tenant.setTenantId(202L); properties.setBizCode("other"); properties.setEnv("prod"); properties.setAppCode("another");
+            var expected = new DdcAiClientScope(101, "biz", "test", "app");
+            assertThat(prompt.client().scope()).isEqualTo(expected);
+            assertThat(skill.client().scope()).isEqualTo(expected);
+            assertThat(authenticatedTenants).containsExactly(101L, 101L);
+            prompt.client().get(new top.egon.cola.component.tianshu.model.ai.DdcAiResourceQuery("prompts", "review", 2L, 10L));
+            var sent = org.mockito.ArgumentCaptor.forClass(top.egon.cola.component.rpc.tianshu.contract.proto.v1.AiResourceQuery.class);
+            org.mockito.Mockito.verify(api).getPrompt(sent.capture());
+            assertThat(sent.getValue().getBizCode()).isEqualTo("biz");
+            assertThat(sent.getValue().getEnv()).isEqualTo("test");
+            assertThat(sent.getValue().getAppCode()).isEqualTo("app");
+        }
     }
 
     private DdcRpcClientFactory factory(int port) {
