@@ -52,6 +52,10 @@ final class SpringAiModelAdapter extends BaseLlm {
         this.model = model;
     }
 
+    boolean usesChatModel(ChatModel expected) {
+        return expected != null && model == expected;
+    }
+
     @Override
     public Flowable<LlmResponse> generateContent(LlmRequest request, boolean stream) {
         return Flowable.defer(() -> {

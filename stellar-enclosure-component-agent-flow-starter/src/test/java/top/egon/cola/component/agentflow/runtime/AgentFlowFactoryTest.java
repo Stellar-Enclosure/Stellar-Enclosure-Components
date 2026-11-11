@@ -4,10 +4,18 @@ import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.LoopAgent;
 import com.google.adk.agents.ParallelAgent;
 import com.google.adk.agents.SequentialAgent;
+import com.google.adk.models.BaseLlm;
+import com.google.adk.models.BaseLlmConnection;
+import com.google.adk.models.LlmRequest;
+import com.google.adk.models.LlmResponse;
+import com.google.adk.models.Model;
+import io.reactivex.rxjava3.core.Flowable;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import reactor.core.publisher.Flux;
 import top.egon.cola.component.agentflow.config.AgentConfigDTO;
 import top.egon.cola.component.agentflow.config.AgentFlowConfigDTO;
 import top.egon.cola.component.agentflow.config.AgentWorkflowConfigDTO;
@@ -68,6 +76,43 @@ class AgentFlowFactoryTest {
     }
 
     @Test
+    void matches_only_the_exact_compiled_adapter_name_and_model_instance() {
+        var options = ChatOptions.builder().model("model-name").maxTokens(64).build();
+        var expected = new EquivalentChatModel(options);
+        var equivalent = new EquivalentChatModel(options);
+        assertThat(equivalent).isEqualTo(expected).isNotSameAs(expected);
+
+        var root = (LlmAgent) factory.compileRoot("research-flow", leafFlow(),
+                Map.of("researchChatModel", expected), List.of());
+        var compiled = root.model().flatMap(Model::model).orElseThrow();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, "model-name", expected)).isTrue();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, "model-name", equivalent)).isFalse();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, "other-model", expected)).isFalse();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, "model-name ", expected)).isFalse();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, null, expected)).isFalse();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(compiled, "model-name", null)).isFalse();
+    }
+
+    @Test
+    void rejects_another_adk_adapter_with_the_same_model_name() {
+        BaseLlm foreign = new BaseLlm("model-name") {
+            @Override
+            public Flowable<LlmResponse> generateContent(LlmRequest request, boolean stream) {
+                throw new AssertionError("Adapter generation must not run during identity verification");
+            }
+
+            @Override
+            public BaseLlmConnection connect(LlmRequest request) {
+                throw new AssertionError("Adapter connection must not run during identity verification");
+            }
+        };
+
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(foreign, "model-name", chatModel)).isFalse();
+        assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(null, "model-name", chatModel)).isFalse();
+        assertThat(chatModel.calls).isZero();
+    }
+
+    @Test
     void rejects_missing_named_chat_model_without_provider_call() {
         assertThatThrownBy(() -> factory.create("research-flow", leafFlow(), Map.of()))
                 .isInstanceOf(AgentFlowConfigurationException.class)
@@ -100,6 +145,23 @@ class AgentFlowFactoryTest {
                         new AgentConfigDTO("second", "second description", "Run second", "second-output")),
                 List.of(new AgentWorkflowConfigDTO(type, root, root + " description",
                         List.of("first", "second"), type == AgentWorkflowTypeEnum.LOOP ? 3 : null)));
+    }
+
+    private record EquivalentChatModel(ChatOptions options) implements ChatModel {
+        @Override
+        public ChatOptions getOptions() {
+            return options;
+        }
+
+        @Override
+        public ChatResponse call(Prompt prompt) {
+            throw new AssertionError("Model calls must not run during identity verification");
+        }
+
+        @Override
+        public Flux<ChatResponse> stream(Prompt prompt) {
+            throw new AssertionError("Model streaming must not run during identity verification");
+        }
     }
 
     private static final class FakeChatModel implements ChatModel {

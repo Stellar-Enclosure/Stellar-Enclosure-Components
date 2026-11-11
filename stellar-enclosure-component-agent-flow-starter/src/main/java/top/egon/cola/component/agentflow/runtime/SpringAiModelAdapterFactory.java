@@ -31,6 +31,13 @@ public class SpringAiModelAdapterFactory {
         }
     }
 
+    /** Checks the compiled adapter's exact ADK name and Spring AI model instance. */
+    public static boolean matchesCompiledModel(BaseLlm adapter, String expectedModelName, ChatModel expectedModel) {
+        return adapter instanceof SpringAiModelAdapter springAiAdapter
+                && expectedModelName != null && expectedModelName.equals(springAiAdapter.model())
+                && springAiAdapter.usesChatModel(expectedModel);
+    }
+
     public List<BaseTool> createTools(ChatModel chatModel) {
         if (chatModel == null) {
             throw new AgentFlowConfigurationException("properties", "chatModel", "ChatModel bean is required");
