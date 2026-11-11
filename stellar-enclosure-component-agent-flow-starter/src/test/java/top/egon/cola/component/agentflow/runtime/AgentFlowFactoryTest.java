@@ -1,5 +1,6 @@
 package top.egon.cola.component.agentflow.runtime;
 
+import com.google.adk.agents.BaseAgent;
 import com.google.adk.agents.LlmAgent;
 import com.google.adk.agents.LoopAgent;
 import com.google.adk.agents.ParallelAgent;
@@ -9,6 +10,7 @@ import com.google.adk.models.BaseLlmConnection;
 import com.google.adk.models.LlmRequest;
 import com.google.adk.models.LlmResponse;
 import com.google.adk.models.Model;
+import com.google.adk.tools.BaseTool;
 import io.reactivex.rxjava3.core.Flowable;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.model.ChatModel;
@@ -28,6 +30,7 @@ import top.egon.cola.component.agentflow.workflow.AgentWorkflowStrategyFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -109,6 +112,44 @@ class AgentFlowFactoryTest {
 
         assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(foreign, "model-name", chatModel)).isFalse();
         assertThat(SpringAiModelAdapterFactory.matchesCompiledModel(null, "model-name", chatModel)).isFalse();
+        assertThat(chatModel.calls).isZero();
+    }
+
+    @Test
+    void recognizes_only_the_builtin_compiler_and_model_factory_without_calling_overrides() {
+        var compilerCalls = new AtomicInteger();
+        var adapterCalls = new AtomicInteger();
+        var strategy = new AgentWorkflowStrategyFactory(List.of());
+        var customCompiler = new AgentFlowFactory(new SpringAiModelAdapterFactory(), strategy) {
+            @Override
+            public BaseAgent compileRoot(String flowId, AgentFlowConfigDTO config, Map<String, ChatModel> models,
+                                         List<BaseTool> tools) {
+                compilerCalls.incrementAndGet();
+                return super.compileRoot(flowId, config, models, tools);
+            }
+        };
+        var customAdapter = new SpringAiModelAdapterFactory() {
+            @Override
+            public BaseLlm create(ChatModel model, String name) {
+                adapterCalls.incrementAndGet();
+                return super.create(model, name);
+            }
+        };
+        var compilerWithCustomAdapter = new AgentFlowFactory(customAdapter, strategy);
+
+        assertThat(AgentFlowFactory.usesBuiltInModelFactory(factory)).isTrue();
+        assertThat(AgentFlowFactory.usesBuiltInModelFactory(null)).isFalse();
+        assertThat(AgentFlowFactory.usesBuiltInModelFactory(new AgentFlowFactory(null, strategy))).isFalse();
+        assertThat(AgentFlowFactory.usesBuiltInModelFactory(customCompiler)).as("custom compiler").isFalse();
+        assertThat(AgentFlowFactory.usesBuiltInModelFactory(compilerWithCustomAdapter)).as("custom model factory").isFalse();
+        assertThat(compilerCalls.get()).isZero();
+        assertThat(adapterCalls.get()).isZero();
+
+        var models = Map.<String, ChatModel>of("researchChatModel", chatModel);
+        assertThat(customCompiler.compileRoot("research-flow", leafFlow(), models, List.of())).isInstanceOf(LlmAgent.class);
+        assertThat(compilerWithCustomAdapter.compileRoot("research-flow", leafFlow(), models, List.of())).isInstanceOf(LlmAgent.class);
+        assertThat(compilerCalls.get()).isOne();
+        assertThat(adapterCalls.get()).isOne();
         assertThat(chatModel.calls).isZero();
     }
 

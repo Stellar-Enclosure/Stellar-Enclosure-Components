@@ -31,6 +31,13 @@ public class AgentFlowFactory {
     @Qualifier("agentWorkflowStrategyFactory")
     private final AgentWorkflowStrategyFactory strategyFactory;
 
+    /** Checks the compiler and its model factory for hosts that require built-in compilation. */
+    public static boolean usesBuiltInModelFactory(AgentFlowFactory factory) {
+        return factory != null && factory.getClass() == AgentFlowFactory.class
+                && factory.modelAdapterFactory != null
+                && factory.modelAdapterFactory.getClass() == SpringAiModelAdapterFactory.class;
+    }
+
     public AgentFlowCompilationBO create(String flowId, AgentFlowConfigDTO config,
                                          Map<String, ChatModel> chatModels) {
         if (flowId == null || flowId.isBlank() || config == null || chatModels == null) {
