@@ -90,6 +90,14 @@ class ComponentContractGovernanceTest {
             Path.of("README.md"),
             Path.of("README.zh-CN.md")};
 
+    private static final Map<String, List<String>> NEUTRAL_ENUM_CODES = Map.of(
+            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionEvent$TypeEnum",
+            List.of("PROGRESS", "TOOL_STARTED", "TOOL_FINISHED", "OUTPUT", "TERMINAL"),
+            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$StatusEnum",
+            List.of("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"),
+            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$SideEffectOutcomeEnum",
+            List.of("NONE", "CONFIRMED", "UNKNOWN"));
+
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
     private static final Pattern ENUM_HEADER =
             Pattern.compile("^\\s*(?:[a-z]+\\s+)*enum\\s+(\\w+)([^{]*)\\{");
@@ -273,6 +281,28 @@ class ComponentContractGovernanceTest {
                 new LoopAgentWorkflowBuilderStrategy()))
                 .getStrategy(AgentWorkflowTypeEnum.LOOP))
                 .isInstanceOf(LoopAgentWorkflowBuilderStrategy.class);
+    }
+
+    @Test
+    void neutralEnumsKeepExplicitStableStringCodes() throws ReflectiveOperationException {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        for (var expected : NEUTRAL_ENUM_CODES.entrySet()) {
+            Class<?> type = Class.forName(expected.getKey());
+            assertThat(type.isEnum()).isTrue();
+            assertThat(Arrays.stream(type.getDeclaredFields())
+                    .filter(field -> field.isAnnotationPresent(com.fasterxml.jackson.annotation.JsonValue.class))
+                    .count()).isEqualTo(1);
+            var codes = Arrays.stream(type.getEnumConstants())
+                    .map(value -> mapper.convertValue(value, String.class))
+                    .toList();
+            assertThat(codes).containsExactlyElementsOf(expected.getValue()).doesNotHaveDuplicates();
+        }
+    }
+
+    private static boolean neutralEnumHeader(Path file, String simpleName) {
+        String path = MAIN_SOURCES.relativize(file).toString().replace('/', '.');
+        return NEUTRAL_ENUM_CODES.containsKey(path.substring(0, path.length() - ".java".length())
+                + "$" + simpleName);
     }
 
     // 算法第 4 行：validator 继承 BaseValidator，原生约束先行，ADK 图规则与只读语义保持。
@@ -514,7 +544,7 @@ class ComponentContractGovernanceTest {
         for (Path file : sources(root)) {
             for (String line : Files.readAllLines(file)) {
                 Matcher matcher = ENUM_HEADER.matcher(line);
-                if (matcher.find()) {
+                if (matcher.find() && !neutralEnumHeader(file, matcher.group(1))) {
                     headers.add((matcher.group(1) + " " + matcher.group(2).trim()).trim());
                 }
             }
@@ -532,6 +562,9 @@ class ComponentContractGovernanceTest {
                     continue;
                 }
                 String enumName = header.group(1);
+                if (neutralEnumHeader(file, enumName)) {
+                    continue;
+                }
                 for (int cursor = index + 1; cursor < lines.size(); cursor++) {
                     String line = lines.get(cursor);
                     if (line.isBlank()) {

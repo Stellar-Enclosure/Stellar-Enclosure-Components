@@ -1,14 +1,20 @@
 package top.egon.cola.component.agentflow.contract;
 
 import org.junit.jupiter.api.Test;
+import top.egon.cola.component.agentflow.api.AgentFlowExecutionCommand;
+import top.egon.cola.component.agentflow.api.AgentFlowService;
+import top.egon.cola.component.agentflow.api.AgentFlowSessionCommand;
+import top.egon.cola.component.agentflow.api.AgentFlowSessionResult;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -183,6 +189,45 @@ class AgentFlowComponentContractTest {
                 assertFalse(normalized.contains("/repository/"), normalized);
                 assertFalse(normalized.contains("/biz/"), normalized);
             });
+        }
+    }
+
+    @Test
+    void retainsLegacySignaturesAndExportsSeparateNeutralTypes() throws ReflectiveOperationException {
+        assertEquals("java.util.List<top.egon.cola.component.agentflow.api.AgentFlowDescriptorDTO>",
+                AgentFlowService.class.getMethod("listFlows").getGenericReturnType().getTypeName());
+        assertEquals(AgentFlowSessionResult.class,
+                AgentFlowService.class.getMethod("createSession", AgentFlowSessionCommand.class).getReturnType());
+        assertEquals(void.class,
+                AgentFlowService.class.getMethod("deleteSession", AgentFlowSessionCommand.class).getReturnType());
+        assertEquals("java.util.List<com.google.adk.events.Event>",
+                AgentFlowService.class.getMethod("execute", AgentFlowExecutionCommand.class)
+                        .getGenericReturnType().getTypeName());
+        assertEquals("io.reactivex.rxjava3.core.Flowable<com.google.adk.events.Event>",
+                AgentFlowService.class.getMethod("executeStream", AgentFlowExecutionCommand.class)
+                        .getGenericReturnType().getTypeName());
+
+        String api = "top.egon.cola.component.agentflow.api.";
+        Class<?> executor = assertDoesNotThrow(() -> Class.forName(api + "execution.AgentExecutor"),
+                "The neutral execution contract must be published separately");
+        Class<?> command = Class.forName(api + "execution.AgentExecutionCommand");
+        Class<?> context = Class.forName(api + "execution.AgentExecutionContextVO");
+        Class<?> handle = Class.forName(api + "execution.AgentExecutionHandle");
+        assertEquals(handle, executor.getMethod("execute", command, context).getReturnType());
+
+        for (String type : List.of("execution.AgentExecutor", "execution.AgentExecutionCommand",
+                "execution.AgentExecutionContextVO", "execution.AgentExecutionHandle",
+                "execution.AgentExecutionEvent", "execution.AgentExecutionResult", "context.ContextScopeVO",
+                "context.ContextQuery", "context.ContextSource", "context.ContextFragmentResult",
+                "capability.CallPermitProvider", "capability.CallPermitVO", "session.SessionStore",
+                "session.SessionStateResult", "session.SessionWriteCommand")) {
+            for (Method method : Class.forName(api + type).getDeclaredMethods()) {
+                String signature = method.toGenericString();
+                assertFalse(signature.contains("com.google.adk"), signature);
+                assertFalse(signature.contains("org.springframework.ai"), signature);
+                assertFalse(signature.contains("io.reactivex"), signature);
+                assertFalse(signature.contains("top.egon.cola.platform.tianji"), signature);
+            }
         }
     }
 

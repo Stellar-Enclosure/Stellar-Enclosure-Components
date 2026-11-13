@@ -1,1 +1,2 @@
 top.egon.cola.component.agentflow.autoconfigure.AgentFlowAutoConfiguration
+top.egon.cola.component.agentflow.autoconfigure.AgentExecutionAutoConfiguration

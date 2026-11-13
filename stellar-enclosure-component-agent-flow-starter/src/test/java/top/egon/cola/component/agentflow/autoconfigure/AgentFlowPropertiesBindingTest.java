@@ -24,6 +24,9 @@ class AgentFlowPropertiesBindingTest {
         assertThat(properties.executionTimeout()).isEqualTo(Duration.ofMinutes(2));
         assertThat(properties.shutdownTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(properties.flows()).isEmpty();
+        assertThat(properties.session().storeRef()).isEqualTo("inMemory");
+        assertThat(new AgentFlowProperties(false, null, null, Map.of()).session().storeRef())
+                .isEqualTo("inMemory");
     }
 
     @Test
@@ -57,6 +60,29 @@ class AgentFlowPropertiesBindingTest {
                         new NoUnboundElementsBindHandler(BindHandler.DEFAULT)))
                 .isInstanceOf(Exception.class)
                 .hasStackTraceContaining("unknown-setting");
+    }
+
+    @Test
+    void bindsTrustedSessionStoreReferenceAlongsideLegacySettings() {
+        AgentFlowProperties properties = binder(Map.of(
+                        "egon.cola.component.agent-flow.enabled", "true",
+                        "egon.cola.component.agent-flow.session.store-ref", "durableSessions"))
+                .bind("egon.cola.component.agent-flow", Bindable.of(AgentFlowProperties.class),
+                        new NoUnboundElementsBindHandler(BindHandler.DEFAULT))
+                .orElseThrow(() -> new IllegalStateException("properties were not bound"));
+
+        assertThat(properties.enabled()).isTrue();
+        assertThat(properties.executionTimeout()).isEqualTo(Duration.ofMinutes(2));
+        assertThat(properties.session().storeRef()).isEqualTo("durableSessions");
+    }
+
+    @Test
+    void rejectsBlankSessionStoreReference() {
+        assertThatThrownBy(() -> binder(Map.of(
+                        "egon.cola.component.agent-flow.session.store-ref", " "))
+                .bind("egon.cola.component.agent-flow", Bindable.of(AgentFlowProperties.class),
+                        new NoUnboundElementsBindHandler(BindHandler.DEFAULT)))
+                .hasStackTraceContaining("session store-ref must be a valid bean name");
     }
 
     private static Binder binder(Map<String, String> values) {
