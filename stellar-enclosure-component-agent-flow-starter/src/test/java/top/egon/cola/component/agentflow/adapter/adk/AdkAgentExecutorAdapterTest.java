@@ -62,11 +62,16 @@ class AdkAgentExecutorAdapterTest {
         var observed = new AtomicInteger();
         var legacy = new AtomicInteger();
         var output = Map.<String, Object>of("accepted", true);
+        var leakedBoundary = new java.util.concurrent.atomic.AtomicReference<AgentExecutionContextVO.ToolCallBoundary>();
         var tool = new AdkAgentExecutorAdapter.RegisteredToolVO(ref, FunctionDeclaration.builder().name("fixed_tool")
                 .description("Apply the registered fixture effect.").parameters(Schema.builder().type("OBJECT")
                         .properties(Map.of("amount", Schema.builder().type("INTEGER").build())).required(List.of("amount")).build()).build(), true,
                 arguments -> assertEquals(Map.of("amount", 7L), arguments),
-                result -> { if (!output.equals(result)) throw new IllegalArgumentException("Invalid output"); },
+                result -> {
+                    if (!output.equals(result)) throw new IllegalArgumentException("Invalid output");
+                    var retained = leakedBoundary.getAndSet(null);
+                    if (retained != null) assertThrows(RuntimeException.class, retained::beforeSend);
+                },
                 arguments -> { legacy.incrementAndGet(); return output; }, null);
         var model = new ModelRegistrationVO("fixed-model", "host-model", testModel(prompt -> {
             if (prompt.getInstructions().stream().anyMatch(org.springframework.ai.chat.messages.ToolResponseMessage.class::isInstance)) {
@@ -109,7 +114,10 @@ class AdkAgentExecutorAdapterTest {
                     "duplicate-after-send")) {
                 var execution = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(6), Duration.ofSeconds(3), null,
                         (request, boundary) -> switch (mode) {
-                            case "replay" -> output;
+                            case "replay" -> {
+                                leakedBoundary.set(boundary);
+                                yield output;
+                            }
                             case "denied" -> throw new IllegalArgumentException("No tool permission");
                             case "known-no-effect" -> {
                                 boundary.beforeSend();

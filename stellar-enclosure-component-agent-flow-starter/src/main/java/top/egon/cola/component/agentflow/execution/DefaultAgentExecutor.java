@@ -444,7 +444,14 @@ public class DefaultAgentExecutor implements AgentExecutor {
             var result = dispatch(ref.key(), "TOOL_CALL", false, write, active -> {
                 hostedStart.accept(active.toolDeadline);
                 var call = new ToolCallRequestVO(request.executionId(), scope(), ref, input, write, active.toolDeadline);
-                var output = verifyOutput.apply(handler.call(call, new HostedToolBoundary(ref.key(), active, verifyOutput)));
+                var boundary = new HostedToolBoundary(ref.key(), active, verifyOutput);
+                Map<String, Object> returned;
+                try {
+                    returned = handler.call(call, boundary);
+                } finally {
+                    boundary.close();
+                }
+                var output = verifyOutput.apply(returned);
                 synchronized (stateLock) {
                     requireActiveTool(active);
                     if (active.dispatched && !active.knownNoEffect && !output.equals(active.verifiedToolOutput)) {
@@ -461,6 +468,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
             private final String capability;
             private final ActiveCall active;
             private final Function<Map<String, Object>, Map<String, Object>> verifyOutput;
+            private boolean open = true;
 
             private HostedToolBoundary(String capability, ActiveCall active,
                                        Function<Map<String, Object>, Map<String, Object>> verifyOutput) {
@@ -472,7 +480,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
             @Override
             public void beforeSend() {
                 permit(capability, "TOOL_CALL");
-                markToolDispatched(active);
+                markToolDispatched(active, this::requireOpen);
             }
 
             @Override
@@ -481,6 +489,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
                 var validated = verifyOutput.apply(output);
                 synchronized (stateLock) {
                     requireActiveTool(active);
+                    requireOpen();
                     if (active.dispatched) {
                         if (active.verifiedToolOutput != null) throw failure("INVALID_TOOL_DISPATCH");
                         active.verifiedToolOutput = validated;
@@ -493,12 +502,23 @@ public class DefaultAgentExecutor implements AgentExecutor {
             public void recordKnownNoEffect() {
                 synchronized (stateLock) {
                     requireActiveTool(active);
+                    requireOpen();
                     if (!active.mayHaveSideEffects || !active.dispatched || active.knownNoEffect
                             || active.verifiedToolOutput != null) {
                         throw failure("INVALID_TOOL_DISPATCH");
                     }
                     active.knownNoEffect = true;
                 }
+            }
+
+            private void close() {
+                synchronized (stateLock) {
+                    open = false;
+                }
+            }
+
+            private void requireOpen() {
+                if (!open) throw failure("INVALID_TOOL_DISPATCH");
             }
         }
 
@@ -561,9 +581,14 @@ public class DefaultAgentExecutor implements AgentExecutor {
         }
 
         private void markToolDispatched(ActiveCall active) {
+            markToolDispatched(active, () -> { });
+        }
+
+        private void markToolDispatched(ActiveCall active, Runnable requireDispatchScope) {
             FinishActions actions;
             synchronized (stateLock) {
                 requireActiveTool(active);
+                requireDispatchScope.run();
                 if (active.dispatched) {
                     throw failure("INVALID_TOOL_DISPATCH");
                 }
