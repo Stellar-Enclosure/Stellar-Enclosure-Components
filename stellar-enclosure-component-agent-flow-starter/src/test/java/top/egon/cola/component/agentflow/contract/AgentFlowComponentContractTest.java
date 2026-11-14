@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -34,6 +35,10 @@ class AgentFlowComponentContractTest {
     private static final Path ARCHITECTURE = COMPONENTS_ROOT.resolve("egon-cola-components-architecture.md");
     private static final Path MODULE_POM = Path.of("pom.xml").toAbsolutePath().normalize();
     private static final Path SOURCE_ROOT = Path.of("src/main/java").toAbsolutePath().normalize();
+    private static final Path ADAPTER_ROOT =
+            SOURCE_ROOT.resolve("top/egon/cola/component/agentflow/adapter");
+    private static final Set<Path> ADAPTER_PACKAGES = Set.of(ADAPTER_ROOT.resolve("adk"),
+            ADAPTER_ROOT.resolve("springai"), ADAPTER_ROOT.resolve("mcp"));
     private static final Path MODULE_README = Path.of("README.md").toAbsolutePath().normalize();
     private static final Path MODULE_README_ZH = Path.of("README.zh-CN.md").toAbsolutePath().normalize();
 
@@ -180,11 +185,13 @@ class AgentFlowComponentContractTest {
 
         try (Stream<Path> directories = Files.walk(SOURCE_ROOT)) {
             directories.filter(Files::isDirectory).forEach(directory -> {
-                String normalized = directory.toString().replace('\\', '/');
+                String normalized = "/" + SOURCE_ROOT.relativize(directory).toString().replace('\\', '/') + "/";
                 assertFalse(normalized.contains("/domain/"), normalized);
                 assertFalse(normalized.contains("/application/"), normalized);
                 assertFalse(normalized.contains("/infrastructure/"), normalized);
-                assertFalse(normalized.contains("/adapter/"), normalized);
+                if (normalized.contains("/adapter/") && !ADAPTER_ROOT.equals(directory)) {
+                    assertTrue(ADAPTER_PACKAGES.contains(directory), normalized);
+                }
                 assertFalse(normalized.contains("/aggregate/"), normalized);
                 assertFalse(normalized.contains("/repository/"), normalized);
                 assertFalse(normalized.contains("/biz/"), normalized);
@@ -193,7 +200,15 @@ class AgentFlowComponentContractTest {
     }
 
     @Test
+    void publishesExactlyTheRegisteredAdapterPackages() throws IOException {
+        try (Stream<Path> directories = Files.list(ADAPTER_ROOT)) {
+            assertEquals(ADAPTER_PACKAGES, Set.copyOf(directories.filter(Files::isDirectory).toList()));
+        }
+    }
+
+    @Test
     void retainsLegacySignaturesAndExportsSeparateNeutralTypes() throws ReflectiveOperationException {
+        assertTrue(AgentFlowService.class.isAnnotationPresent(Deprecated.class));
         assertEquals("java.util.List<top.egon.cola.component.agentflow.api.AgentFlowDescriptorDTO>",
                 AgentFlowService.class.getMethod("listFlows").getGenericReturnType().getTypeName());
         assertEquals(AgentFlowSessionResult.class,

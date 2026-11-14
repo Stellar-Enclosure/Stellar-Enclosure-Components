@@ -96,7 +96,15 @@ class ComponentContractGovernanceTest {
             AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$StatusEnum",
             List.of("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"),
             AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$SideEffectOutcomeEnum",
-            List.of("NONE", "CONFIRMED", "UNKNOWN"));
+            List.of("NONE", "CONFIRMED", "UNKNOWN"),
+            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$StrategyEnum",
+            List.of("REASONING", "SEQUENTIAL", "PARALLEL", "BOUNDED_LOOP", "HANDOFF"),
+            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$MergeEnum",
+            List.of("OUTPUT_AGENT", "COLLECT_BY_AGENT"),
+            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$TerminationModeEnum",
+            List.of("ROOT_TERMINAL", "PREDICATE"),
+            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$ConditionOpEnum",
+            List.of("EQ", "NE", "GT", "GE", "LT", "LE", "AND", "OR", "NOT"));
 
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
     private static final Pattern ENUM_HEADER =
@@ -285,7 +293,8 @@ class ComponentContractGovernanceTest {
 
     @Test
     void neutralEnumsKeepExplicitStableStringCodes() throws ReflectiveOperationException {
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var jackson2 = new com.fasterxml.jackson.databind.ObjectMapper();
+        var jackson3 = tools.jackson.databind.json.JsonMapper.builder().build();
         for (var expected : NEUTRAL_ENUM_CODES.entrySet()) {
             Class<?> type = Class.forName(expected.getKey());
             assertThat(type.isEnum()).isTrue();
@@ -293,9 +302,12 @@ class ComponentContractGovernanceTest {
                     .filter(field -> field.isAnnotationPresent(com.fasterxml.jackson.annotation.JsonValue.class))
                     .count()).isEqualTo(1);
             var codes = Arrays.stream(type.getEnumConstants())
-                    .map(value -> mapper.convertValue(value, String.class))
+                    .map(value -> jackson2.convertValue(value, String.class))
                     .toList();
             assertThat(codes).containsExactlyElementsOf(expected.getValue()).doesNotHaveDuplicates();
+            assertThat(Arrays.stream(type.getEnumConstants())
+                    .map(value -> jackson3.convertValue(value, String.class))
+                    .toList()).containsExactlyElementsOf(codes);
         }
     }
 

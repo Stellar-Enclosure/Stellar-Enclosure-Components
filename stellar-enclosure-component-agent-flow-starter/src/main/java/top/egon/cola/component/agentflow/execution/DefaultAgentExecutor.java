@@ -3,6 +3,7 @@ package top.egon.cola.component.agentflow.execution;
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
 import jakarta.validation.Validator;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,6 +47,7 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 @Slf4j
@@ -115,7 +117,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
     @FunctionalInterface
     public interface ExecutionAdapter {
 
-        AgentExecutionResult execute(ExecutionInvocation invocation);
+        AgentExecutionResult execute(@NotNull @Valid ExecutionInvocation invocation);
     }
 
     public interface ExecutionInvocation {
@@ -134,9 +136,41 @@ public class DefaultAgentExecutor implements AgentExecutor {
 
         <T> T modelCall(String capabilityRef, Supplier<T> call);
 
+        default <T> T modelCallWithActivity(String capabilityRef, Function<ModelActivity, T> call) {
+            throw failure("MODEL_ACTIVITY_UNAVAILABLE");
+        }
+
         <T> T toolCall(String capabilityRef, boolean mayHaveSideEffects, Supplier<T> call);
 
+        default <T> T toolCallWithDispatch(String capabilityRef, boolean mayHaveSideEffects,
+                                           Function<ToolDispatch, T> call) {
+            throw failure("TOOL_DISPATCH_UNAVAILABLE");
+        }
+
+        default void requireCurrentCapability(String capabilityRef, String purpose) {
+            throw failure("PERMIT_UNAVAILABLE");
+        }
+
+        default void requireRunning() {
+            throw failure("EXECUTION_STATE_UNAVAILABLE");
+        }
+
         void emit(AgentExecutionEvent.TypeEnum type, Map<String, Object> payload);
+    }
+
+    @FunctionalInterface
+    public interface ModelActivity {
+
+        /** Call only when the provider sends a frame for this invocation. */
+        void onFrame();
+    }
+
+    public interface ToolDispatch {
+
+        Instant deadline();
+
+        /** Recheck authorization and mark the business request immediately before sending it. */
+        void beforeSend();
     }
 
     public record ExecutionRequestVO(String executionId, AgentExecutionCommand.TemplateVO template,
@@ -197,8 +231,12 @@ public class DefaultAgentExecutor implements AgentExecutor {
             if (!now.isBefore(deadline)) {
                 return 0;
             }
+            return saturatedNanos(Duration.between(now, deadline));
+        }
+
+        private static long saturatedNanos(Duration duration) {
             try {
-                return Duration.between(now, deadline).toNanos();
+                return duration.toNanos();
             } catch (ArithmeticException overflow) {
                 return Long.MAX_VALUE;
             }
@@ -320,19 +358,48 @@ public class DefaultAgentExecutor implements AgentExecutor {
 
         @Override
         public <T> T modelCall(String capabilityRef, Supplier<T> call) {
-            return dispatch(capabilityRef, "MODEL_CALL", true, false, call);
+            Objects.requireNonNull(call, "external call");
+            return modelCallWithActivity(capabilityRef, activity -> call.get());
+        }
+
+        @Override
+        public <T> T modelCallWithActivity(String capabilityRef, Function<ModelActivity, T> call) {
+            Objects.requireNonNull(call, "external call");
+            return dispatch(capabilityRef, "MODEL_CALL", true, false, active -> call.apply(() -> onModelFrame(active)));
         }
 
         @Override
         public <T> T toolCall(String capabilityRef, boolean mayHaveSideEffects, Supplier<T> call) {
-            return dispatch(capabilityRef, "TOOL_CALL", false, mayHaveSideEffects, call);
+            Objects.requireNonNull(call, "external call");
+            return dispatch(capabilityRef, "TOOL_CALL", false, mayHaveSideEffects, active -> {
+                markToolDispatched(active);
+                return call.get();
+            });
+        }
+
+        @Override
+        public <T> T toolCallWithDispatch(String capabilityRef, boolean mayHaveSideEffects,
+                                          Function<ToolDispatch, T> call) {
+            Objects.requireNonNull(call, "external call");
+            return dispatch(capabilityRef, "TOOL_CALL", false, mayHaveSideEffects, active -> call.apply(new ToolDispatch() {
+                @Override
+                public Instant deadline() {
+                    return active.toolDeadline;
+                }
+
+                @Override
+                public void beforeSend() {
+                    permit(capabilityRef, "TOOL_CALL");
+                    markToolDispatched(active);
+                }
+            }));
         }
 
         private <T> T dispatch(String capability, String purpose, boolean model, boolean mayHaveSideEffects,
-                               Supplier<T> call) {
-            Objects.requireNonNull(call, "external call");
+                               Function<ActiveCall, T> call) {
             permit(capability, purpose);
-            var active = new ActiveCall(Thread.currentThread(), mayHaveSideEffects);
+            Duration limit = model ? request.limits().modelIdleTimeout() : request.limits().toolTimeout();
+            var active = new ActiveCall(Thread.currentThread(), mayHaveSideEffects, model, saturatedNanos(limit));
             synchronized (stateLock) {
                 requireActive();
                 if (callsInFlight.size() >= request.limits().maxParallelism()
@@ -349,28 +416,36 @@ public class DefaultAgentExecutor implements AgentExecutor {
             }
 
             boolean succeeded = false;
-            ScheduledFuture<?> callTimeout = null;
             try {
-                Duration limit = model ? request.limits().modelIdleTimeout() : request.limits().toolTimeout();
-                callTimeout = timers.schedule(() -> expireCall(active, model), limit.toNanos(), TimeUnit.NANOSECONDS);
                 requireRunning();
                 synchronized (stateLock) {
                     requireActive();
-                    active.dispatched = true;
+                    if (!model) {
+                        Instant now = clock.instant();
+                        active.toolDeadline = Duration.between(now, deadline).compareTo(limit) <= 0
+                                ? deadline : now.plus(limit);
+                    }
+                    active.lastActivityNanos = System.nanoTime();
+                    scheduleCallTimeout(active, active.limitNanos);
                 }
-                T result = call.get();
+                T result = call.apply(active);
                 succeeded = true;
                 return result;
             } finally {
+                FinishActions actions = null;
                 synchronized (stateLock) {
+                    if (terminal == null && active.timeout != null) {
+                        actions = finishExpiredCallLocked(active, System.nanoTime());
+                    }
                     callsInFlight.remove(active);
+                    active.cancelTimeout();
                     if (active.dispatched && mayHaveSideEffects) {
                         observedEffect = mergeEffects(observedEffect,
                                 succeeded ? SideEffectOutcomeEnum.CONFIRMED : SideEffectOutcomeEnum.UNKNOWN);
                     }
                 }
-                if (callTimeout != null) {
-                    callTimeout.cancel(false);
+                if (actions != null) {
+                    publishCompletion(actions);
                 }
                 if (succeeded) {
                     requireRunning();
@@ -378,17 +453,77 @@ public class DefaultAgentExecutor implements AgentExecutor {
             }
         }
 
-        private void expireCall(ActiveCall active, boolean model) {
-            FinishActions actions = null;
+        private void markToolDispatched(ActiveCall active) {
+            FinishActions actions;
             synchronized (stateLock) {
-                if (callsInFlight.contains(active)) {
-                    actions = finishLocked(StatusEnum.TIMED_OUT, model ? "MODEL_IDLE_TIMEOUT" : "TOOL_TIMEOUT",
-                            null, SideEffectOutcomeEnum.NONE, true, false);
+                requireActive();
+                if (!callsInFlight.contains(active) || active.dispatched) {
+                    throw failure("INVALID_TOOL_DISPATCH");
+                }
+                actions = finishExpiredCallLocked(active, System.nanoTime());
+                if (actions == null) {
+                    active.dispatched = true;
+                    return;
+                }
+            }
+            publishCompletion(actions);
+            throw failure("EXECUTION_STOPPED");
+        }
+
+        private void onModelFrame(ActiveCall active) {
+            FinishActions actions;
+            synchronized (stateLock) {
+                requireActive();
+                if (!active.model || !callsInFlight.contains(active)) {
+                    throw failure("MODEL_CALL_STOPPED");
+                }
+                long observedAt = System.nanoTime();
+                actions = finishExpiredCallLocked(active, observedAt);
+                if (actions == null) {
+                    active.lastActivityNanos = observedAt;
+                    return;
+                }
+            }
+            publishCompletion(actions);
+            throw failure("EXECUTION_STOPPED");
+        }
+
+        private void scheduleCallTimeout(ActiveCall active, long delayNanos) {
+            active.timeout = timers.schedule(() -> expireCall(active), delayNanos, TimeUnit.NANOSECONDS);
+        }
+
+        private void expireCall(ActiveCall active) {
+            FinishActions actions;
+            synchronized (stateLock) {
+                if (terminal != null || !callsInFlight.contains(active)) {
+                    return;
+                }
+                long nowNanos = System.nanoTime();
+                actions = finishExpiredCallLocked(active, nowNanos);
+                if (actions == null) {
+                    scheduleCallTimeout(active, active.remainingNanos(nowNanos));
                 }
             }
             if (actions != null) {
                 publishCompletion(actions);
             }
+        }
+
+        private FinishActions finishExpiredCallLocked(ActiveCall active, long nowNanos) {
+            if (!clock.instant().isBefore(deadline)) {
+                return finishLocked(StatusEnum.TIMED_OUT, "DEADLINE_EXCEEDED", null, SideEffectOutcomeEnum.NONE,
+                        true, false);
+            }
+            if (active.remainingNanos(nowNanos) <= 0) {
+                String code = active.model ? "MODEL_IDLE_TIMEOUT" : "TOOL_TIMEOUT";
+                return finishLocked(StatusEnum.TIMED_OUT, code, null, SideEffectOutcomeEnum.NONE, true, false);
+            }
+            return null;
+        }
+
+        @Override
+        public void requireCurrentCapability(String capabilityRef, String purpose) {
+            permit(capabilityRef, purpose);
         }
 
         private CallPermitVO permit(String capability, String purpose) {
@@ -403,7 +538,8 @@ public class DefaultAgentExecutor implements AgentExecutor {
             return permit;
         }
 
-        private void requireRunning() {
+        @Override
+        public void requireRunning() {
             if (!clock.instant().isBefore(deadline)) {
                 stop(StatusEnum.TIMED_OUT, "DEADLINE_EXCEEDED");
             }
@@ -454,12 +590,12 @@ public class DefaultAgentExecutor implements AgentExecutor {
                 if (!clock.instant().isBefore(deadline)) {
                     actions = finishLocked(StatusEnum.TIMED_OUT, "DEADLINE_EXCEEDED", null,
                             SideEffectOutcomeEnum.NONE, true, false);
-                } else if (!callsInFlight.isEmpty()) {
+                } else if (result.status() == StatusEnum.COMPLETED && !callsInFlight.isEmpty()) {
                     actions = finishLocked(StatusEnum.FAILED, "INVALID_ROOT_RESULT", null,
                             SideEffectOutcomeEnum.NONE, true, false);
                 } else {
                     actions = finishLocked(result.status(), result.errorCode(), result.output(),
-                            result.sideEffectOutcome(), false, false);
+                            result.sideEffectOutcome(), !callsInFlight.isEmpty(), false);
                 }
             }
             publishCompletion(actions);
@@ -483,6 +619,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
             }
             boolean unresolvedEffect = callsInFlight.stream().anyMatch(call -> call.dispatched
                     && call.mayHaveSideEffects);
+            callsInFlight.forEach(ActiveCall::cancelTimeout);
             var combined = unresolvedEffect ? SideEffectOutcomeEnum.UNKNOWN : mergeEffects(observedEffect, effect);
             terminal = new AgentExecutionResult(request.executionId(), status, output, code, combined, now());
             var terminalPayload = new LinkedHashMap<String, Object>();
@@ -645,11 +782,28 @@ public class DefaultAgentExecutor implements AgentExecutor {
 
             private final Thread thread;
             private final boolean mayHaveSideEffects;
+            private final boolean model;
+            private final long limitNanos;
             private boolean dispatched;
+            private long lastActivityNanos;
+            private Instant toolDeadline;
+            private ScheduledFuture<?> timeout;
 
-            private ActiveCall(Thread thread, boolean mayHaveSideEffects) {
+            private ActiveCall(Thread thread, boolean mayHaveSideEffects, boolean model, long limitNanos) {
                 this.thread = thread;
                 this.mayHaveSideEffects = mayHaveSideEffects;
+                this.model = model;
+                this.limitNanos = limitNanos;
+            }
+
+            private long remainingNanos(long nowNanos) {
+                return limitNanos - (nowNanos - lastActivityNanos);
+            }
+
+            private void cancelTimeout() {
+                if (timeout != null) {
+                    timeout.cancel(false);
+                }
             }
         }
     }

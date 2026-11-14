@@ -8,7 +8,11 @@ import top.egon.cola.component.agentflow.config.AgentFlowSessionValidationGroup;
 
 import java.util.List;
 
-/** Internal Java facade for compiled flow discovery and in-memory session execution. */
+/**
+ * Compatibility facade for compiled ADK flow discovery and in-memory session execution.
+ * @deprecated Use the neutral AgentExecutor contract for new integrations.
+ */
+@Deprecated(forRemoval = false)
 public interface AgentFlowService {
 
     List<AgentFlowDescriptorDTO> listFlows();

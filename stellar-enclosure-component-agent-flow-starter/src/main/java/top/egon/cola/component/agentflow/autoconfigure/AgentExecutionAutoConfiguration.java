@@ -4,11 +4,16 @@ import jakarta.validation.Validator;
 import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import top.egon.cola.component.agentflow.api.session.SessionStore;
+import top.egon.cola.component.agentflow.adapter.adk.AdkAgentExecutorAdapter;
+import top.egon.cola.component.agentflow.adapter.mcp.McpToolAdapter;
+import top.egon.cola.component.agentflow.adapter.springai.SpringAiExecutionModelAdapter;
+import top.egon.cola.component.agentflow.agentic.AgenticPlanCompiler;
 import top.egon.cola.component.agentflow.context.DefaultContextAssembler;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionAdapter;
@@ -52,6 +57,35 @@ public class AgentExecutionAutoConfiguration {
     public DefaultContextAssembler agentContextAssembler(
             @Qualifier("agentExecutionClock") Clock clock, @Qualifier("defaultValidator") Validator validator) {
         return new DefaultContextAssembler(clock, validator);
+    }
+
+    @Bean("agenticPlanCompiler")
+    @ConditionalOnMissingBean(name = "agenticPlanCompiler")
+    public AgenticPlanCompiler agenticPlanCompiler(@Qualifier("agentExecutionClock") Clock clock) {
+        return new AgenticPlanCompiler(clock);
+    }
+
+    @Bean("springAiExecutionModelAdapter")
+    @ConditionalOnMissingBean(name = "springAiExecutionModelAdapter")
+    public SpringAiExecutionModelAdapter springAiExecutionModelAdapter() {
+        return new SpringAiExecutionModelAdapter();
+    }
+
+    @Bean("mcpToolAdapter")
+    @ConditionalOnMissingBean(name = "mcpToolAdapter")
+    public McpToolAdapter mcpToolAdapter() {
+        return new McpToolAdapter();
+    }
+
+    @Bean("adkAgentExecutorAdapter")
+    @ConditionalOnBean(name = "agentExecutionTemplateResolver")
+    @ConditionalOnMissingBean(name = "adkAgentExecutorAdapter")
+    public ExecutionAdapter adkAgentExecutorAdapter(
+            @Qualifier("agenticPlanCompiler") AgenticPlanCompiler compiler,
+            @Qualifier("springAiExecutionModelAdapter") SpringAiExecutionModelAdapter models,
+            @Qualifier("mcpToolAdapter") McpToolAdapter tools,
+            @Qualifier("agentExecutionTemplateResolver") AdkAgentExecutorAdapter.TemplateResolver resolver) {
+        return new AdkAgentExecutorAdapter(compiler, models, tools, resolver);
     }
 
     @Bean("agentExecutionAdapters")
