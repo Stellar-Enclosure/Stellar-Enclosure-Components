@@ -2,7 +2,9 @@ package top.egon.cola.component.agentflow.adapter.adk;
 
 import com.google.adk.events.Event;
 import com.google.genai.types.Content;
+import com.google.genai.types.FunctionDeclaration;
 import com.google.genai.types.Part;
+import com.google.genai.types.Schema;
 import io.reactivex.rxjava3.core.Flowable;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -12,6 +14,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import reactor.core.publisher.Flux;
@@ -47,6 +50,124 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AdkAgentExecutorAdapterTest {
+
+    @Test
+    void actual_model_tool_uses_the_exact_host_callback_and_only_confirmed_sends_count_as_writes() throws Exception {
+        var instruction = new AgenticPlanVO.DependencyRefVO("instruction", 1, "2".repeat(64));
+        var ref = new AgenticPlanVO.DependencyRefVO("fixed-tool", 3, "3".repeat(64));
+        var leaf = new AgenticPlanVO.LeafVO("answer", instruction, "fixed-model", List.of(ref));
+        var plan = new AgenticPlanVO(AgenticPlanVO.StrategyEnum.REASONING, List.of(leaf), List.of(), null, 1, "answer",
+                AgenticPlanVO.MergeEnum.OUTPUT_AGENT, List.of(),
+                new AgenticPlanVO.RootTerminalVO(AgenticPlanVO.TerminationModeEnum.ROOT_TERMINAL));
+        var observed = new AtomicInteger();
+        var legacy = new AtomicInteger();
+        var output = Map.<String, Object>of("accepted", true);
+        var tool = new AdkAgentExecutorAdapter.RegisteredToolVO(ref, FunctionDeclaration.builder().name("fixed_tool")
+                .description("Apply the registered fixture effect.").parameters(Schema.builder().type("OBJECT")
+                        .properties(Map.of("amount", Schema.builder().type("INTEGER").build())).required(List.of("amount")).build()).build(), true,
+                arguments -> assertEquals(Map.of("amount", 7L), arguments),
+                result -> { if (!output.equals(result)) throw new IllegalArgumentException("Invalid output"); },
+                arguments -> { legacy.incrementAndGet(); return output; }, null);
+        var model = new ModelRegistrationVO("fixed-model", "host-model", testModel(prompt -> {
+            if (prompt.getInstructions().stream().anyMatch(org.springframework.ai.chat.messages.ToolResponseMessage.class::isInstance)) {
+                return Flux.just(response("{\"result\":\"complete\"}"));
+            }
+            var message = AssistantMessage.builder().content("").toolCalls(List.of(
+                    new AssistantMessage.ToolCall("host-call", "function", "fixed_tool", "{\"amount\":7}"))).build();
+            return Flux.just(new ChatResponse(List.of(new Generation(message,
+                    ChatGenerationMetadata.builder().finishReason("tool_calls").build()))));
+        }), 100, 12, prompt -> 10);
+        var registration = new AdkAgentExecutorAdapter.RegisteredTemplateVO("registered", 1, "1".repeat(64), plan,
+                Map.of("answer", new AdkAgentExecutorAdapter.RegisteredLeafVO(instruction, "Return one JSON object.",
+                        "fixed-model", model, List.of(tool), (invocation, source, round) ->
+                        new AdkAgentExecutorAdapter.LeafDecisionVO(true, null))), Map.of());
+        var clock = Clock.systemUTC();
+        var adapter = new AdkAgentExecutorAdapter(new top.egon.cola.component.agentflow.agentic.AgenticPlanCompiler(clock),
+                new SpringAiExecutionModelAdapter(), new McpToolAdapter(), (expected, scope) -> registration);
+        try (var fixture = new StreamFixture(prompt -> Flux.empty(), adapter)) {
+            var result = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(6), Duration.ofSeconds(3), null,
+                    (request, boundary) -> {
+                        observed.incrementAndGet();
+                        assertEquals("stream-run", request.executionId());
+                        assertEquals(new AgentExecutionContextVO.ToolReferenceVO(ref.key(), ref.version(), ref.contentSha256()), request.toolRef());
+                        assertEquals(Map.of("amount", 7L), request.arguments());
+                        assertTrue(request.write());
+                        assertThrows(UnsupportedOperationException.class, () -> request.arguments().put("amount", 8L));
+                        try (var transport = Executors.newVirtualThreadPerTaskExecutor()) {
+                            transport.submit(boundary::beforeSend).get(1, TimeUnit.SECONDS);
+                        } catch (Exception failure) {
+                            throw new IllegalStateException(failure);
+                        }
+                        return boundary.verifyOutput(output);
+                    }).completion().toCompletableFuture().get(8, TimeUnit.SECONDS);
+            assertEquals(1, observed.get(), () -> result.status() + " / " + result.errorCode() + " / " + legacy.get());
+            assertEquals(0, legacy.get());
+            assertEquals(StatusEnum.COMPLETED, result.status(), result.errorCode());
+            assertEquals(SideEffectOutcomeEnum.CONFIRMED, result.sideEffectOutcome());
+
+            for (String mode : List.of("replay", "denied", "known-no-effect", "invalid-after-send", "unverified-after-send",
+                    "duplicate-after-send")) {
+                var execution = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(6), Duration.ofSeconds(3), null,
+                        (request, boundary) -> switch (mode) {
+                            case "replay" -> output;
+                            case "denied" -> throw new IllegalArgumentException("No tool permission");
+                            case "known-no-effect" -> {
+                                boundary.beforeSend();
+                                boundary.recordKnownNoEffect();
+                                yield output;
+                            }
+                            case "invalid-after-send" -> {
+                                boundary.beforeSend();
+                                yield boundary.verifyOutput(Map.of("accepted", false));
+                            }
+                            case "unverified-after-send" -> {
+                                boundary.beforeSend();
+                                yield output;
+                            }
+                            case "duplicate-after-send" -> {
+                                boundary.beforeSend();
+                                boundary.beforeSend();
+                                throw new AssertionError("Second mark allowed");
+                            }
+                            default -> throw new AssertionError(mode);
+                        }).completion().toCompletableFuture().get(8, TimeUnit.SECONDS);
+                assertEquals(mode.endsWith("after-send") ? SideEffectOutcomeEnum.UNKNOWN : SideEffectOutcomeEnum.NONE,
+                        execution.sideEffectOutcome(), mode);
+            }
+            var marked = new CountDownLatch(1);
+            var letTransportReturn = new CompletableFuture<Void>();
+            var late = new CompletableFuture<Boolean>();
+            var cancelled = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(6), Duration.ofSeconds(3), null,
+                    (request, boundary) -> {
+                        boundary.beforeSend();
+                        marked.countDown();
+                        letTransportReturn.join();
+                        try {
+                            boundary.verifyOutput(output);
+                            late.complete(false);
+                        } catch (RuntimeException stopped) {
+                            late.complete(true);
+                        }
+                        return output;
+                    });
+            try {
+                assertTrue(marked.await(3, TimeUnit.SECONDS));
+                cancelled.cancel("Host stopped execution");
+                var outcome = cancelled.completion().toCompletableFuture().get(3, TimeUnit.SECONDS);
+                assertEquals(StatusEnum.CANCELLED, outcome.status());
+                assertEquals(SideEffectOutcomeEnum.UNKNOWN, outcome.sideEffectOutcome());
+            } finally {
+                letTransportReturn.complete(null);
+            }
+            assertTrue(late.get(3, TimeUnit.SECONDS));
+            assertEquals(0, legacy.get());
+            var original = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(6))
+                    .completion().toCompletableFuture().get(8, TimeUnit.SECONDS);
+            assertEquals(StatusEnum.COMPLETED, original.status(), original.errorCode());
+            assertEquals(SideEffectOutcomeEnum.CONFIRMED, original.sideEffectOutcome());
+            assertEquals(1, legacy.get());
+        }
+    }
 
     @Test
     void modelLifecycleBeginsBeforeProviderAndFinishesAfterValidatedResponse() throws Exception {
@@ -362,11 +483,16 @@ class AdkAgentExecutorAdapterTest {
 
         private top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle execute(Duration idle, Duration total, Duration toolTimeout,
                 AgentExecutionContextVO.ModelCallLifecycle lifecycle) {
+            return execute(idle, total, toolTimeout, lifecycle, null);
+        }
+
+        private top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle execute(Duration idle, Duration total, Duration toolTimeout,
+                AgentExecutionContextVO.ModelCallLifecycle lifecycle, AgentExecutionContextVO.ToolCallHandler handler) {
             var command = command("stream-run", "stream", "1".repeat(64), idle, total);
             command.setLimits(new AgentExecutionCommand.TechnicalLimitsVO(total, total, idle, toolTimeout, 2, 2, 1, 200, 20));
             var host = host();
             return executor.execute(command, new AgentExecutionContextVO(host.scope(), host.deadline(), host.cancellation(),
-                    host.contextSource(), host.sessionStore(), host.callPermitProvider(), lifecycle));
+                    host.contextSource(), host.sessionStore(), host.callPermitProvider(), lifecycle, handler));
         }
 
         @Override public void close() {

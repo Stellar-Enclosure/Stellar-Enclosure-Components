@@ -3,6 +3,7 @@ package top.egon.cola.component.agentflow.adapter.mcp;
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.agentflow.adapter.mcp.McpToolAdapter.RegistrationVO;
 import top.egon.cola.component.agentflow.adapter.mcp.McpToolAdapter.ResponseVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolReferenceVO;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionInvocation;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ToolDispatch;
 
@@ -19,6 +20,33 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class McpToolAdapterTest {
+
+    @Test
+    void registered_mcp_tool_reuses_its_scoped_schema_with_the_host_boundary() {
+        var invocation = invocation();
+        var checks = new AtomicInteger();
+        var observed = new ArrayList<String>();
+        var ref = new ToolReferenceVO("fixed-tool", 2, "a".repeat(64));
+        var adapter = new McpToolAdapter();
+        when(invocation.registeredToolCall(eq(ref), eq(true), anyMap(), any(), any(), any(), any())).thenAnswer(call -> {
+            assertEquals(Map.of("number", 42L), call.getArgument(2));
+            java.util.function.Consumer<Instant> before = call.getArgument(4);
+            before.accept(invocation.deadline());
+            Function<Map<String, Object>, Map<String, Object>> verify = call.getArgument(3);
+            assertThrows(IllegalArgumentException.class, () -> verify.apply(Map.of("wrong", true)));
+            var result = verify.apply(Map.of("accepted", true));
+            Runnable after = call.getArgument(5);
+            after.run();
+            return result;
+        });
+        var registration = registration(checks, request -> { throw new AssertionError("Hosted MCP bypassed its owner"); });
+        assertEquals(Map.of("accepted", true), adapter.callRegistered(invocation, ref, registration, Map.of("number", 42),
+                () -> observed.add("start"), () -> observed.add("finish")));
+        assertEquals(List.of("start", "finish"), observed);
+        assertEquals(1, checks.get());
+        assertThrows(RuntimeException.class, () -> adapter.callRegistered(invocation,
+                new ToolReferenceVO("different-tool", 2, "a".repeat(64)), registration, Map.of("number", 42), () -> {}, () -> {}));
+    }
 
     @Test
     void fixed_method_protocol_and_session_are_closed_and_the_session_is_released() {

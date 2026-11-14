@@ -16,6 +16,9 @@ import top.egon.cola.component.agentflow.api.execution.AgentExecutionCommand;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ModelCall;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ModelCallRequestVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolCallBoundary;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolCallRequestVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolReferenceVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionEvent;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionResult;
@@ -49,6 +52,7 @@ import java.util.concurrent.Flow;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -147,6 +151,13 @@ public class DefaultAgentExecutor implements AgentExecutor {
         default <T> T toolCallWithDispatch(String capabilityRef, boolean mayHaveSideEffects,
                                            Function<ToolDispatch, T> call) {
             throw failure("TOOL_DISPATCH_UNAVAILABLE");
+        }
+
+        default Map<String, Object> registeredToolCall(ToolReferenceVO ref, boolean write, Map<String, Object> input,
+                                                       Function<Map<String, Object>, Map<String, Object>> verifyOutput,
+                                                       Consumer<Instant> hostedStart, Runnable hostedFinish,
+                                                       Function<ToolDispatch, Map<String, Object>> nativeCall) {
+            return toolCallWithDispatch(ref.key(), write, nativeCall);
         }
 
         default void requireCurrentCapability(String capabilityRef, String purpose) {
@@ -421,6 +432,76 @@ public class DefaultAgentExecutor implements AgentExecutor {
             }));
         }
 
+        @Override
+        public Map<String, Object> registeredToolCall(ToolReferenceVO ref, boolean write, Map<String, Object> input,
+                                                      Function<Map<String, Object>, Map<String, Object>> verifyOutput,
+                                                      Consumer<Instant> hostedStart, Runnable hostedFinish,
+                                                      Function<ToolDispatch, Map<String, Object>> nativeCall) {
+            var handler = context.toolCallHandler();
+            if (handler == null) {
+                return ExecutionInvocation.super.registeredToolCall(ref, write, input, verifyOutput, hostedStart, hostedFinish, nativeCall);
+            }
+            var result = dispatch(ref.key(), "TOOL_CALL", false, write, active -> {
+                hostedStart.accept(active.toolDeadline);
+                var call = new ToolCallRequestVO(request.executionId(), scope(), ref, input, write, active.toolDeadline);
+                var output = verifyOutput.apply(handler.call(call, new HostedToolBoundary(ref.key(), active, verifyOutput)));
+                synchronized (stateLock) {
+                    requireActiveTool(active);
+                    if (active.dispatched && !active.knownNoEffect && !output.equals(active.verifiedToolOutput)) {
+                        throw failure("HOST_TOOL_OUTCOME_UNVERIFIED");
+                    }
+                }
+                return output;
+            });
+            hostedFinish.run();
+            return result;
+        }
+
+        private final class HostedToolBoundary implements ToolCallBoundary {
+            private final String capability;
+            private final ActiveCall active;
+            private final Function<Map<String, Object>, Map<String, Object>> verifyOutput;
+
+            private HostedToolBoundary(String capability, ActiveCall active,
+                                       Function<Map<String, Object>, Map<String, Object>> verifyOutput) {
+                this.capability = capability;
+                this.active = active;
+                this.verifyOutput = verifyOutput;
+            }
+
+            @Override
+            public void beforeSend() {
+                permit(capability, "TOOL_CALL");
+                markToolDispatched(active);
+            }
+
+            @Override
+            public Map<String, Object> verifyOutput(Map<String, Object> output) {
+                requireRunning();
+                var validated = verifyOutput.apply(output);
+                synchronized (stateLock) {
+                    requireActiveTool(active);
+                    if (active.dispatched) {
+                        if (active.verifiedToolOutput != null) throw failure("INVALID_TOOL_DISPATCH");
+                        active.verifiedToolOutput = validated;
+                    }
+                }
+                return validated;
+            }
+
+            @Override
+            public void recordKnownNoEffect() {
+                synchronized (stateLock) {
+                    requireActiveTool(active);
+                    if (!active.mayHaveSideEffects || !active.dispatched || active.knownNoEffect
+                            || active.verifiedToolOutput != null) {
+                        throw failure("INVALID_TOOL_DISPATCH");
+                    }
+                    active.knownNoEffect = true;
+                }
+            }
+        }
+
         private <T> T dispatch(String capability, String purpose, boolean model, boolean mayHaveSideEffects,
                                Function<ActiveCall, T> call) {
             permit(capability, purpose);
@@ -465,7 +546,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
                     }
                     callsInFlight.remove(active);
                     active.cancelTimeout();
-                    if (active.dispatched && mayHaveSideEffects) {
+                    if (active.dispatched && mayHaveSideEffects && !active.knownNoEffect) {
                         observedEffect = mergeEffects(observedEffect,
                                 succeeded ? SideEffectOutcomeEnum.CONFIRMED : SideEffectOutcomeEnum.UNKNOWN);
                     }
@@ -482,8 +563,8 @@ public class DefaultAgentExecutor implements AgentExecutor {
         private void markToolDispatched(ActiveCall active) {
             FinishActions actions;
             synchronized (stateLock) {
-                requireActive();
-                if (!callsInFlight.contains(active) || active.dispatched) {
+                requireActiveTool(active);
+                if (active.dispatched) {
                     throw failure("INVALID_TOOL_DISPATCH");
                 }
                 actions = finishExpiredCallLocked(active, System.nanoTime());
@@ -494,6 +575,11 @@ public class DefaultAgentExecutor implements AgentExecutor {
             }
             publishCompletion(actions);
             throw failure("EXECUTION_STOPPED");
+        }
+
+        private void requireActiveTool(ActiveCall active) {
+            requireActive();
+            if (active.model || !callsInFlight.contains(active)) throw failure("INVALID_TOOL_DISPATCH");
         }
 
         private void onModelFrame(ActiveCall active) {
@@ -644,7 +730,7 @@ public class DefaultAgentExecutor implements AgentExecutor {
                 return null;
             }
             boolean unresolvedEffect = callsInFlight.stream().anyMatch(call -> call.dispatched
-                    && call.mayHaveSideEffects);
+                    && call.mayHaveSideEffects && !call.knownNoEffect);
             callsInFlight.forEach(ActiveCall::cancelTimeout);
             var combined = unresolvedEffect ? SideEffectOutcomeEnum.UNKNOWN : mergeEffects(observedEffect, effect);
             terminal = new AgentExecutionResult(request.executionId(), status, output, code, combined, now());
@@ -811,6 +897,8 @@ public class DefaultAgentExecutor implements AgentExecutor {
             private final boolean model;
             private final long limitNanos;
             private boolean dispatched;
+            private boolean knownNoEffect;
+            private Map<String, Object> verifiedToolOutput;
             private long lastActivityNanos;
             private Instant toolDeadline;
             private ScheduledFuture<?> timeout;

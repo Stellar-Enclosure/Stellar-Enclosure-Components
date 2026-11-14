@@ -45,6 +45,7 @@ import top.egon.cola.component.agentflow.agentic.AgenticPlanVO.DependencyRefVO;
 import top.egon.cola.component.agentflow.api.context.ContextScopeVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionCommand;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionCommand.TemplateVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolReferenceVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionEvent.TypeEnum;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionResult;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionResult.SideEffectOutcomeEnum;
@@ -64,6 +65,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /** Runs each compiled leaf through a fresh ADK root. The compiler owns all inter-leaf control flow. */
@@ -307,19 +309,23 @@ public class AdkAgentExecutorAdapter implements ExecutionAdapter {
             return Single.fromCallable(() -> {
                 invocation.requireRunning();
                 var input = AgentExecutionCommand.JsonValues.copyObject(arguments, AgentExecutionCommand.MAX_INPUT_BYTES);
+                var reference = new ToolReferenceVO(tool.reference().key(), tool.reference().version(), tool.reference().contentSha256());
+                Runnable started = () -> invocation.emit(TypeEnum.TOOL_STARTED, Map.of("capabilityRef", reference.key()));
+                Runnable finished = () -> invocation.emit(TypeEnum.TOOL_FINISHED, Map.of("capabilityRef", reference.key()));
                 if (tool.mcpTool() != null) {
-                    return mcp.call(invocation, tool.mcpTool(), input,
-                            () -> invocation.emit(TypeEnum.TOOL_STARTED, Map.of("capabilityRef", tool.reference().key())),
-                            () -> invocation.emit(TypeEnum.TOOL_FINISHED, Map.of("capabilityRef", tool.reference().key())));
+                    return mcp.callRegistered(invocation, reference, tool.mcpTool(), input, started, finished);
                 }
                 tool.verifyHostInput().accept(input);
-                return invocation.toolCallWithDispatch(tool.reference().key(), tool.write(), dispatch -> {
-                    invocation.emit(TypeEnum.TOOL_STARTED, Map.of("capabilityRef", tool.reference().key()));
-                    dispatch.beforeSend();
-                    var output = AgentExecutionCommand.JsonValues.copyObject(
-                            tool.hostTool().call(input), AgentExecutionCommand.MAX_OUTPUT_BYTES);
+                Function<Map<String, Object>, Map<String, Object>> validate = value -> {
+                    var output = AgentExecutionCommand.JsonValues.copyObject(value, AgentExecutionCommand.MAX_OUTPUT_BYTES);
                     tool.verifyHostOutput().accept(output);
-                    invocation.emit(TypeEnum.TOOL_FINISHED, Map.of("capabilityRef", tool.reference().key()));
+                    return output;
+                };
+                return invocation.registeredToolCall(reference, tool.write(), input, validate, deadline -> started.run(), finished, dispatch -> {
+                    started.run();
+                    dispatch.beforeSend();
+                    var output = validate.apply(tool.hostTool().call(input));
+                    finished.run();
                     return output;
                 });
             });

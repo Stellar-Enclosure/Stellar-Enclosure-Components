@@ -237,6 +237,8 @@ class AgentFlowComponentContractTest {
                 "execution.AgentExecutionContextVO", "execution.AgentExecutionHandle",
                 "execution.AgentExecutionContextVO$ModelCallLifecycle", "execution.AgentExecutionContextVO$ModelCall",
                 "execution.AgentExecutionContextVO$ModelCallRequestVO", "execution.AgentExecutionContextVO$ModelCallOutcomeVO",
+                "execution.AgentExecutionContextVO$ToolCallHandler", "execution.AgentExecutionContextVO$ToolCallBoundary",
+                "execution.AgentExecutionContextVO$ToolCallRequestVO", "execution.AgentExecutionContextVO$ToolReferenceVO",
                 "execution.AgentExecutionEvent", "execution.AgentExecutionResult", "context.ContextScopeVO",
                 "context.ContextQuery", "context.ContextSource", "context.ContextFragmentResult",
                 "capability.CallPermitProvider", "capability.CallPermitVO", "session.SessionStore",

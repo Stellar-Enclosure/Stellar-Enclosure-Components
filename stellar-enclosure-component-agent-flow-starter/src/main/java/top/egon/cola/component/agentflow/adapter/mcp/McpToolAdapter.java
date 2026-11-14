@@ -13,7 +13,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.agentflow.api.context.ContextScopeVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionCommand;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ToolReferenceVO;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionInvocation;
+import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ToolDispatch;
 import top.egon.cola.component.common.core.enums.ResultCode;
 import top.egon.cola.component.common.core.exception.CommonException;
 
@@ -23,6 +25,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /** A fixed MCP protocol exchange. Network policy, transport ownership and credentials belong to the registering host. */
 @Slf4j
@@ -120,46 +123,74 @@ public class McpToolAdapter {
 
     public Map<String, Object> call(ExecutionInvocation invocation, RegistrationVO registration,
                                     Map<String, Object> arguments, Runnable beforeDispatch, Runnable afterResponse) {
+        return call(invocation, null, registration, arguments, beforeDispatch, afterResponse);
+    }
+
+    public Map<String, Object> callRegistered(ExecutionInvocation invocation, ToolReferenceVO reference, RegistrationVO registration,
+                                              Map<String, Object> arguments, Runnable beforeDispatch, Runnable afterResponse) {
+        if (!Objects.requireNonNull(reference, "tool reference").key().equals(registration.capabilityRef())) {
+            throw failure("MCP_REQUEST_INVALID");
+        }
+        return call(invocation, reference, registration, arguments, beforeDispatch, afterResponse);
+    }
+
+    private Map<String, Object> call(ExecutionInvocation invocation, ToolReferenceVO reference, RegistrationVO registration,
+                                     Map<String, Object> arguments, Runnable beforeDispatch, Runnable afterResponse) {
         Objects.requireNonNull(beforeDispatch, "MCP dispatch observation");
         Objects.requireNonNull(afterResponse, "MCP response observation");
         var input = AgentExecutionCommand.JsonValues.copyObject(arguments, MAX_BYTES);
         registration.verifyInput().accept(input);
+        Function<Map<String, Object>, Map<String, Object>> validate = value -> {
+            var verified = AgentExecutionCommand.JsonValues.copyObject(value, MAX_BYTES);
+            registration.verifyOutput().accept(verified);
+            return verified;
+        };
+        Function<ToolDispatch, Map<String, Object>> nativeCall = dispatch ->
+                exchangeTool(invocation, registration, input, beforeDispatch, afterResponse, validate, dispatch);
+        return reference == null
+                ? invocation.toolCallWithDispatch(registration.capabilityRef(), registration.write(), nativeCall)
+                : invocation.registeredToolCall(reference, registration.write(), input, validate, deadline -> {
+                    authorize(invocation, registration, deadline);
+                    beforeDispatch.run();
+                }, afterResponse, nativeCall);
+    }
+
+    private Map<String, Object> exchangeTool(ExecutionInvocation invocation, RegistrationVO registration,
+                                             Map<String, Object> input, Runnable beforeDispatch, Runnable afterResponse,
+                                             Function<Map<String, Object>, Map<String, Object>> validate, ToolDispatch dispatch) {
         var init = request("initialize", 1, Map.of("protocolVersion", VERSION, "capabilities", Map.of(),
                 "clientInfo", Map.of("name", "egon-agent-flow", "version", "1.0")));
         byte[] notification = request("notifications/initialized", null, Map.of());
         byte[] call = request("tools/call", 2, Map.of("name", registration.tool(), "arguments", input));
-        return invocation.toolCallWithDispatch(registration.capabilityRef(), registration.write(), dispatch -> {
-            String session = null;
-            Instant deadline = dispatch.deadline();
+        String session = null;
+        Instant deadline = dispatch.deadline();
+        try {
+            authorize(invocation, registration, deadline);
+            var initialized = exchange(registration, "initialize", null, deadline, init);
+            if (initialized.status() != 200) throw failure("MCP_RESPONSE_INVALID");
+            session = sessionId(initialized.sessionId());
+            verifyInitialize(envelope(initialized, 1, session));
+            authorize(invocation, registration, deadline);
+            requireEmpty(exchange(registration, "notifications/initialized", session, deadline, notification), 202, session);
+            authorize(invocation, registration, deadline);
+            beforeDispatch.run();
+            dispatch.beforeSend();
             try {
-                authorize(invocation, registration, deadline);
-                var initialized = exchange(registration, "initialize", null, deadline, init);
-                if (initialized.status() != 200) throw failure("MCP_RESPONSE_INVALID");
-                session = sessionId(initialized.sessionId());
-                verifyInitialize(envelope(initialized, 1, session));
-                authorize(invocation, registration, deadline);
-                requireEmpty(exchange(registration, "notifications/initialized", session, deadline, notification), 202, session);
-                authorize(invocation, registration, deadline);
-                beforeDispatch.run();
-                dispatch.beforeSend();
+                var result = validate.apply(toolResult(envelope(exchange(registration, "tools/call", session, deadline, call), 2, session)));
+                afterResponse.run();
+                return result;
+            } catch (RuntimeException uncertain) {
+                throw failure("MCP_TOOL_OUTCOME_UNKNOWN");
+            }
+        } finally {
+            if (session != null) {
                 try {
-                    var output = toolResult(envelope(exchange(registration, "tools/call", session, deadline, call), 2, session));
-                    registration.verifyOutput().accept(output);
-                    afterResponse.run();
-                    return output;
-                } catch (RuntimeException uncertain) {
-                    throw failure("MCP_TOOL_OUTCOME_UNKNOWN");
-                }
-            } finally {
-                if (session != null) {
-                    try {
-                        requireEmpty(exchange(registration, "DELETE", session, deadline, EMPTY), 204, session);
-                    } catch (RuntimeException unavailable) {
-                        log.debug("MCP session cleanup could not be confirmed");
-                    }
+                    requireEmpty(exchange(registration, "DELETE", session, deadline, EMPTY), 204, session);
+                } catch (RuntimeException unavailable) {
+                    log.debug("MCP session cleanup could not be confirmed");
                 }
             }
-        });
+        }
     }
 
     private static void authorize(ExecutionInvocation invocation, RegistrationVO registration, Instant deadline) {

@@ -11,6 +11,7 @@ import top.egon.cola.component.agentflow.api.context.ContextSource;
 import top.egon.cola.component.agentflow.api.session.SessionStore;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletionStage;
 
@@ -23,11 +24,64 @@ public record AgentExecutionContextVO(
         @NotNull ContextSource contextSource,
         SessionStore sessionStore,
         @NotNull CallPermitProvider callPermitProvider,
-        ModelCallLifecycle modelCallLifecycle) {
+        ModelCallLifecycle modelCallLifecycle,
+        ToolCallHandler toolCallHandler) {
 
     public AgentExecutionContextVO(ContextScopeVO scope, Instant deadline, CompletionStage<Void> cancellation,
                                    ContextSource contextSource, SessionStore sessionStore, CallPermitProvider callPermitProvider) {
-        this(scope, deadline, cancellation, contextSource, sessionStore, callPermitProvider, null);
+        this(scope, deadline, cancellation, contextSource, sessionStore, callPermitProvider, null, null);
+    }
+
+    public AgentExecutionContextVO(ContextScopeVO scope, Instant deadline, CompletionStage<Void> cancellation,
+                                   ContextSource contextSource, SessionStore sessionStore, CallPermitProvider callPermitProvider,
+                                   ModelCallLifecycle modelCallLifecycle) {
+        this(scope, deadline, cancellation, contextSource, sessionStore, callPermitProvider, modelCallLifecycle, null);
+    }
+
+    /** Optional authority for the selected registered tool in this execution. */
+    @FunctionalInterface
+    @JsonIgnoreType
+    public interface ToolCallHandler {
+        Map<String, Object> call(ToolCallRequestVO request, ToolCallBoundary boundary);
+    }
+
+    @JsonIgnoreType
+    public interface ToolCallBoundary {
+        /** Rechecks the execution permit and marks the actual send. This is single-use. */
+        void beforeSend();
+
+        /** Validates and freezes the result against the registered tool's schema before the host records it. */
+        Map<String, Object> verifyOutput(Map<String, Object> output);
+
+        /** Reports an authoritative observation that a marked write had no effect. */
+        void recordKnownNoEffect();
+    }
+
+    @JsonIgnoreType
+    public record ToolCallRequestVO(String executionId, ContextScopeVO scope, ToolReferenceVO toolRef,
+                                    Map<String, Object> arguments, boolean write, Instant deadline) {
+        public ToolCallRequestVO {
+            ContextScopeVO.requireIdentifier(executionId);
+            Objects.requireNonNull(scope, "scope");
+            Objects.requireNonNull(toolRef, "tool reference");
+            Objects.requireNonNull(deadline, "deadline");
+            arguments = AgentExecutionCommand.JsonValues.copyObject(arguments, AgentExecutionCommand.MAX_INPUT_BYTES);
+        }
+
+        @Override
+        public String toString() {
+            return "ToolCallRequestVO[redacted]";
+        }
+    }
+
+    @JsonIgnoreType
+    public record ToolReferenceVO(String key, long version, String contentSha256) {
+        public ToolReferenceVO {
+            ContextScopeVO.requireIdentifier(key);
+            if (version < 1 || version > 999_999_999_999_999L || !validDigest(contentSha256)) {
+                throw new IllegalArgumentException("Invalid tool reference");
+            }
+        }
     }
 
     /** Invoked after prompt validation and before the provider is contacted. */
