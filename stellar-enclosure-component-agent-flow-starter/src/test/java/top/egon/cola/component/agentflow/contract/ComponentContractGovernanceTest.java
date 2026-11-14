@@ -43,6 +43,7 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
@@ -58,6 +59,8 @@ class ComponentContractGovernanceTest {
     private static final Path POM = Path.of("pom.xml");
 
     private static final String AGENT_FLOW_PACKAGE = "top.egon.cola.component.agentflow";
+
+    private static final String MEMORY_TYPE = AGENT_FLOW_PACKAGE + ".api.memory.MemoryFactTypeEnum";
 
     private static final String EXCEPTION_PACKAGE = AGENT_FLOW_PACKAGE + ".common.exception";
 
@@ -104,7 +107,10 @@ class ComponentContractGovernanceTest {
             AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$TerminationModeEnum",
             List.of("ROOT_TERMINAL", "PREDICATE"),
             AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$ConditionOpEnum",
-            List.of("EQ", "NE", "GT", "GE", "LT", "LE", "AND", "OR", "NOT"));
+            List.of("EQ", "NE", "GT", "GE", "LT", "LE", "AND", "OR", "NOT"),
+            AGENT_FLOW_PACKAGE + ".api.memory.MemoryScopeVO$RetentionScopeEnum",
+            List.of("SESSION", "INSTANCE", "USER", "HOST"),
+            MEMORY_TYPE, List.of("FACT", "PREFERENCE", "EXPERIENCE"));
 
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
     private static final Pattern ENUM_HEADER =
@@ -311,10 +317,28 @@ class ComponentContractGovernanceTest {
         }
     }
 
+    @Test
+    void memoryTypeDecodesOnlyDeclaredWireCodes() throws ClassNotFoundException,
+            com.fasterxml.jackson.core.JsonProcessingException {
+        Class<?> type = Class.forName(MEMORY_TYPE);
+        var jackson2 = new com.fasterxml.jackson.databind.ObjectMapper();
+        var jackson3 = tools.jackson.databind.json.JsonMapper.builder().build();
+        for (String code : NEUTRAL_ENUM_CODES.get(MEMORY_TYPE)) {
+            String wire = "\"" + code + "\"";
+            assertThat(((Enum<?>) jackson2.readValue(wire, type)).name()).isEqualTo(code);
+            assertThat(((Enum<?>) jackson3.readValue(wire, type)).name()).isEqualTo(code);
+        }
+        for (String unknown : List.of("\"UNKNOWN\"", "\"0\"", "0")) {
+            assertThrows(com.fasterxml.jackson.core.JsonProcessingException.class, () -> jackson2.readValue(unknown, type));
+            assertThrows(tools.jackson.core.JacksonException.class, () -> jackson3.readValue(unknown, type));
+        }
+    }
+
     private static boolean neutralEnumHeader(Path file, String simpleName) {
         String path = MAIN_SOURCES.relativize(file).toString().replace('/', '.');
-        return NEUTRAL_ENUM_CODES.containsKey(path.substring(0, path.length() - ".java".length())
-                + "$" + simpleName);
+        String declaredType = path.substring(0, path.length() - ".java".length());
+        return NEUTRAL_ENUM_CODES.containsKey(declaredType + "$" + simpleName)
+                || declaredType.endsWith("." + simpleName) && NEUTRAL_ENUM_CODES.containsKey(declaredType);
     }
 
     // 算法第 4 行：validator 继承 BaseValidator，原生约束先行，ADK 图规则与只读语义保持。
