@@ -22,7 +22,54 @@ public record AgentExecutionContextVO(
         @NotNull CompletionStage<Void> cancellation,
         @NotNull ContextSource contextSource,
         SessionStore sessionStore,
-        @NotNull CallPermitProvider callPermitProvider) {
+        @NotNull CallPermitProvider callPermitProvider,
+        ModelCallLifecycle modelCallLifecycle) {
+
+    public AgentExecutionContextVO(ContextScopeVO scope, Instant deadline, CompletionStage<Void> cancellation,
+                                   ContextSource contextSource, SessionStore sessionStore, CallPermitProvider callPermitProvider) {
+        this(scope, deadline, cancellation, contextSource, sessionStore, callPermitProvider, null);
+    }
+
+    /** Invoked after prompt validation and before the provider is contacted. */
+    @FunctionalInterface
+    @JsonIgnoreType
+    public interface ModelCallLifecycle {
+        ModelCall begin(ModelCallRequestVO request);
+    }
+
+    @FunctionalInterface
+    @JsonIgnoreType
+    public interface ModelCall {
+        /** Reports a known outcome while the execution is current. Cancellation may leave this call unclosed. */
+        void finish(ModelCallOutcomeVO outcome);
+    }
+
+    @JsonIgnoreType
+    public record ModelCallRequestVO(String executionId, ContextScopeVO scope, String modelRef,
+                                     String inputSha256, Instant deadline) {
+        public ModelCallRequestVO {
+            ContextScopeVO.requireIdentifier(executionId);
+            ContextScopeVO.requireIdentifier(modelRef);
+            Objects.requireNonNull(scope, "scope");
+            Objects.requireNonNull(deadline, "deadline");
+            if (!validDigest(inputSha256)) throw new IllegalArgumentException("Invalid model request digest");
+        }
+    }
+
+    @JsonIgnoreType
+    public record ModelCallOutcomeVO(String resultSha256, Integer inputTokens, Integer outputTokens, String errorCode) {
+        public ModelCallOutcomeVO {
+            if ((errorCode == null && !validDigest(resultSha256))
+                    || (errorCode != null && (resultSha256 != null || !errorCode.matches("[A-Z][A-Z0-9_]{0,63}")))
+                    || (inputTokens != null && inputTokens < 0) || (outputTokens != null && outputTokens < 0)) {
+                throw new IllegalArgumentException("Invalid model outcome");
+            }
+        }
+    }
+
+    private static boolean validDigest(String digest) {
+        return digest != null && digest.matches("[0-9a-f]{64}");
+    }
 
     public AgentExecutionContextVO {
         Objects.requireNonNull(scope, "scope");

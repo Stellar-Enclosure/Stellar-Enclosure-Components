@@ -1,9 +1,13 @@
 package top.egon.cola.component.agentflow.adapter.springai;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.EmptyUsage;
 import org.springframework.ai.chat.metadata.Usage;
@@ -12,20 +16,26 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.MessageAggregator;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.MediaContent;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.validation.annotation.Validated;
 import reactor.core.publisher.Flux;
 import top.egon.cola.component.agentflow.api.context.ContextScopeVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ModelCallOutcomeVO;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionInvocation;
 import top.egon.cola.component.common.core.enums.ResultCode;
 import top.egon.cola.component.common.core.exception.CommonException;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.ToIntFunction;
 
@@ -36,6 +46,7 @@ public class SpringAiExecutionModelAdapter {
 
     private static final int MAX_FRAMES = 100_000;
     private static final int MAX_STREAM_CHARACTERS = 4_000_000;
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     public record ModelRegistrationVO(String capabilityRef, String modelName, ChatModel model,
                                       int contextLimit, int outputLimit, ToIntFunction<Prompt> estimator) {
@@ -85,21 +96,62 @@ public class SpringAiExecutionModelAdapter {
         return invocation.modelCallWithActivity(model.capabilityRef(), activity -> {
             var stream = new StreamVO(Math.min(MAX_STREAM_CHARACTERS, responseTextLimit));
             var response = new AtomicReference<ChatResponse>();
+            var receipt = activity.begin(() -> requestDigest(bounded, declarations));
             try {
                 new MessageAggregator().aggregate(Flux.defer(() -> model.model().stream(bounded))
                         .limitRate(1).map(frame -> {
                             activity.onFrame();
                             return stream.record(frame);
                         }), response::set).blockLast();
-                if (response.get() == null || response.get().getResult() == null) throw failure("MODEL_EMPTY_RESPONSE");
+                if (stream.frames == 0 || response.get() == null || response.get().getResult() == null) throw failure("MODEL_EMPTY_RESPONSE");
                 stream.verifyTools(response.get(), names);
-                return new ModelResultVO(response.get(), stream.inputTokens, stream.outputTokens);
             } catch (RuntimeException failed) {
-                if (failed instanceof CommonException known) throw known;
+                if (failed instanceof CommonException known) {
+                    if (receipt != null) receipt.finish(new ModelCallOutcomeVO(null, stream.inputTokens, stream.outputTokens, known.getStatus()));
+                    throw known;
+                }
+                // A transport failure cannot establish whether a provider received or finished the call.
                 log.debug("Neutral model stream failed with type {}", failed.getClass().getSimpleName());
                 throw failure("MODEL_STREAM_FAILED");
             }
+            if (receipt != null) {
+                String digest = digest("agent-flow-model-result-v1", messageValue(response.get().getResult().getOutput()));
+                receipt.finish(new ModelCallOutcomeVO(digest, stream.inputTokens, stream.outputTokens, null));
+            }
+            return new ModelResultVO(response.get(), stream.inputTokens, stream.outputTokens);
         });
+    }
+
+    private static String requestDigest(Prompt prompt, List<ToolDefinition> declarations) {
+        var options = prompt.getOptions();
+        var optionValues = Arrays.asList(options.getModel(), options.getMaxTokens(), options.getTemperature(),
+                options.getTopK(), options.getTopP(), options.getFrequencyPenalty(), options.getPresencePenalty(),
+                options.getStopSequences());
+        var toolValues = declarations.stream().map(tool -> Arrays.asList(tool.name(), tool.description(), tool.inputSchema())).toList();
+        return digest("agent-flow-model-request-v1", List.of(
+                prompt.getInstructions().stream().map(SpringAiExecutionModelAdapter::messageValue).toList(), optionValues, toolValues));
+    }
+
+    private static List<?> messageValue(Message message) {
+        // The governed provider request accepts the textual ADK projection and exact declared tool exchanges.
+        if (message instanceof MediaContent media && !media.getMedia().isEmpty()) throw failure("MODEL_MEDIA_UNSUPPORTED");
+        List<?> toolMessages = switch (message) {
+            case AssistantMessage assistant -> assistant.getToolCalls().stream().map(call ->
+                    Arrays.asList(call.id(), call.type(), call.name(), call.arguments())).toList();
+            case ToolResponseMessage replies -> replies.getResponses().stream().map(reply ->
+                    Arrays.asList(reply.id(), reply.name(), reply.responseData())).toList();
+            default -> List.of();
+        };
+        return Arrays.asList(message.getMessageType().name(), message.getText(), toolMessages);
+    }
+
+    private static String digest(String domain, Object value) {
+        try {
+            var payload = JSON.writeValueAsBytes(List.of(domain, value));
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(payload));
+        } catch (JsonProcessingException | NoSuchAlgorithmException unavailable) {
+            throw failure("MODEL_DIGEST_UNAVAILABLE");
+        }
     }
 
     private static Prompt boundedPrompt(ExecutionInvocation invocation, ModelRegistrationVO model,

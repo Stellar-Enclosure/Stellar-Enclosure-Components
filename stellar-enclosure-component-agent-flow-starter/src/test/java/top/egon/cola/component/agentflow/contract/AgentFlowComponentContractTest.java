@@ -235,6 +235,8 @@ class AgentFlowComponentContractTest {
 
         for (String type : List.of("execution.AgentExecutor", "execution.AgentExecutionCommand",
                 "execution.AgentExecutionContextVO", "execution.AgentExecutionHandle",
+                "execution.AgentExecutionContextVO$ModelCallLifecycle", "execution.AgentExecutionContextVO$ModelCall",
+                "execution.AgentExecutionContextVO$ModelCallRequestVO", "execution.AgentExecutionContextVO$ModelCallOutcomeVO",
                 "execution.AgentExecutionEvent", "execution.AgentExecutionResult", "context.ContextScopeVO",
                 "context.ContextQuery", "context.ContextSource", "context.ContextFragmentResult",
                 "capability.CallPermitProvider", "capability.CallPermitVO", "session.SessionStore",

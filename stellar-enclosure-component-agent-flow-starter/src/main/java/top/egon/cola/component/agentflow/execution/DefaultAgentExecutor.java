@@ -14,6 +14,8 @@ import top.egon.cola.component.agentflow.api.context.ContextQuery;
 import top.egon.cola.component.agentflow.api.context.ContextScopeVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionCommand;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ModelCall;
+import top.egon.cola.component.agentflow.api.execution.AgentExecutionContextVO.ModelCallRequestVO;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionEvent;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle;
 import top.egon.cola.component.agentflow.api.execution.AgentExecutionResult;
@@ -163,6 +165,10 @@ public class DefaultAgentExecutor implements AgentExecutor {
 
         /** Call only when the provider sends a frame for this invocation. */
         void onFrame();
+
+        default ModelCall begin(Supplier<String> inputSha256) {
+            return null;
+        }
     }
 
     public interface ToolDispatch {
@@ -365,7 +371,27 @@ public class DefaultAgentExecutor implements AgentExecutor {
         @Override
         public <T> T modelCallWithActivity(String capabilityRef, Function<ModelActivity, T> call) {
             Objects.requireNonNull(call, "external call");
-            return dispatch(capabilityRef, "MODEL_CALL", true, false, active -> call.apply(() -> onModelFrame(active)));
+            return dispatch(capabilityRef, "MODEL_CALL", true, false, active -> call.apply(new ModelActivity() {
+                @Override
+                public void onFrame() {
+                    onModelFrame(active);
+                }
+
+                @Override
+                public ModelCall begin(Supplier<String> inputSha256) {
+                    if (context.modelCallLifecycle() == null) return null;
+                    permit(capabilityRef, "MODEL_CALL");
+                    var request = new ModelCallRequestVO(ExecutionRun.this.request.executionId(), scope(), capabilityRef,
+                            inputSha256.get(), deadline());
+                    var hosted = Objects.requireNonNull(context.modelCallLifecycle().begin(request), "model call lifecycle");
+                    requireRunning();
+                    return outcome -> {
+                        requireRunning();
+                        hosted.finish(outcome);
+                        requireRunning();
+                    };
+                }
+            }));
         }
 
         @Override

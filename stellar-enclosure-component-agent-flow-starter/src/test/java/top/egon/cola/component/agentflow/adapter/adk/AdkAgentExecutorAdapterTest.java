@@ -34,6 +34,7 @@ import top.egon.cola.component.agentflow.session.InMemorySessionStore;
 import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -46,6 +47,74 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AdkAgentExecutorAdapterTest {
+
+    @Test
+    void modelLifecycleBeginsBeforeProviderAndFinishesAfterValidatedResponse() throws Exception {
+        var order = new ArrayList<String>();
+        var requests = new ArrayList<AgentExecutionContextVO.ModelCallRequestVO>();
+        var outcomes = new ArrayList<AgentExecutionContextVO.ModelCallOutcomeVO>();
+        AgentExecutionContextVO.ModelCallLifecycle lifecycle = request -> {
+            order.add("begin");
+            requests.add(request);
+            return outcome -> { outcomes.add(outcome); order.add("finish"); };
+        };
+
+        try (var fixture = new StreamFixture(prompt -> {
+            order.add("provider");
+            return Flux.just(response("validated"));
+        })) {
+            var result = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(4), lifecycle)
+                    .completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(StatusEnum.COMPLETED, result.status());
+            assertEquals(List.of("begin", "provider", "finish"), order);
+            assertEquals("stream-run", requests.getFirst().executionId());
+            assertEquals("fixed-model", requests.getFirst().modelRef());
+            assertTrue(requests.getFirst().inputSha256().matches("[0-9a-f]{64}"));
+            assertTrue(outcomes.getFirst().resultSha256().matches("[0-9a-f]{64}"));
+            assertNull(outcomes.getFirst().errorCode());
+            assertNull(outcomes.getFirst().inputTokens());
+            assertNull(outcomes.getFirst().outputTokens());
+        }
+    }
+
+    @Test
+    void failedPreparationNeverCallsProviderAndEmptyAggregateIsNeverSucceeded() throws Exception {
+        var providerCalls = new AtomicInteger();
+        var outcome = new CompletableFuture<AgentExecutionContextVO.ModelCallOutcomeVO>();
+        try (var fixture = new StreamFixture(prompt -> {
+            providerCalls.incrementAndGet();
+            return Flux.empty();
+        })) {
+            var denied = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(4), request -> {
+                throw new IllegalStateException("no host receipt");
+            }).completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(StatusEnum.FAILED, denied.status());
+            assertEquals(0, providerCalls.get());
+            var invalid = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(4), request -> outcome::complete)
+                    .completion().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(StatusEnum.FAILED, invalid.status());
+            assertEquals(1, providerCalls.get());
+            assertNull(outcome.get(1, TimeUnit.SECONDS).resultSha256());
+            assertEquals("MODEL_EMPTY_RESPONSE", outcome.getNow(null).errorCode());
+        }
+    }
+
+    @Test
+    void cancellationLeavesADispatchedCallOpenForTheHostToReconcile() throws Exception {
+        var started = new CountDownLatch(1);
+        var disposed = new CountDownLatch(1);
+        var finished = new AtomicInteger();
+        try (var fixture = new StreamFixture(prompt -> Flux.<ChatResponse>never()
+                .doOnSubscribe(ignored -> started.countDown()).doOnCancel(disposed::countDown))) {
+            var handle = fixture.execute(Duration.ofSeconds(2), Duration.ofSeconds(4), Duration.ofSeconds(4),
+                    request -> outcome -> finished.incrementAndGet());
+            assertTrue(started.await(2, TimeUnit.SECONDS));
+            handle.cancel("cancelled by host");
+            assertEquals(StatusEnum.CANCELLED, handle.completion().toCompletableFuture().get(5, TimeUnit.SECONDS).status());
+            assertTrue(disposed.await(2, TimeUnit.SECONDS));
+            assertEquals(0, finished.get());
+        }
+    }
 
     @Test
     void only_matching_root_structured_final_can_complete_and_terminates_subscription() {
@@ -288,9 +357,16 @@ class AdkAgentExecutorAdapterTest {
         }
 
         private top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle execute(Duration idle, Duration total, Duration toolTimeout) {
+            return execute(idle, total, toolTimeout, null);
+        }
+
+        private top.egon.cola.component.agentflow.api.execution.AgentExecutionHandle execute(Duration idle, Duration total, Duration toolTimeout,
+                AgentExecutionContextVO.ModelCallLifecycle lifecycle) {
             var command = command("stream-run", "stream", "1".repeat(64), idle, total);
             command.setLimits(new AgentExecutionCommand.TechnicalLimitsVO(total, total, idle, toolTimeout, 2, 2, 1, 200, 20));
-            return executor.execute(command, host());
+            var host = host();
+            return executor.execute(command, new AgentExecutionContextVO(host.scope(), host.deadline(), host.cancellation(),
+                    host.contextSource(), host.sessionStore(), host.callPermitProvider(), lifecycle));
         }
 
         @Override public void close() {
