@@ -25,8 +25,12 @@ class AgentFlowPropertiesBindingTest {
         assertThat(properties.shutdownTimeout()).isEqualTo(Duration.ofSeconds(10));
         assertThat(properties.flows()).isEmpty();
         assertThat(properties.session().storeRef()).isEqualTo("inMemory");
+        assertThat(properties.memory().mode()).isEqualTo("IN_MEMORY");
+        assertThat(properties.rag().enabled()).isFalse();
         assertThat(new AgentFlowProperties(false, null, null, Map.of()).session().storeRef())
                 .isEqualTo("inMemory");
+        assertThat(new AgentFlowProperties(false, null, null, Map.of(), new AgentFlowProperties.SessionSettings("legacy")).memory()
+                .mode()).isEqualTo("IN_MEMORY");
     }
 
     @Test
@@ -83,6 +87,44 @@ class AgentFlowPropertiesBindingTest {
                 .bind("egon.cola.component.agent-flow", Bindable.of(AgentFlowProperties.class),
                         new NoUnboundElementsBindHandler(BindHandler.DEFAULT)))
                 .hasStackTraceContaining("session store-ref must be a valid bean name");
+    }
+
+    @Test
+    void binds_new_optional_capabilities_and_existing_session_in_one_strict_prefix() {
+        var mode = strict(Map.of(
+                "egon.cola.component.agent-flow.enabled", "true",
+                "egon.cola.component.agent-flow.session.store-ref", "durableSessions",
+                "egon.cola.component.agent-flow.memory.mode", "JDBC",
+                "egon.cola.component.agent-flow.memory.data-source-ref", "isolatedMemory",
+                "egon.cola.component.agent-flow.memory.schema", "egon_agent_memory",
+                "egon.cola.component.agent-flow.rag.enabled", "true"));
+        assertThat(mode.session().storeRef()).isEqualTo("durableSessions");
+        assertThat(mode.memory().mode()).isEqualTo("JDBC");
+        assertThat(mode.memory().dataSourceRef()).isEqualTo("isolatedMemory");
+        assertThat(mode.memory().schema()).isEqualTo("egon_agent_memory");
+        assertThat(mode.rag().enabled()).isTrue();
+    }
+
+    @Test
+    void rejects_unknown_nested_keys_modes_and_missing_or_invalid_jdbc_settings() {
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.unknown-key", "ignored")))
+                .hasStackTraceContaining("unknown-key");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.rag.unknown-key", "ignored")))
+                .hasStackTraceContaining("unknown-key");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.mode", "VECTOR")))
+                .hasStackTraceContaining("memory mode must be NONE, IN_MEMORY, or JDBC");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.mode", "JDBC")))
+                .hasStackTraceContaining("data-source-ref");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.mode", "JDBC",
+                        "egon.cola.component.agent-flow.memory.data-source-ref", "isolatedMemory",
+                        "egon.cola.component.agent-flow.memory.schema", "foo.bar")))
+                .hasStackTraceContaining("schema");
+    }
+
+    private static AgentFlowProperties strict(Map<String, String> values) {
+        return binder(values).bind("egon.cola.component.agent-flow", Bindable.of(AgentFlowProperties.class),
+                new NoUnboundElementsBindHandler(BindHandler.DEFAULT)).orElseThrow(
+                () -> new IllegalStateException("properties were not bound"));
     }
 
     private static Binder binder(Map<String, String> values) {

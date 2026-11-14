@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "scripts": [
+    {
+      "version": 1,
+      "file": "V1__create_memory_store.sql",
+      "sha256": "7aa621490c953b38a6231724e85d8fad4433e493d99d1bda37c8b749a6bc8654"
+    }
+  ]
+}

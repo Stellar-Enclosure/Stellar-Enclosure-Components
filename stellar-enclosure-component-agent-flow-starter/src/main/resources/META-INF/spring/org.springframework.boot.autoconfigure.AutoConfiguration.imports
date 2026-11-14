@@ -1,2 +1,4 @@
 top.egon.cola.component.agentflow.autoconfigure.AgentFlowAutoConfiguration
 top.egon.cola.component.agentflow.autoconfigure.AgentExecutionAutoConfiguration
+top.egon.cola.component.agentflow.autoconfigure.AgentMemoryJdbcAutoConfiguration
+top.egon.cola.component.agentflow.autoconfigure.AgentMemoryRagAutoConfiguration

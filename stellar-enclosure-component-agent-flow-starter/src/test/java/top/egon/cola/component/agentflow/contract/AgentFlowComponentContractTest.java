@@ -66,7 +66,10 @@ class AgentFlowComponentContractTest {
         assertFalse(module.contains("spring-boot-starter-webmvc"));
         assertFalse(module.contains("spring-ai-starter-mcp"));
         assertFalse(module.contains("flyway"));
-        assertFalse(module.contains("jdbc"));
+        assertOptionalDependency(module, "top.egon", "stellar-enclosure-component-rag-starter", null);
+        assertOptionalDependency(module, "org.springframework", "spring-jdbc", null);
+        assertOptionalDependency(module, "org.postgresql", "postgresql", "42.7.8");
+        assertFalse(module.contains("liquibase"));
     }
 
     @Test
@@ -248,6 +251,19 @@ class AgentFlowComponentContractTest {
 
     private static int count(String source, String token) {
         return source.split(java.util.regex.Pattern.quote(token), -1).length - 1;
+    }
+
+    private static void assertOptionalDependency(String pom, String group, String artifact, String version) {
+        String tag = "<artifactId>" + artifact + "</artifactId>";
+        assertEquals(1, count(pom, tag), artifact);
+        int offset = pom.indexOf(tag);
+        String dependency = pom.substring(pom.lastIndexOf("<dependency>", offset), pom.indexOf("</dependency>", offset));
+        assertContainsAll(dependency, "<groupId>" + group + "</groupId>", "<optional>true</optional>");
+        if (version == null) {
+            assertFalse(dependency.contains("<version>"), artifact);
+        } else {
+            assertContainsAll(dependency, "<version>" + version + "</version>");
+        }
     }
 
     private static void assertContainsAll(String source, String... tokens) {

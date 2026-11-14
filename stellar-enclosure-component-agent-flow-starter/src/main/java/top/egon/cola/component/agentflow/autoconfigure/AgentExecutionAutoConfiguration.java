@@ -1,15 +1,22 @@
 package top.egon.cola.component.agentflow.autoconfigure;
 
 import jakarta.validation.Validator;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.type.MethodMetadata;
+import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
 import top.egon.cola.component.agentflow.api.session.SessionStore;
+import top.egon.cola.component.agentflow.api.context.ContextSource;
+import top.egon.cola.component.agentflow.api.memory.MemoryStore;
 import top.egon.cola.component.agentflow.adapter.adk.AdkAgentExecutorAdapter;
 import top.egon.cola.component.agentflow.adapter.mcp.McpToolAdapter;
 import top.egon.cola.component.agentflow.adapter.springai.SpringAiExecutionModelAdapter;
@@ -17,6 +24,7 @@ import top.egon.cola.component.agentflow.agentic.AgenticPlanCompiler;
 import top.egon.cola.component.agentflow.context.DefaultContextAssembler;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionAdapter;
+import top.egon.cola.component.agentflow.memory.InMemoryMemoryStore;
 import top.egon.cola.component.agentflow.session.InMemorySessionStore;
 
 import java.time.Clock;
@@ -24,6 +32,7 @@ import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 
+@Slf4j
 @AutoConfiguration(after = {ValidationAutoConfiguration.class, AgentFlowAutoConfiguration.class})
 @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow", name = "enabled", havingValue = "true")
 public class AgentExecutionAutoConfiguration {
@@ -50,6 +59,39 @@ public class AgentExecutionAutoConfiguration {
     public SessionStore agentSessionStore(
             @Qualifier("agentExecutionClock") Clock clock, @Qualifier("defaultValidator") Validator validator) {
         return new InMemorySessionStore(clock, validator);
+    }
+
+    @Bean("agentMemoryStore")
+    @ConditionalOnMissingBean(MemoryStore.class)
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.memory", name = "mode",
+            havingValue = AgentFlowProperties.MemorySettings.IN_MEMORY, matchIfMissing = true)
+    public MemoryStore agentInMemoryStore(
+            @Qualifier("agentExecutionClock") Clock clock, @Qualifier("defaultValidator") Validator validator) {
+        return new InMemoryMemoryStore(clock, validator);
+    }
+
+    @Bean("agentMemoryConfigurationGuard")
+    public SmartInitializingSingleton agentMemoryConfigurationGuard(
+            @Qualifier("agentFlowProperties") AgentFlowProperties properties, ConfigurableListableBeanFactory beans) {
+        return () -> {
+            if (AgentFlowProperties.MemorySettings.JDBC.equals(properties.memory().mode())
+                    && !configuredBean(beans, "jdbcMemoryStore", MemoryStore.class, "AgentMemoryJdbcAutoConfiguration", "agentJdbcMemoryStore")) {
+                throw new IllegalStateException("Agent Flow JDBC memory requires Spring JDBC, the PostgreSQL driver and the selected DataSource");
+            }
+            if (properties.rag().enabled()
+                    && !configuredBean(beans, "ragContextSource", ContextSource.class, "AgentMemoryRagAutoConfiguration", "agentMemoryRagContextSource")) {
+                throw new IllegalStateException("Agent Flow RAG requires the optional RAG adapter and explicit host authority");
+            }
+        };
+    }
+
+    private static boolean configuredBean(ConfigurableListableBeanFactory beans, String name, Class<?> type,
+                                          String configuration, String factoryMethod) {
+        if (!beans.containsBeanDefinition(name)
+                || !(beans.getBeanDefinition(name) instanceof AnnotatedBeanDefinition definition)) return false;
+        MethodMetadata source = definition.getFactoryMethodMetadata();
+        return source != null && source.getDeclaringClassName().equals(AgentExecutionAutoConfiguration.class.getPackageName() + "." + configuration)
+                && factoryMethod.equals(source.getMethodName()) && beans.isTypeMatch(name, type);
     }
 
     @Bean("agentContextAssembler")
