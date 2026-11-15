@@ -119,6 +119,11 @@ public class JdbcMemoryStore implements MemoryStore {
         transaction.setTimeout(10);
     }
 
+    /** The host must bind the same JDBC source and schema before sharing the scope transaction. */
+    public final boolean usesStorage(DataSource source, String schema) {
+        return source == dataSource && schema != null && scopeTable.equals(schema + ".scope");
+    }
+
     @Override
     public MemoryRetrievalResult retrieve(MemoryQuery query, MemoryScopeVO scope, CallPermitVO permit) {
         var fixed = Objects.requireNonNull(query, "query").snapshot();
