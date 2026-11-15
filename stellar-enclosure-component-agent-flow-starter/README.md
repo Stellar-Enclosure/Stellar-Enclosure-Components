@@ -138,6 +138,16 @@ Streamed text events are partial deltas followed by a complete final response. C
 
 When a named `ChatModel` supplies `ToolCallback` entries in its default `ToolCallingChatOptions`, the starter snapshots and registers them as native ADK tools while the flow is built. The adapter requires a native ADK tool context internally, but removes the reserved `adk_tool_context` entry before invoking the host callback; its string result is returned as `{"result": "..."}`. Spring AI MCP callbacks can forward other configured tool-context values as remote metadata, so hosts must control those values. The native ADK loop owns tool execution and honors `returnDirect`. The host must authorize and govern each tool; changing the model's callback list requires rebuilding the flow.
 
+## Neutral execution API
+
+Hosts that own their workflow lifecycle can call `AgentExecutor.execute(command, context)`. Build the command from a trusted, fixed template revision and its content digest, schema validator, bounded JSON input and parameters, and technical limits. Build `AgentExecutionContextVO` in process from a verified scope, deadline, cancellation signal, context and session sources, and call-permit provider.
+
+The handle exposes `events()`, `completion()` and `cancel(reason)`. The Flow publisher honors subscriber demand and buffers up to 64 undelivered events per subscriber. Exceeding the bound ends execution with `BACKPRESSURE_LIMIT`. A live subscriber receives one terminal event followed by `onComplete`. The `completion()` stage resolves once with the final result. Pass a nonblank reason to cancel local execution. External effects already dispatched follow the provider's cancellation semantics.
+
+The effective deadline is the earlier of the command's total timeout and the host context deadline. The command also carries positive node, model-idle and tool timeouts, call counts and resource limits. The executor rechecks host permits for protected calls. The default memory mode is `IN_MEMORY`. Set `NONE` to disable memory. Optional JDBC uses `egon.cola.component.agent-flow.memory.mode=JDBC` with explicit `egon.cola.component.agent-flow.memory.data-source-ref` and `egon.cola.component.agent-flow.memory.schema`. Supply the named `DataSource` and a provisioned schema for startup verification.
+
+To use the optional RAG adapter, set `egon.cola.component.agent-flow.rag.enabled=true` and supply the RAG API, the named `ragRetrievalService` and an explicit `agentMemoryRagAuthority` bean. Startup requires the corresponding dependencies and host configuration for each selected adapter. See [AgentExecutorConformanceTest](src/test/java/top/egon/cola/component/agentflow/contract/AgentExecutorConformanceTest.java) and [OptionalClasspathTest](src/test/java/top/egon/cola/component/agentflow/autoconfigure/OptionalClasspathTest.java).
+
 ## Execution and lifecycle semantics
 
 - The execution guard key is `(flowId, userId, sessionId)`. The same tuple is exclusive; different tuples may run in parallel.

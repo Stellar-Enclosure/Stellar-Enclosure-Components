@@ -138,6 +138,16 @@ agentFlowService.deleteSession(new AgentFlowSessionCommand(
 
 当具名 `ChatModel` 的默认 `ToolCallingChatOptions` 包含 `ToolCallback` 时，starter 在构建 Flow 时将这些回调快照并注册为 ADK 原生工具。适配器在内部要求原生 ADK 工具上下文，但调用宿主回调前会移除保留的 `adk_tool_context` 条目；字符串结果以 `{"result": "..."}` 返回。Spring AI MCP 回调可能将其他配置的工具上下文值作为远程元数据，宿主必须控制这些值。工具循环由 ADK 执行，并保留 `returnDirect` 语义。宿主仍需为每个工具执行授权与治理；修改回调列表后需要重新构建 Flow。
 
+## 中立执行接口
+
+自行管理工作流生命周期的宿主可以调用 `AgentExecutor.execute(command, context)`。根据可信的固定模板修订构造 command，提供内容摘要、schema validator、有界 JSON 输入与参数以及技术限制。在进程内用已验证的 scope、deadline、取消信号、上下文与 Session 来源、调用许可提供器构造 `AgentExecutionContextVO`。
+
+执行句柄提供 `events()`、`completion()` 和 `cancel(reason)`。Flow publisher 按订阅者的需求投递，每个订阅者最多积压 64 个未投递事件。超过上限时以 `BACKPRESSURE_LIMIT` 结束执行。仍有效的订阅者会收到一个终态事件，随后收到 `onComplete`。`completion()` 只完成一次并返回最终结果。使用非空原因取消本地执行。已派发的外部效果遵循提供方的取消语义。
+
+执行期限取 command 的总 timeout 和宿主 context deadline 中较早者。command 还携带正数的节点、模型空闲和工具 timeout，以及调用次数和资源限制。执行器在受保护调用前复验宿主许可。Memory 默认使用 `IN_MEMORY`。可设置 `NONE` 关闭。使用可选 JDBC 时，将 `egon.cola.component.agent-flow.memory.mode` 设为 `JDBC`，并显式提供 `egon.cola.component.agent-flow.memory.data-source-ref` 和 `egon.cola.component.agent-flow.memory.schema`。宿主提供具名 `DataSource` 和已安装的 schema，供启动时验证。
+
+使用可选的 RAG 适配器时，将 `egon.cola.component.agent-flow.rag.enabled` 设为 `true`，并提供 RAG API、具名 `ragRetrievalService` 和显式授权 Bean `agentMemoryRagAuthority`。启动时要求所选适配器具备相应依赖与宿主配置。参见 [AgentExecutorConformanceTest](src/test/java/top/egon/cola/component/agentflow/contract/AgentExecutorConformanceTest.java) 和 [OptionalClasspathTest](src/test/java/top/egon/cola/component/agentflow/autoconfigure/OptionalClasspathTest.java)。
+
 ## 执行与生命周期语义
 
 - 执行 guard 的 key 是 `(flowId, userId, sessionId)`。相同 tuple 互斥，不同 tuple 可以并行。
