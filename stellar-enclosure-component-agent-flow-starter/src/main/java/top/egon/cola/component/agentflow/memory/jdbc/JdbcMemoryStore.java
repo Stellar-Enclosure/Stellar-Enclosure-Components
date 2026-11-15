@@ -120,7 +120,7 @@ public class JdbcMemoryStore implements MemoryStore {
     }
 
     /** The host must bind the same JDBC source and schema before sharing the scope transaction. */
-    public final boolean usesStorage(DataSource source, String schema) {
+    public boolean usesStorage(DataSource source, String schema) {
         return source == dataSource && schema != null && scopeTable.equals(schema + ".scope");
     }
 
