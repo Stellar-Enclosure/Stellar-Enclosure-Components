@@ -1,5 +1,6 @@
 package top.egon.cola.component.outbox.store;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -35,8 +36,11 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 /** PostgreSQL implementation for a single ordinary DataSource and its own transaction boundary. */
+@Slf4j
 public final class JdbcOutboxStore implements OutboxStore {
     private static final int MAX_BATCH = 10_000;
+    private static final String RECLAIM_EXHAUSTED_MESSAGE =
+            "Lease expired after reaching maximum delivery attempts";
     private static final String COLUMNS = "id, message_id, idempotency_key, message_fingerprint, channel, "
             + "destination, payload, content_type, schema_version, headers_json, trace_id, status, attempt_count, "
             + "max_attempts, next_attempt_at, locked_by, locked_until, last_error_code, last_error_message, "
@@ -108,32 +112,86 @@ public final class JdbcOutboxStore implements OutboxStore {
 
     @Override
     public List<OutboxRecord> claimDue(int limit, String leaseOwner, Duration leaseDuration) {
-        return claim(null, limit, leaseOwner, leaseDuration);
+        return claim(null, null, limit, leaseOwner, leaseDuration);
+    }
+
+    @Override
+    public List<OutboxRecord> claimDue(
+            Collection<String> channels,
+            int limit,
+            String leaseOwner,
+            Duration leaseDuration
+    ) {
+        List<String> channelFilter = normalizeChannels(channels);
+        if (channelFilter != null && channelFilter.isEmpty()) {
+            return List.of();
+        }
+        return claim(null, channelFilter, limit, leaseOwner, leaseDuration);
     }
 
     @Override
     public List<OutboxRecord> claimByMessageIds(Collection<String> messageIds, int limit,
                                                  String leaseOwner, Duration leaseDuration) {
+        return claimByMessageIds(messageIds, null, limit, leaseOwner, leaseDuration);
+    }
+
+    @Override
+    public List<OutboxRecord> claimByMessageIds(
+            Collection<String> messageIds,
+            Collection<String> channels,
+            int limit,
+            String leaseOwner,
+            Duration leaseDuration
+    ) {
         if (messageIds == null || messageIds.isEmpty()) return List.of();
         Set<String> unique = new LinkedHashSet<>(messageIds);
         if (unique.size() > MAX_BATCH || unique.stream().anyMatch(id -> invalid(id, 64))) {
             throw new IllegalArgumentException("OUTBOX_MESSAGE_IDS_INVALID");
         }
-        return claim(List.copyOf(unique), limit, leaseOwner, leaseDuration);
+        List<String> channelFilter = normalizeChannels(channels);
+        if (channelFilter != null && channelFilter.isEmpty()) {
+            return List.of();
+        }
+        return claim(List.copyOf(unique), channelFilter, limit, leaseOwner, leaseDuration);
     }
 
-    private List<OutboxRecord> claim(List<String> ids, int limit, String owner, Duration lease) {
+    private List<String> normalizeChannels(Collection<String> channels) {
+        if (channels == null) {
+            return null;
+        }
+        if (channels.isEmpty()) {
+            return List.of();
+        }
+        Set<String> unique = new LinkedHashSet<>(channels.size());
+        for (String channel : channels) {
+            if (invalid(channel, 64)) {
+                throw new IllegalArgumentException("OUTBOX_CHANNELS_INVALID");
+            }
+            unique.add(channel.trim());
+        }
+        if (unique.size() > MAX_BATCH) {
+            throw new IllegalArgumentException("OUTBOX_CHANNELS_INVALID");
+        }
+        return List.copyOf(unique);
+    }
+
+    private List<OutboxRecord> claim(List<String> ids, List<String> channels, int limit, String owner, Duration lease) {
         requireBatch(limit);
         requireOwner(owner);
         long leaseMillis = millis(lease, true, "OUTBOX_LEASE_INVALID");
         return inWorkerTransaction("Failed to claim outbox messages", () -> {
-            String idFilter = ids == null ? "" : " AND message_id IN (" + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")";
+            String idFilter = ids == null ? "" : " AND message_id IN ("
+                    + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")";
+            String channelFilter = channels == null ? "" : " AND channel IN ("
+                    + String.join(",", java.util.Collections.nCopies(channels.size(), "?")) + ")";
             List<Object> parameters = new ArrayList<>();
             if (ids != null) parameters.addAll(ids);
+            if (channels != null) parameters.addAll(channels);
             parameters.add(limit);
             List<OutboxRecord> candidates = jdbc.query("SELECT " + COLUMNS + " FROM " + table
                             + " WHERE ((status IN ('PENDING','RETRY_WAIT') AND next_attempt_at <= clock_timestamp())"
-                            + " OR (status = 'PROCESSING' AND locked_until < clock_timestamp()))" + idFilter
+                            + " OR (status = 'PROCESSING' AND locked_until < clock_timestamp()))"
+                            + idFilter + channelFilter
                             + " ORDER BY next_attempt_at, id LIMIT ? FOR UPDATE SKIP LOCKED",
                     rowMapper, parameters.toArray());
             List<OutboxRecord> claimed = new ArrayList<>(candidates.size());
@@ -142,6 +200,19 @@ public final class JdbcOutboxStore implements OutboxStore {
                         ? OutboxLifecycleSignalEnum.RECLAIM : OutboxLifecycleSignalEnum.CLAIM;
                 OutboxStatus target = lifecycle.evaluate(candidate.status().name(), signal,
                         candidate.attemptCount(), candidate.maxAttempts());
+                if (signal == OutboxLifecycleSignalEnum.RECLAIM && target == OutboxStatus.DEAD) {
+                    int deadUpdated = jdbc.update("UPDATE " + table + " SET status='DEAD', locked_by=NULL, "
+                                    + "locked_until=NULL, last_error_code='OUTBOX_RETRY_EXHAUSTED', "
+                                    + "last_error_message=?, completed_at=clock_timestamp(), "
+                                    + "updated_at=clock_timestamp() "
+                                    + "WHERE id=? AND status='PROCESSING' AND locked_until < clock_timestamp()",
+                            RECLAIM_EXHAUSTED_MESSAGE, candidate.id());
+                    if (deadUpdated == 1) {
+                        log.warn("Marked expired outbox message id={} messageId={} dead during reclaim after exhausting attempts ({}/{})",
+                                candidate.id(), candidate.messageId(), candidate.attemptCount(), candidate.maxAttempts());
+                    }
+                    continue;
+                }
                 int changed = jdbc.update("UPDATE " + table + " SET status=?, attempt_count=attempt_count+1, "
                                 + "locked_by=?, locked_until=clock_timestamp()+(? * interval '1 millisecond'), "
                                 + "updated_at=clock_timestamp() WHERE id=? AND status=? AND "

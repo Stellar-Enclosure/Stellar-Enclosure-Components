@@ -124,6 +124,23 @@
         LIMIT #{limit}
     </select>
 
+    <select id="selectDueCandidatesByChannels" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/>
+        FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
+          AND deleted_at IS NULL
+          AND channel IN
+        <foreach collection="channels" item="channel" open="(" separator="," close=")">
+            #{channel}
+        </foreach>
+          AND ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at &lt;= clock_timestamp())
+            OR (status = 'PROCESSING' AND locked_until &lt; clock_timestamp()))
+        ORDER BY next_attempt_at, id
+        LIMIT #{limit}
+    </select>
+
     <select id="selectByMessageIdsCandidates" resultMap="outboxMessageResultMap">
         <include refid="outboxShardBinding"/>
         SELECT <include refid="outboxMessageColumns"/>
@@ -134,6 +151,27 @@
           AND message_id IN
         <foreach collection="messageIds" item="messageId" open="(" separator="," close=")">
             #{messageId}
+        </foreach>
+          AND ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at &lt;= clock_timestamp())
+            OR (status = 'PROCESSING' AND locked_until &lt; clock_timestamp()))
+        ORDER BY next_attempt_at, id
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectByMessageIdsCandidatesByChannels" resultMap="outboxMessageResultMap">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/>
+        FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot}
+          AND tenant_id = 0
+          AND deleted_at IS NULL
+          AND message_id IN
+        <foreach collection="messageIds" item="messageId" open="(" separator="," close=")">
+            #{messageId}
+        </foreach>
+          AND channel IN
+        <foreach collection="channels" item="channel" open="(" separator="," close=")">
+            #{channel}
         </foreach>
           AND ((status IN ('PENDING', 'RETRY_WAIT') AND next_attempt_at &lt;= clock_timestamp())
             OR (status = 'PROCESSING' AND locked_until &lt; clock_timestamp()))
@@ -253,6 +291,28 @@
           AND status = 'PROCESSING'
           AND locked_by = #{owner}
           AND locked_until &gt; clock_timestamp()
+          AND tenant_id = 0
+          AND deleted_at IS NULL
+    </update>
+
+    <update id="updateReclaimDead">
+        <include refid="outboxShardBinding"/>
+        UPDATE egon_outbox.egon_cola_outbox_message
+        SET status = 'DEAD',
+            locked_by = NULL,
+            locked_until = NULL,
+            last_error_code = #{errorCode,jdbcType=VARCHAR},
+            last_error_message = #{errorMessage,jdbcType=LONGVARCHAR},
+            completed_at = clock_timestamp(),
+            updated_at = clock_timestamp(),
+            update_user_id = #{updateUserId},
+            update_time = #{updateTime},
+            version = version + 1
+        WHERE id = #{id}
+          AND shard_slot = #{_outboxSlot}
+          AND version = #{version}
+          AND status = 'PROCESSING'
+          AND locked_until &lt; clock_timestamp()
           AND tenant_id = 0
           AND deleted_at IS NULL
     </update>

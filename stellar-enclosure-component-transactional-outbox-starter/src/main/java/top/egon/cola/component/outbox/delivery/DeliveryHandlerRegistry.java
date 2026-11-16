@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public class DeliveryHandlerRegistry {
@@ -42,5 +43,9 @@ public class DeliveryHandlerRegistry {
             throw new OutboxValidationException("No transactional outbox handler for channel");
         }
         return handler;
+    }
+
+    public Set<String> channels() {
+        return handlers.keySet();
     }
 }

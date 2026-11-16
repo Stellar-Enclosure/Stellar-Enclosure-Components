@@ -99,6 +99,15 @@ class PostgresqlOutboxQueryPlanIntegrationTest extends PostgresqlOutboxTestSuppo
                 order by next_attempt_at, id
                 limit 100
                 """);
+        String channelDuePlan = explain("""
+                select id
+                from egon_outbox.egon_cola_outbox_message
+                where channel in ('http', 'state-machine')
+                  and status in ('PENDING', 'RETRY_WAIT')
+                  and next_attempt_at <= clock_timestamp()
+                order by next_attempt_at, id
+                limit 100
+                """);
         String reclaimPlan = explain("""
                 select id
                 from egon_outbox.egon_cola_outbox_message
@@ -108,6 +117,7 @@ class PostgresqlOutboxQueryPlanIntegrationTest extends PostgresqlOutboxTestSuppo
                 limit 100
                 """);
         assertThat(duePlan).contains("idx_outbox_claim");
+        assertThat(channelDuePlan).contains("idx_outbox_claim");
         assertThat(reclaimPlan).contains("idx_outbox_reclaim");
     }
 

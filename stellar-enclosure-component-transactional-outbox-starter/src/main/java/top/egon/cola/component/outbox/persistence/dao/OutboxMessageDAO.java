@@ -42,8 +42,19 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
 
     List<OutboxMessagePO> selectDueCandidates(@Param("limit") @Min(1) @Max(10_000) int limit);
 
+    List<OutboxMessagePO> selectDueCandidatesByChannels(
+            @Param("channels") @NotEmpty Collection<@NotBlank @Size(max = 64) String> channels,
+            @Param("limit") @Min(1) @Max(10_000) int limit
+    );
+
     List<OutboxMessagePO> selectByMessageIdsCandidates(
             @Param("messageIds") @NotEmpty Collection<@NotBlank @Size(max = 64) String> messageIds,
+            @Param("limit") @Min(1) @Max(10_000) int limit
+    );
+
+    List<OutboxMessagePO> selectByMessageIdsCandidatesByChannels(
+            @Param("messageIds") @NotEmpty Collection<@NotBlank @Size(max = 64) String> messageIds,
+            @Param("channels") @NotEmpty Collection<@NotBlank @Size(max = 64) String> channels,
             @Param("limit") @Min(1) @Max(10_000) int limit
     );
 
@@ -91,6 +102,15 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
             @Param("version") @Min(0) long version,
             @Param("owner") @NotBlank @Size(max = 128) String owner,
             @Param("target") @NotNull OutboxStatus target,
+            @Param("errorCode") @Size(max = 64) String errorCode,
+            @Param("errorMessage") String errorMessage,
+            @Param("updateTime") @NotNull Instant updateTime,
+            @Param("updateUserId") @NotBlank @Size(max = 128) String updateUserId
+    );
+
+    int updateReclaimDead(
+            @Param("id") @Positive long id,
+            @Param("version") @Min(0) long version,
             @Param("errorCode") @Size(max = 64) String errorCode,
             @Param("errorMessage") String errorMessage,
             @Param("updateTime") @NotNull Instant updateTime,

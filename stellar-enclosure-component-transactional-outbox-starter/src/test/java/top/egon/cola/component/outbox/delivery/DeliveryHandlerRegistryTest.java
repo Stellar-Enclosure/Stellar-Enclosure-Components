@@ -31,6 +31,15 @@ class DeliveryHandlerRegistryTest {
                 .isInstanceOf(OutboxValidationException.class);
     }
 
+    @Test
+    void shouldExposeUnmodifiableRegisteredChannels() {
+        DeliveryHandlerRegistry registry = new DeliveryHandlerRegistry(List.of(handler("http"), handler("custom")));
+
+        assertThat(registry.channels()).containsExactlyInAnyOrder("http", "custom");
+        assertThatThrownBy(() -> registry.channels().add("other"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
     private DeliveryHandler handler(String channel) {
         return new DeliveryHandler() {
             @Override

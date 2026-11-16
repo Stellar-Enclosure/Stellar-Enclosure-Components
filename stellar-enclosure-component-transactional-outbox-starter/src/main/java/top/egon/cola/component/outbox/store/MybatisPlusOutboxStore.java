@@ -30,8 +30,10 @@ import top.egon.cola.component.outbox.statemachine.OutboxLifecycleSignalEnum;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -45,6 +47,10 @@ public class MybatisPlusOutboxStore implements OutboxStore {
 
     private static final String TECHNICAL_USER_ID = "system:outbox";
     private static final int MAX_CANDIDATE_LIMIT = 10_000;
+    private static final int DEFAULT_MAX_CLAIM_CONTENTION_RETRIES = 8;
+    private static final String RECLAIM_EXHAUSTED_CODE = "OUTBOX_RETRY_EXHAUSTED";
+    private static final String RECLAIM_EXHAUSTED_MESSAGE =
+            "Lease expired after reaching maximum delivery attempts";
 
     @Qualifier("outboxMessageRepository")
     private final OutboxMessageRepository repository;
@@ -71,6 +77,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     private final OutboxMpStorageProperties storageProperties;
 
     private final OutboxShardRouting shardRouting;
+    private final int maxClaimContentionRetries;
     private final AtomicInteger nextShard = new AtomicInteger();
 
     public MybatisPlusOutboxStore(OutboxMessageRepository repository, OutboxMessageConverter converter,
@@ -78,13 +85,25 @@ public class MybatisPlusOutboxStore implements OutboxStore {
                                   TransactionTemplate workerTransaction, OutboxSchemaMetadataValidator metadataValidator,
                                   Clock clock, OutboxMpStorageProperties storageProperties) {
         this(repository, converter, technicalContext, lifecycle, workerTransaction, metadataValidator, clock,
-                storageProperties, new OutboxShardRouting());
+                storageProperties, new OutboxShardRouting(), DEFAULT_MAX_CLAIM_CONTENTION_RETRIES);
     }
 
     public MybatisPlusOutboxStore(OutboxMessageRepository repository, OutboxMessageConverter converter,
                                   OutboxTechnicalContextExecutor technicalContext, OutboxLifecycleService lifecycle,
                                   TransactionTemplate workerTransaction, OutboxSchemaMetadataValidator metadataValidator,
                                   Clock clock, OutboxMpStorageProperties storageProperties, OutboxShardRouting shardRouting) {
+        this(repository, converter, technicalContext, lifecycle, workerTransaction, metadataValidator, clock,
+                storageProperties, shardRouting, DEFAULT_MAX_CLAIM_CONTENTION_RETRIES);
+    }
+
+    public MybatisPlusOutboxStore(OutboxMessageRepository repository, OutboxMessageConverter converter,
+                                  OutboxTechnicalContextExecutor technicalContext, OutboxLifecycleService lifecycle,
+                                  TransactionTemplate workerTransaction, OutboxSchemaMetadataValidator metadataValidator,
+                                  Clock clock, OutboxMpStorageProperties storageProperties, OutboxShardRouting shardRouting,
+                                  int maxClaimContentionRetries) {
+        if (maxClaimContentionRetries < 1) {
+            throw new IllegalArgumentException("OUTBOX_CLAIM_CONTENTION_RETRIES_INVALID");
+        }
         this.repository = repository;
         this.converter = converter;
         this.technicalContext = technicalContext;
@@ -94,6 +113,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         this.clock = clock;
         this.storageProperties = storageProperties;
         this.shardRouting = shardRouting;
+        this.maxClaimContentionRetries = maxClaimContentionRetries;
     }
 
     @Override
@@ -141,13 +161,30 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     @Override
     public List<OutboxRecord> claimDue(@Positive @Max(10_000) int limit, @NotNull String leaseOwner,
                                       @NotNull Duration leaseDuration) {
+        return claimDue(null, limit, leaseOwner, leaseDuration);
+    }
+
+    @Override
+    public List<OutboxRecord> claimDue(
+            Collection<String> channels,
+            @Positive @Max(10_000) int limit,
+            @NotNull String leaseOwner,
+            @NotNull Duration leaseDuration
+    ) {
+        List<String> channelFilter = normalizeChannels(channels);
+        if (channelFilter != null && channelFilter.isEmpty()) {
+            return List.of();
+        }
         requireLease(leaseOwner, leaseDuration);
         List<OutboxRecord> result = new ArrayList<>();
         for (int slot : rotatedSlots()) {
             int remaining = limit - result.size();
             if (remaining == 0) { break; }
+            int scanLimit = candidateScanLimit(remaining);
             List<OutboxMessagePO> candidates = inWorkerTransaction("Failed to select due outbox messages", slot,
-                    () -> repository.selectDueCandidates(candidateScanLimit(remaining)));
+                    () -> channelFilter == null
+                            ? repository.selectDueCandidates(scanLimit)
+                            : repository.selectDueCandidates(channelFilter, scanLimit));
             result.addAll(claim(candidates, remaining, leaseOwner, leaseDuration, slot));
         }
         return List.copyOf(result);
@@ -160,7 +197,22 @@ public class MybatisPlusOutboxStore implements OutboxStore {
             @NotNull String leaseOwner,
             @NotNull Duration leaseDuration
     ) {
+        return claimByMessageIds(messageIds, null, limit, leaseOwner, leaseDuration);
+    }
+
+    @Override
+    public List<OutboxRecord> claimByMessageIds(
+            Collection<String> messageIds,
+            Collection<String> channels,
+            @Positive @Max(10_000) int limit,
+            @NotNull String leaseOwner,
+            @NotNull Duration leaseDuration
+    ) {
         if (messageIds == null || messageIds.isEmpty()) {
+            return List.of();
+        }
+        List<String> channelFilter = normalizeChannels(channels);
+        if (channelFilter != null && channelFilter.isEmpty()) {
             return List.of();
         }
         requireLease(leaseOwner, leaseDuration);
@@ -168,11 +220,34 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         for (int slot : rotatedSlots()) {
             int remaining = limit - result.size();
             if (remaining == 0) { break; }
+            int scanLimit = candidateScanLimit(remaining);
             List<OutboxMessagePO> candidates = inWorkerTransaction("Failed to select outbox messages", slot,
-                    () -> repository.selectByMessageIdsCandidates(messageIds, candidateScanLimit(remaining)));
+                    () -> channelFilter == null
+                            ? repository.selectByMessageIdsCandidates(messageIds, scanLimit)
+                            : repository.selectByMessageIdsCandidates(messageIds, channelFilter, scanLimit));
             result.addAll(claim(candidates, remaining, leaseOwner, leaseDuration, slot));
         }
         return List.copyOf(result);
+    }
+
+    private static List<String> normalizeChannels(Collection<String> channels) {
+        if (channels == null) {
+            return null;
+        }
+        if (channels.isEmpty()) {
+            return List.of();
+        }
+        Set<String> unique = new LinkedHashSet<>(channels.size());
+        for (String channel : channels) {
+            if (channel == null || channel.isBlank() || channel.length() > 64) {
+                throw new IllegalArgumentException("OUTBOX_CHANNELS_INVALID");
+            }
+            unique.add(channel.trim());
+        }
+        if (unique.size() > MAX_CANDIDATE_LIMIT) {
+            throw new IllegalArgumentException("OUTBOX_BATCH_COLLECTION_TOO_LARGE");
+        }
+        return List.copyOf(unique);
     }
 
     @Override
@@ -321,6 +396,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         return inWorkerTransactionSkippingLocked("Failed to claim outbox messages", shardSlot, candidates, List.of(),
                 (available, contention) -> {
             List<OutboxRecord> claimed = new ArrayList<>(Math.min(requestedLimit, available.size()));
+            int contentionMisses = 0;
             for (OutboxMessagePO candidate : available) {
                 if (claimed.size() >= requestedLimit) break;
                 acquireCandidate(candidate, contention);
@@ -328,10 +404,27 @@ public class MybatisPlusOutboxStore implements OutboxStore {
                         ? OutboxLifecycleSignalEnum.RECLAIM : OutboxLifecycleSignalEnum.CLAIM;
                 OutboxStatus target = lifecycle.evaluate(candidate.getStatus().getMessage(), signal,
                         candidate.getAttemptCount(), candidate.getMaxAttempts());
+                if (signal == OutboxLifecycleSignalEnum.RECLAIM && target == OutboxStatus.DEAD) {
+                    int deadUpdated = repository.updateReclaimDead(candidate.getId(), candidate.getVersion(),
+                            RECLAIM_EXHAUSTED_CODE, RECLAIM_EXHAUSTED_MESSAGE, clock.instant(), TECHNICAL_USER_ID);
+                    if (deadUpdated == 1) {
+                        log.warn("Marked expired outbox message id={} messageId={} dead during reclaim after exhausting attempts ({}/{})",
+                                candidate.getId(), candidate.getMessageId(),
+                                candidate.getAttemptCount(), candidate.getMaxAttempts());
+                    }
+                    continue;
+                }
                 int changed = repository.updateClaim(candidate.getId(), candidate.getVersion(),
                         candidate.getStatus(), target, leaseOwner, leaseDuration.toMillis(), clock.instant(),
                         TECHNICAL_USER_ID);
-                if (changed == 0) continue;
+                if (changed == 0) {
+                    if (++contentionMisses >= maxClaimContentionRetries) {
+                        log.debug("Stopping claim scan in shard {} after {} version-contention misses",
+                                shardSlot, contentionMisses);
+                        break;
+                    }
+                    continue;
+                }
                 OutboxMessagePO updated = repository.selectProcessingForUpdate(candidate.getId(), leaseOwner);
                 if (updated == null) throw new OutboxStorageException("Claimed outbox message could not be reloaded");
                 claimed.add(toRecord(updated));
@@ -384,12 +477,18 @@ public class MybatisPlusOutboxStore implements OutboxStore {
     private <T> T inWorkerTransactionSkippingLocked(String publicMessage, int shardSlot,
             List<OutboxMessagePO> candidates, T empty, BiFunction<List<OutboxMessagePO>, LockContention, T> operation) {
         List<OutboxMessagePO> remaining = new ArrayList<>(candidates);
+        int lockContentions = 0;
         while (!remaining.isEmpty()) {
             LockContention contention = new LockContention();
             try {
                 return inWorkerTransaction(publicMessage, shardSlot, () -> operation.apply(remaining, contention));
             } catch (RuntimeException failure) {
                 if (!contention.matches(failure)) throw failure;
+                if (++lockContentions >= maxClaimContentionRetries) {
+                    log.debug("Stopping claim scan in shard {} after {} lock-contention retries",
+                            shardSlot, lockContentions);
+                    return empty;
+                }
                 remaining.removeIf(candidate -> candidate.getId().equals(contention.id));
             }
         }

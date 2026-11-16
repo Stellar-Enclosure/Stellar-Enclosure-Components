@@ -30,12 +30,37 @@ public interface OutboxStore {
             @NotNull Duration leaseDuration
     );
 
+    default List<OutboxRecord> claimDue(
+            Collection<String> channels,
+            @Positive @Max(10_000) int limit,
+            @NotNull String leaseOwner,
+            @NotNull Duration leaseDuration
+    ) {
+        if (channels != null && channels.isEmpty()) {
+            return List.of();
+        }
+        return claimDue(limit, leaseOwner, leaseDuration);
+    }
+
     List<OutboxRecord> claimByMessageIds(
             Collection<String> messageIds,
             @Positive @Max(10_000) int limit,
             @NotNull String leaseOwner,
             @NotNull Duration leaseDuration
     );
+
+    default List<OutboxRecord> claimByMessageIds(
+            Collection<String> messageIds,
+            Collection<String> channels,
+            @Positive @Max(10_000) int limit,
+            @NotNull String leaseOwner,
+            @NotNull Duration leaseDuration
+    ) {
+        if (channels != null && channels.isEmpty()) {
+            return List.of();
+        }
+        return claimByMessageIds(messageIds, limit, leaseOwner, leaseDuration);
+    }
 
     boolean markSucceeded(@Positive long id, @NotNull String leaseOwner);
 

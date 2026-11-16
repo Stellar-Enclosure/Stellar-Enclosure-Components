@@ -162,6 +162,7 @@ public class OutboxDispatcher {
             }
         }
         dispatch(limit -> store.claimDue(
+                handlerRegistry.channels(),
                 limit,
                 workerIdentity.nextLeaseOwner(),
                 properties.getDelivery().getLeaseDuration()
@@ -175,6 +176,7 @@ public class OutboxDispatcher {
         List<String> selectedIds = List.copyOf(messageIds);
         dispatch(limit -> store.claimByMessageIds(
                 selectedIds,
+                handlerRegistry.channels(),
                 limit,
                 workerIdentity.nextLeaseOwner(),
                 properties.getDelivery().getLeaseDuration()

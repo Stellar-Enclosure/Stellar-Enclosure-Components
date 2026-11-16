@@ -30,6 +30,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -156,6 +157,23 @@ class OutboxDispatcherTest {
         assertThat(store.retried.get("message-1")).isEqualTo(Duration.ofSeconds(2));
         assertThat(metrics.retryCount).isEqualTo(1);
         verify(lifecycleService).evaluate("PROCESSING", OutboxLifecycleSignalEnum.DELIVERY_RETRYABLE, 2, 10);
+    }
+
+    @Test
+    void shouldPassRegisteredHandlerChannelsWhenClaimingMessages() {
+        store.filterByChannels = true;
+        store.add(
+                record(1, "message-1", "http", 1, 10),
+                record(2, "message-2", "state-machine", 1, 10)
+        );
+        handler.results.put("message-1", DeliveryResult.success());
+
+        dispatcher.dispatchDue();
+        assertThat(store.lastClaimDueChannels).containsExactly("http");
+        assertThat(store.succeeded).containsExactly("message-1");
+
+        dispatcher.dispatchMessageIds(List.of("message-1", "message-2"));
+        assertThat(store.lastClaimByIdsChannels).containsExactly("http");
     }
 
     @Test
@@ -406,6 +424,9 @@ class OutboxDispatcherTest {
         private boolean allowOwnerUpdate = true;
         private int claimDueCount;
         private int claimByMessageIdsCount;
+        private Collection<String> lastClaimDueChannels;
+        private Collection<String> lastClaimByIdsChannels;
+        private boolean filterByChannels;
         private int backlogCount;
         private int recoverCount;
         private Duration recoverDelay;
@@ -430,6 +451,25 @@ class OutboxDispatcherTest {
         }
 
         @Override
+        public List<OutboxRecord> claimDue(
+                Collection<String> channels,
+                int limit,
+                String leaseOwner,
+                Duration leaseDuration
+        ) {
+            lastClaimDueChannels = channels == null ? null : Set.copyOf(channels);
+            claimDueCount++;
+            if (filterByChannels && channels != null && channels.isEmpty()) {
+                return List.of();
+            }
+            return records.stream()
+                    .filter(record -> !filterByChannels || channels == null || channels.contains(record.channel()))
+                    .limit(limit)
+                    .map(record -> withOwner(record, leaseOwner))
+                    .toList();
+        }
+
+        @Override
         public List<OutboxRecord> claimByMessageIds(
                 Collection<String> requestedIds,
                 int limit,
@@ -439,6 +479,27 @@ class OutboxDispatcherTest {
             claimByMessageIdsCount++;
             return records.stream()
                     .filter(record -> requestedIds.contains(record.messageId()))
+                    .limit(limit)
+                    .map(record -> withOwner(record, leaseOwner))
+                    .toList();
+        }
+
+        @Override
+        public List<OutboxRecord> claimByMessageIds(
+                Collection<String> requestedIds,
+                Collection<String> channels,
+                int limit,
+                String leaseOwner,
+                Duration leaseDuration
+        ) {
+            lastClaimByIdsChannels = channels == null ? null : Set.copyOf(channels);
+            claimByMessageIdsCount++;
+            if (filterByChannels && channels != null && channels.isEmpty()) {
+                return List.of();
+            }
+            return records.stream()
+                    .filter(record -> requestedIds.contains(record.messageId()))
+                    .filter(record -> !filterByChannels || channels == null || channels.contains(record.channel()))
                     .limit(limit)
                     .map(record -> withOwner(record, leaseOwner))
                     .toList();

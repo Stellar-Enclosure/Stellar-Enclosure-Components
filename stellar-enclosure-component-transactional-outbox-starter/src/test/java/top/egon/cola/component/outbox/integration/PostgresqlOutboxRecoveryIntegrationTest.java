@@ -22,6 +22,7 @@ import top.egon.cola.component.outbox.dispatch.OutboxWorkerIdentity;
 import top.egon.cola.component.outbox.observability.NoopOutboxMetrics;
 import top.egon.cola.component.outbox.serialization.JacksonOutboxMessageSerializer;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
+import top.egon.cola.component.outbox.store.NewOutboxRecord;
 import top.egon.cola.component.outbox.store.OutboxRecord;
 import top.egon.cola.component.outbox.store.OutboxStatus;
 import top.egon.cola.component.outbox.store.OutboxStore;
@@ -32,6 +33,7 @@ import top.egon.cola.component.outbox.validation.OutboxMessageValidator;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -182,6 +184,63 @@ class PostgresqlOutboxRecoveryIntegrationTest extends PostgresqlOutboxTestSuppor
                 select last_error_code
                 from egon_outbox.egon_cola_outbox_message
                 where message_id = 'message-1'
+                """, String.class)).isEqualTo("OUTBOX_RETRY_EXHAUSTED");
+    }
+
+    @Test
+    void shouldFilterClaimedMessagesToRegisteredChannelsLeavingOtherChannelsUntouched() {
+        store.enqueue(newRecord("handled-message"));
+        store.enqueue(new NewOutboxRecord(
+                "unhandled-message",
+                "unhandled-key",
+                "b".repeat(64),
+                "other-channel",
+                "orders",
+                "{}",
+                "application/json",
+                null,
+                "{}",
+                null,
+                Instant.now().minusSeconds(5),
+                3
+        ));
+        results.put("handled-message", DeliveryResult.success());
+
+        dispatcher(registry(), properties()).submitDue();
+
+        assertThat(status("handled-message")).isEqualTo(OutboxStatus.SUCCEEDED);
+        assertThat(status("unhandled-message")).isEqualTo(OutboxStatus.PENDING);
+        assertThat(jdbcTemplate.queryForObject("""
+                select attempt_count
+                from egon_outbox.egon_cola_outbox_message
+                where message_id = 'unhandled-message'
+                """, Integer.class)).isZero();
+    }
+
+    @Test
+    void shouldMarkExpiredReclaimDeadInsteadOfProcessingWhenAttemptBudgetExhausted() {
+        store.enqueue(newRecord("exhausted-reclaim", "exhausted-key", "c".repeat(64), 1));
+        OutboxRecord claimed = store.claimDue(List.of("test"), 1, "node-a:first", Duration.ofSeconds(60)).getFirst();
+        assertThat(claimed.attemptCount()).isEqualTo(1);
+        jdbcTemplate.update("""
+                update egon_outbox.egon_cola_outbox_message
+                set locked_until = clock_timestamp() - interval '1 second'
+                where message_id = 'exhausted-reclaim'
+                """);
+
+        List<OutboxRecord> reclaimed = store.claimDue(List.of("test"), 10, "node-b:second", Duration.ofSeconds(60));
+
+        assertThat(reclaimed).isEmpty();
+        assertThat(status("exhausted-reclaim")).isEqualTo(OutboxStatus.DEAD);
+        assertThat(jdbcTemplate.queryForObject("""
+                select locked_by
+                from egon_outbox.egon_cola_outbox_message
+                where message_id = 'exhausted-reclaim'
+                """, String.class)).isNull();
+        assertThat(jdbcTemplate.queryForObject("""
+                select last_error_code
+                from egon_outbox.egon_cola_outbox_message
+                where message_id = 'exhausted-reclaim'
                 """, String.class)).isEqualTo("OUTBOX_RETRY_EXHAUSTED");
     }
 

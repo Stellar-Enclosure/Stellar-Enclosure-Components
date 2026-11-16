@@ -62,6 +62,18 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
         return getBaseMapper().selectDueCandidates(limit);
     }
 
+    public List<OutboxMessagePO> selectDueCandidates(
+            @NotNull @Size(max = 10_000) Collection<@NotBlank @Size(max = 64) String> channels,
+            @Min(1) @Max(10_000) int limit
+    ) {
+        validateChannels(channels);
+        if (channels.isEmpty()) {
+            return List.of();
+        }
+        requireBatchLimit(limit);
+        return getBaseMapper().selectDueCandidatesByChannels(channels, limit);
+    }
+
     public List<OutboxMessagePO> selectByMessageIdsCandidates(
             @NotNull @Size(max = 10_000) Collection<@NotBlank @Size(max = 64) String> messageIds,
             @Min(1) @Max(10_000) int limit
@@ -79,6 +91,27 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
         }
         requireBatchLimit(limit);
         return getBaseMapper().selectByMessageIdsCandidates(messageIds, limit);
+    }
+
+    public List<OutboxMessagePO> selectByMessageIdsCandidates(
+            @NotNull @Size(max = 10_000) Collection<@NotBlank @Size(max = 64) String> messageIds,
+            @NotNull @Size(max = 10_000) Collection<@NotBlank @Size(max = 64) String> channels,
+            @Min(1) @Max(10_000) int limit
+    ) {
+        if (messageIds == null) {
+            throw new IllegalArgumentException("OUTBOX_MESSAGE_IDS_REQUIRED");
+        }
+        requireCollectionBound(messageIds.size());
+        if (messageIds.stream().anyMatch(messageId -> messageId == null || messageId.isBlank()
+                || messageId.length() > 64)) {
+            throw new IllegalArgumentException("OUTBOX_MESSAGE_IDS_INVALID");
+        }
+        validateChannels(channels);
+        if (messageIds.isEmpty() || channels.isEmpty()) {
+            return List.of();
+        }
+        requireBatchLimit(limit);
+        return getBaseMapper().selectByMessageIdsCandidatesByChannels(messageIds, channels, limit);
     }
 
     public boolean tryAcquireTransactionLock(@Positive long id) {
@@ -142,6 +175,28 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
     ) {
         return requireAtMostOne("updateDead", getBaseMapper().updateDead(
                 id, version, owner, target, errorCode, errorMessage, updateTime, updateUserId));
+    }
+
+    public int updateReclaimDead(
+            @Positive long id,
+            @Min(0) long version,
+            @Size(max = 64) String errorCode,
+            String errorMessage,
+            @NotNull Instant updateTime,
+            @NotBlank @Size(max = 128) String updateUserId
+    ) {
+        return requireAtMostOne("updateReclaimDead", getBaseMapper().updateReclaimDead(
+                id, version, errorCode, errorMessage, updateTime, updateUserId));
+    }
+
+    private void validateChannels(Collection<String> channels) {
+        if (channels == null) {
+            throw new IllegalArgumentException("OUTBOX_CHANNELS_REQUIRED");
+        }
+        requireCollectionBound(channels.size());
+        if (channels.stream().anyMatch(channel -> channel == null || channel.isBlank() || channel.length() > 64)) {
+            throw new IllegalArgumentException("OUTBOX_CHANNELS_INVALID");
+        }
     }
 
     public List<OutboxMessagePO> selectExpiredSucceededCandidates(

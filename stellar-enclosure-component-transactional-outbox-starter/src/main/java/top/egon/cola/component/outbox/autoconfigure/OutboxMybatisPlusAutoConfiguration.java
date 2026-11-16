@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.annotation.MapperScan;
 import org.mybatis.spring.transaction.SpringManagedTransactionFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -188,13 +189,19 @@ public class OutboxMybatisPlusAutoConfiguration {
             EgonColaShardingProperties shardingProperties,
             @Qualifier("outboxMpStorageProperties") OutboxMpStorageProperties storageProperties,
             @Qualifier("egonColaRoutingProfiles") Map<String, EgonColaRoutingProfileBO> profiles,
+            ObjectProvider<TransactionalOutboxProperties> outboxPropertiesProvider,
             ConfigurableListableBeanFactory beanFactory
     ) {
         validateStoreInfrastructure(infrastructure, mybatisProperties, shardingProperties,
                 storageProperties, beanFactory);
+        TransactionalOutboxProperties outboxProperties = outboxPropertiesProvider.getIfAvailable();
+        int maxClaimContentionRetries = outboxProperties == null
+                ? 8
+                : outboxProperties.getPolling().getMaxClaimContentionRetries();
         return new MybatisPlusOutboxStore(repository, converter, technicalContext, lifecycle,
                 workerTransaction, metadataValidator, clock, storageProperties,
-                new OutboxShardRouting(infrastructure.dataSource(), shardingProperties, profiles));
+                new OutboxShardRouting(infrastructure.dataSource(), shardingProperties, profiles),
+                maxClaimContentionRetries);
     }
 
     @Bean("outboxLegacyMigrationService")

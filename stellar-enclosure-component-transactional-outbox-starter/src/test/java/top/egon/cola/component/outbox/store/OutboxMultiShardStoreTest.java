@@ -46,6 +46,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Exercises shard-by-shard orchestration with real H2 transactions and row locks. */
@@ -201,6 +204,72 @@ class OutboxMultiShardStoreTest {
         assertThat(seen).containsExactlyInAnyOrder(0, fixture.secondSlot);
         assertThatThrownBy(() -> fixture.store.recoverExhausted(10, Duration.ZERO))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void claimDueShortCircuitsEmptyChannelsAndCapsContentionRetriesAndMarksExhaustedReclaimDead() {
+        Fixture fixture = fixture();
+        assertThat(fixture.store.claimDue(List.of(), 10, "worker-empty", Duration.ofSeconds(30))).isEmpty();
+        verify(fixture.repository, never()).selectDueCandidates(any(), anyInt());
+
+        when(fixture.lifecycle.evaluate(eq("PROCESSING"), eq(OutboxLifecycleSignalEnum.RECLAIM), eq(3), eq(3)))
+                .thenReturn(OutboxStatus.DEAD);
+        when(fixture.repository.selectDueCandidates(eq(List.of("http")), anyInt())).thenAnswer(invocation -> {
+            if (OutboxShardContext.currentSlot() != 0) {
+                return List.of();
+            }
+            return List.of(
+                    OutboxMessagePO.builder().id(101L).shardSlot(0).status(OutboxStatus.PROCESSING)
+                            .version(1L).attemptCount(3).maxAttempts(3).build(),
+                    OutboxMessagePO.builder().id(102L).shardSlot(0).status(OutboxStatus.PENDING)
+                            .version(1L).attemptCount(0).maxAttempts(3).build()
+            );
+        });
+        when(fixture.repository.tryAcquireTransactionLock(anyLong())).thenReturn(true);
+        when(fixture.repository.updateReclaimDead(eq(101L), eq(1L), eq("OUTBOX_RETRY_EXHAUSTED"), anyString(),
+                any(), anyString())).thenReturn(1);
+
+        fixture.store.claimDue(List.of("http"), 10, "worker-a", Duration.ofSeconds(30));
+
+        verify(fixture.repository).updateReclaimDead(eq(101L), eq(1L), eq("OUTBOX_RETRY_EXHAUSTED"),
+                anyString(), any(), anyString());
+
+        var boundedStore = new MybatisPlusOutboxStore(
+                fixture.repository,
+                mock(OutboxMessageConverter.class),
+                new OutboxTechnicalContextExecutor(new EgonColaMybatisPlusProperties()),
+                fixture.lifecycle,
+                new TransactionTemplate(new DataSourceTransactionManager(fixture.dataSource)),
+                mock(OutboxSchemaMetadataValidator.class),
+                Clock.systemUTC(),
+                new OutboxMpStorageProperties(),
+                new OutboxShardRouting(),
+                2
+        );
+        when(fixture.repository.selectDueCandidates(eq(List.of("custom")), anyInt())).thenReturn(List.of(
+                OutboxMessagePO.builder().id(201L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(202L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(203L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(204L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build()
+        ));
+        org.mockito.Mockito.doReturn(0).when(fixture.repository)
+                .updateClaim(anyLong(), anyLong(), any(), any(), anyString(), anyLong(), any(), anyString());
+
+        assertThat(boundedStore.claimDue(List.of("custom"), 10, "worker-b", Duration.ofSeconds(30))).isEmpty();
+        verify(fixture.repository, times(2))
+                .updateClaim(anyLong(), anyLong(), any(), any(), eq("worker-b"), anyLong(), any(), anyString());
+
+        when(fixture.repository.selectDueCandidates(eq(List.of("lock-test")), anyInt())).thenReturn(List.of(
+                OutboxMessagePO.builder().id(301L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(302L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(303L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build(),
+                OutboxMessagePO.builder().id(304L).shardSlot(0).status(OutboxStatus.PENDING).version(1L).attemptCount(0).maxAttempts(3).build()
+        ));
+        when(fixture.repository.tryAcquireTransactionLock(301L)).thenReturn(false);
+        when(fixture.repository.tryAcquireTransactionLock(302L)).thenReturn(false);
+
+        assertThat(boundedStore.claimDue(List.of("lock-test"), 10, "worker-c", Duration.ofSeconds(30))).isEmpty();
+        verify(fixture.repository, never()).tryAcquireTransactionLock(303L);
     }
 
     private static Fixture fixture() {
