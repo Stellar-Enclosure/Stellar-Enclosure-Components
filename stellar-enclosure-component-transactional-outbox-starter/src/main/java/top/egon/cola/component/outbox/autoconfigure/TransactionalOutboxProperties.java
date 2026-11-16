@@ -181,8 +181,10 @@ public class TransactionalOutboxProperties {
 
         private boolean enabled = true;
         private Duration fixedDelay = Duration.ofSeconds(1);
+        private double jitter = 0.2;
         private int batchSize = 100;
         private int concurrency = 4;
+        private int maxClaimContentionRetries = 8;
 
         public boolean isEnabled() {
             return enabled;
@@ -200,6 +202,14 @@ public class TransactionalOutboxProperties {
             this.fixedDelay = fixedDelay;
         }
 
+        public double getJitter() {
+            return jitter;
+        }
+
+        public void setJitter(double jitter) {
+            this.jitter = jitter;
+        }
+
         public int getBatchSize() {
             return batchSize;
         }
@@ -214,6 +224,14 @@ public class TransactionalOutboxProperties {
 
         public void setConcurrency(int concurrency) {
             this.concurrency = concurrency;
+        }
+
+        public int getMaxClaimContentionRetries() {
+            return maxClaimContentionRetries;
+        }
+
+        public void setMaxClaimContentionRetries(int maxClaimContentionRetries) {
+            this.maxClaimContentionRetries = maxClaimContentionRetries;
         }
     }
 

@@ -52,6 +52,15 @@ public class OutboxConfigurationValidator extends BaseValidator {
         positive(properties.getPolling().getFixedDelay(), "polling.fixed-delay");
         positive(properties.getPolling().getBatchSize(), "polling.batch-size");
         positive(properties.getPolling().getConcurrency(), "polling.concurrency");
+        if (!Double.isFinite(properties.getPolling().getJitter())
+                || properties.getPolling().getJitter() < 0.0
+                || properties.getPolling().getJitter() > 1.0) {
+            throw invalid("polling.jitter");
+        }
+        positive(
+                properties.getPolling().getMaxClaimContentionRetries(),
+                "polling.max-claim-contention-retries"
+        );
         positive(properties.getDelivery().getTimeout(), "delivery.timeout");
         positive(properties.getDelivery().getLeaseDuration(), "delivery.lease-duration");
         positive(properties.getDelivery().getQueueCapacity(), "delivery.queue-capacity");
