@@ -144,9 +144,11 @@ public class OutboxBusinessStateMachineAutoConfiguration {
             @Qualifier("outboxBusinessStateMachineDefinitions")
             Map<String, BusinessStateMachineDefinitionStrategy> definitions,
             @Qualifier("outboxStateMachineObjectMapper") ObjectMapper objectMapper,
-            @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils
+            @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
+            @Qualifier("outboxStateMachineProperties") OutboxStateMachineProperties properties
     ) {
-        return new BusinessStateMachineDeliveryHandler(service, definitions, objectMapper, validationUtils);
+        return new BusinessStateMachineDeliveryHandler(
+                service, definitions, objectMapper, validationUtils, properties);
     }
 
     private static void validateFactory(String destination, StateMachineFactory<String, String> factory) {

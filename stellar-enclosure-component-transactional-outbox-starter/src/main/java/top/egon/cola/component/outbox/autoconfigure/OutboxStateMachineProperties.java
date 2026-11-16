@@ -63,6 +63,9 @@ public class OutboxStateMachineProperties {
         @Builder.Default
         private Duration timeout = Duration.ofSeconds(5);
 
+        @Builder.Default
+        private boolean retryOnMissingDefinition = true;
+
         @AssertTrue(message = "Business state-machine timeout must be positive")
         public boolean isTimeoutValid() {
             return positive(timeout);

@@ -162,16 +162,75 @@ class BusinessStateMachineIntegrationTest extends PostgresqlOutboxTestSupport {
         assertThat(receiptCount()).isEqualTo(1);
     }
 
+    @Test
+    void shouldRetryMissingDefinitionOnOlderPodThenSucceedOnNewerPod() throws Exception {
+        JdbcBusinessStateMachineRepository repository = new JdbcBusinessStateMachineRepository(jdbcTemplate, objectMapper);
+        jdbcTemplate.update("UPDATE public.outbox_test_order SET definition_version = 2 WHERE id = 1");
+        OutboxStore store = outboxStore();
+        BusinessStateMachineEvent v2Event = BusinessStateMachineEvent.builder()
+                .eventId("business-event-v2")
+                .tenantId(7L)
+                .machineKey("order-payment")
+                .definitionVersion(2)
+                .businessId("order-1")
+                .eventType("PAYMENT_CONFIRMED")
+                .expectedVersion(1L)
+                .occurredAt(Instant.now(Clock.systemUTC()))
+                .payload(objectMapper.createObjectNode().put("paymentReference", "payment-v2"))
+                .build();
+        BusinessStateMachineDeliveryHandler newerPodHandler = handler(repository, false, "order-payment:2");
+        DeliveryHandlerRegistry newerRegistry = new DeliveryHandlerRegistry(List.of(newerPodHandler));
+        TransactionalOutbox producer = transactionalOutbox(newerRegistry);
+        OutboxMessage v2Message = OutboxMessage.builder()
+                .messageId("transport-message-v2")
+                .idempotencyKey("idempotency-v2")
+                .channel(BusinessStateMachineDeliveryHandler.CHANNEL)
+                .destination("order-payment:2")
+                .payload(v2Event)
+                .schemaVersion("1")
+                .headers(headers(v2Event))
+                .traceId("business-state-machine-rollout")
+                .availableAt(Instant.now(Clock.systemUTC()).minusSeconds(1))
+                .build();
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> producer.enqueue(v2Message));
+
+        DeliveryHandlerRegistry olderRegistry = new DeliveryHandlerRegistry(List.of(handler(repository, false, DESTINATION)));
+        dispatcher(store, olderRegistry, false).submitDue();
+
+        assertThat(status("transport-message-v2")).isEqualTo(OutboxStatus.RETRY_WAIT);
+        assertThat(businessState()).isEqualTo("AWAITING_PAYMENT");
+        jdbcTemplate.update("""
+                UPDATE egon_outbox.egon_cola_outbox_message
+                SET next_attempt_at = clock_timestamp() - interval '1 second'
+                WHERE message_id = 'transport-message-v2'
+                """);
+
+        dispatcher(store, newerRegistry, false).submitDue();
+
+        assertThat(status("transport-message-v2")).isEqualTo(OutboxStatus.SUCCEEDED);
+        assertThat(businessState()).isEqualTo("PAID");
+        assertThat(businessVersion()).isEqualTo(2L);
+        assertThat(receiptCount()).isEqualTo(1);
+    }
+
     private BusinessStateMachineDeliveryHandler handler(
             JdbcBusinessStateMachineRepository repository,
             boolean failAfterWrite
+    ) throws Exception {
+        return handler(repository, failAfterWrite, DESTINATION);
+    }
+
+    private BusinessStateMachineDeliveryHandler handler(
+            JdbcBusinessStateMachineRepository repository,
+            boolean failAfterWrite,
+            String destination
     ) throws Exception {
         repository.failAfterWrite(failAfterWrite);
         StateMachineFactory<String, String> factory = machineFactory();
         BusinessStateMachineDefinitionStrategy definition = new BusinessStateMachineDefinitionStrategy() {
             @Override
             public String destination() {
-                return DESTINATION;
+                return destination;
             }
 
             @Override
@@ -188,22 +247,24 @@ class BusinessStateMachineIntegrationTest extends PostgresqlOutboxTestSupport {
             public void validateEvent(BusinessStateMachineEvent event) {
             }
         };
-        Map<String, BusinessStateMachineDefinitionStrategy> definitions = Map.of(DESTINATION, definition);
+        Map<String, BusinessStateMachineDefinitionStrategy> definitions = Map.of(destination, definition);
         TransactionTemplate businessTransaction = new TransactionTemplate(transactionManager);
         businessTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         businessTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         businessTransaction.setTimeout(5);
+        OutboxStateMachineProperties stateMachineProperties = new OutboxStateMachineProperties();
         BusinessStateMachineService service = new BusinessStateMachineService(
                 definitions,
                 tenantContextExecutor(),
                 businessTransaction,
                 new StateMachineExecutionService(validationUtils),
-                new OutboxStateMachineProperties(),
+                stateMachineProperties,
                 objectMapper,
                 validationUtils,
                 context.getBean("outboxStateMachineClock", Clock.class)
         );
-        return new BusinessStateMachineDeliveryHandler(service, definitions, objectMapper, validationUtils);
+        return new BusinessStateMachineDeliveryHandler(
+                service, definitions, objectMapper, validationUtils, stateMachineProperties);
     }
 
     @SuppressWarnings("unchecked")

@@ -8,11 +8,11 @@ import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
+import top.egon.cola.component.outbox.autoconfigure.OutboxStateMachineProperties;
 import top.egon.cola.component.outbox.delivery.DeliveryContext;
 import top.egon.cola.component.outbox.delivery.DeliveryHandler;
 import top.egon.cola.component.outbox.delivery.DeliveryResult;
@@ -25,7 +25,6 @@ import java.util.Map;
 /** Adapts the existing outbox delivery SPI to an optional business state-machine consumer. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
 public class BusinessStateMachineDeliveryHandler implements DeliveryHandler {
 
     public static final String CHANNEL = "statemachine";
@@ -41,6 +40,32 @@ public class BusinessStateMachineDeliveryHandler implements DeliveryHandler {
 
     @Qualifier("egonColaValidationUtils")
     private final ValidationUtils validationUtils;
+
+    @Qualifier("outboxStateMachineProperties")
+    private final OutboxStateMachineProperties properties;
+
+    public BusinessStateMachineDeliveryHandler(
+            BusinessStateMachineService service,
+            Map<String, BusinessStateMachineDefinitionStrategy> definitions,
+            ObjectMapper objectMapper,
+            ValidationUtils validationUtils
+    ) {
+        this(service, definitions, objectMapper, validationUtils, new OutboxStateMachineProperties());
+    }
+
+    public BusinessStateMachineDeliveryHandler(
+            BusinessStateMachineService service,
+            Map<String, BusinessStateMachineDefinitionStrategy> definitions,
+            ObjectMapper objectMapper,
+            ValidationUtils validationUtils,
+            OutboxStateMachineProperties properties
+    ) {
+        this.service = service;
+        this.definitions = definitions;
+        this.objectMapper = objectMapper;
+        this.validationUtils = validationUtils;
+        this.properties = properties == null ? new OutboxStateMachineProperties() : properties;
+    }
 
     @Override
     public String channel() {
@@ -78,6 +103,12 @@ public class BusinessStateMachineDeliveryHandler implements DeliveryHandler {
         }
         BusinessStateMachineDefinitionStrategy definition = definitions.get(destination);
         if (definition == null) {
+            if (properties.getBusiness().isRetryOnMissingDefinition()) {
+                log.warn("Deferring business state-machine delivery for unknown destination {}", destination);
+                return DeliveryResult.retryableFailure(
+                        "OUTBOX_SM_DEFINITION_MISSING",
+                        "Business state-machine definition is not registered");
+            }
             log.warn("Rejecting business state-machine delivery for unknown destination {}", destination);
             return DeliveryResult.permanentFailure(
                     "OUTBOX_SM_DEFINITION_MISSING",

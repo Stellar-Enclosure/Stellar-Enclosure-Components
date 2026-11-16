@@ -159,6 +159,45 @@ class BusinessStateMachineServiceTest {
     }
 
     @Test
+    void shouldClassifyMissingDefinitionAccordingToRetryOnMissingDefinitionProperty() throws Exception {
+        BusinessStateMachineRepository repository = mock(BusinessStateMachineRepository.class);
+        ValidationUtils validationUtils = new ValidationUtils(validatorFactory.getValidator());
+        BusinessStateMachineEvent missingEvent = event("event-1", 1L, "PAYMENT_CONFIRMED");
+
+        OutboxStateMachineProperties defaultProps = new OutboxStateMachineProperties();
+        BusinessStateMachineService retryableService = new BusinessStateMachineService(
+                Map.of(),
+                testContextExecutor(),
+                mock(TransactionTemplate.class),
+                new StateMachineExecutionService(validationUtils),
+                defaultProps,
+                objectMapper(),
+                validationUtils,
+                Clock.fixed(NOW, ZoneOffset.UTC)
+        );
+        DeliveryResult retryable = retryableService.process(missingEvent, context(missingEvent, "msg-missing-1"));
+        assertThat(retryable.kind()).isEqualTo(DeliveryResult.Kind.RETRYABLE_FAILURE);
+        assertThat(retryable.code()).isEqualTo("OUTBOX_SM_DEFINITION_MISSING");
+
+        OutboxStateMachineProperties strictProps = new OutboxStateMachineProperties();
+        strictProps.getBusiness().setRetryOnMissingDefinition(false);
+        BusinessStateMachineService strictService = new BusinessStateMachineService(
+                Map.of(),
+                testContextExecutor(),
+                mock(TransactionTemplate.class),
+                new StateMachineExecutionService(validationUtils),
+                strictProps,
+                objectMapper(),
+                validationUtils,
+                Clock.fixed(NOW, ZoneOffset.UTC)
+        );
+        DeliveryResult permanent = strictService.process(missingEvent, context(missingEvent, "msg-missing-2"));
+        assertThat(permanent.kind()).isEqualTo(DeliveryResult.Kind.PERMANENT_FAILURE);
+        assertThat(permanent.code()).isEqualTo("OUTBOX_SM_DEFINITION_MISSING");
+        verify(repository, never()).lockAndLoad(any(), anyString());
+    }
+
+    @Test
     void shouldApplyE1AndE2ThenShortCircuitTheE1Replay() throws Exception {
         Map<String, String> receipts = new HashMap<>();
         AtomicReference<String> currentState = new AtomicReference<>("AWAITING_PAYMENT");

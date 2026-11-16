@@ -25,7 +25,8 @@ class OutboxShardSqlGuardTest {
             new XMLMapperBuilder(input, configuration, path, configuration.getSqlFragments()).parse();
         }
         Map<String, Object> parameters = Map.of("et", new OutboxMessagePO(), "ids", List.of(1L),
-                "messageIds", List.of("one"), "id", 1L, "owner", "worker", "messageId", "one",
+                "messageIds", List.of("one"), "channels", List.of("http"),
+                "id", 1L, "owner", "worker", "messageId", "one",
                 "idempotencyKey", "key", "limit", 10);
         for (var method : OutboxMessageDAO.class.getDeclaredMethods()) {
             if (method.isDefault()) { continue; }

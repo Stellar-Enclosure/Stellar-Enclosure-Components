@@ -8,6 +8,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
+import top.egon.cola.component.outbox.autoconfigure.OutboxStateMachineProperties;
 import top.egon.cola.component.outbox.delivery.DeliveryContext;
 import top.egon.cola.component.outbox.delivery.DeliveryResult;
 import top.egon.cola.component.outbox.statemachine.BusinessStateMachineDefinitionStrategy;
@@ -18,6 +19,7 @@ import java.time.Instant;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -110,6 +112,68 @@ class BusinessStateMachineDeliveryHandlerTest {
 
         assertThat(result.kind()).isEqualTo(DeliveryResult.Kind.PERMANENT_FAILURE);
         assertThat(result.code()).isEqualTo("OUTBOX_SM_EVENT_INVALID");
+        verify(service, never()).process(any(), any());
+    }
+
+    @Test
+    void shouldClassifyMissingDefinitionUsingConfiguredRetryabilityAndKeepStrictValidation() throws Exception {
+        BusinessStateMachineService service = mock(BusinessStateMachineService.class);
+        BusinessStateMachineEvent v2Event = BusinessStateMachineEvent.builder()
+                .eventId("event-v2")
+                .tenantId(7L)
+                .machineKey("order-payment")
+                .definitionVersion(2)
+                .businessId("order-1")
+                .eventType("PAYMENT_CONFIRMED")
+                .expectedVersion(3L)
+                .occurredAt(OCCURRED_AT)
+                .payload(mapper().createObjectNode().put("paymentReference", "pay-1"))
+                .build();
+        DeliveryContext v2Context = new DeliveryContext(
+                "transport-v2",
+                BusinessStateMachineDeliveryHandler.CHANNEL,
+                "order-payment:2",
+                mapper().writeValueAsString(v2Event),
+                "application/json",
+                "1",
+                Map.of(
+                        "egon-event-id", v2Event.getEventId(),
+                        "egon-tenant-id", v2Event.getTenantId().toString(),
+                        "egon-machine-key", v2Event.getMachineKey(),
+                        "egon-definition-version", v2Event.getDefinitionVersion().toString()),
+                "trace-1",
+                1,
+                10,
+                OCCURRED_AT.plusSeconds(30)
+        );
+        OutboxStateMachineProperties retryableProperties = new OutboxStateMachineProperties();
+        BusinessStateMachineDeliveryHandler retryableHandler = new BusinessStateMachineDeliveryHandler(
+                service,
+                Map.of(),
+                mapper(),
+                new ValidationUtils(validatorFactory.getValidator()),
+                retryableProperties
+        );
+
+        DeliveryResult retryableResult = retryableHandler.deliver(v2Context);
+        assertThat(retryableResult.kind()).isEqualTo(DeliveryResult.Kind.RETRYABLE_FAILURE);
+        assertThat(retryableResult.code()).isEqualTo("OUTBOX_SM_DEFINITION_MISSING");
+        assertThatThrownBy(() -> retryableHandler.validateDestination("order-payment:2"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("OUTBOX_SM_DEFINITION_MISSING");
+
+        OutboxStateMachineProperties strictProperties = new OutboxStateMachineProperties();
+        strictProperties.getBusiness().setRetryOnMissingDefinition(false);
+        BusinessStateMachineDeliveryHandler strictHandler = new BusinessStateMachineDeliveryHandler(
+                service,
+                Map.of(),
+                mapper(),
+                new ValidationUtils(validatorFactory.getValidator()),
+                strictProperties
+        );
+        DeliveryResult permanentResult = strictHandler.deliver(v2Context);
+        assertThat(permanentResult.kind()).isEqualTo(DeliveryResult.Kind.PERMANENT_FAILURE);
+        assertThat(permanentResult.code()).isEqualTo("OUTBOX_SM_DEFINITION_MISSING");
         verify(service, never()).process(any(), any());
     }
 

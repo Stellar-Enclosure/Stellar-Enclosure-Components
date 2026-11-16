@@ -88,6 +88,9 @@ public class BusinessStateMachineService {
         String destination = destination(stableEvent);
         BusinessStateMachineDefinitionStrategy definition = definitions.get(destination);
         if (definition == null) {
+            if (properties.getBusiness().isRetryOnMissingDefinition()) {
+                return retryableFailure("OUTBOX_SM_DEFINITION_MISSING", "No business state-machine definition is registered");
+            }
             return permanentFailure("OUTBOX_SM_DEFINITION_MISSING", "No business state-machine definition is registered");
         }
 

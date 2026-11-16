@@ -122,7 +122,11 @@ The lifecycle machine has `__NEW__`, `PENDING`, `PROCESSING`, `RETRY_WAIT`,
 owner, lease and, in MP mode, version checks decide which worker can commit. `DELIVERY_RETRYABLE`
 selects `RETRY_WAIT` or `DEAD` from the attempt budget. The Store's explicit
 `SCHEDULE_RETRY` operation only schedules a retry after the Dispatcher has chosen
-that target.
+that target, and `RECLAIM` transitions an expired `PROCESSING` row to `DEAD`
+when its attempt budget is exhausted. Worker claiming filters candidates by the
+channels registered on the local node (`polling.jitter` adds bounded schedule
+staggering and `polling.max-claim-contention-retries` caps MP per-batch lock
+contention retries).
 
 CQE keeps the application boundary explicit:
 
@@ -149,6 +153,7 @@ egon:
           business:
             enabled: true
             timeout: 5s
+            retry-on-missing-definition: true
 ```
 
 | Configuration key | Default | Meaning |
@@ -157,6 +162,7 @@ egon:
 | `egon.cola.component.transactional-outbox.state-machine.claim-evaluation-timeout` | `1s` | Budget for the technical claim decision |
 | `egon.cola.component.transactional-outbox.state-machine.business.enabled` | `false` | Registers the optional business consumer only when true |
 | `egon.cola.component.transactional-outbox.state-machine.business.timeout` | `5s` | Upper bound for one business transition/transaction |
+| `egon.cola.component.transactional-outbox.state-machine.business.retry-on-missing-definition` | `true` | Retries missing business state-machine definitions during rolling deployments instead of immediately dead-lettering them |
 
 The MyBatis-Plus store settings that govern the managed schema and explicit
 legacy migration are:

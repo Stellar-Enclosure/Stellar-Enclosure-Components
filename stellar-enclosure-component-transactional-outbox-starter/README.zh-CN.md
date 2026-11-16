@@ -98,7 +98,10 @@ Starter 使用两个职责分离的 Spring Statemachine：
 生命周期状态包括 `__NEW__`、`PENDING`、`PROCESSING`、`RETRY_WAIT`、`SUCCEEDED` 和
 `DEAD`。状态机决定迁移是否合法；数据库的 owner、租约及 MP 模式下的版本条件决定哪个 worker
 可以提交。`DELIVERY_RETRYABLE` 根据尝试次数选择 `RETRY_WAIT` 或 `DEAD`。Store 的
-显式 `SCHEDULE_RETRY` 操作只负责在 Dispatcher 已决定目标状态后安排下一次重试。
+显式 `SCHEDULE_RETRY` 操作只负责在 Dispatcher 已决定目标状态后安排下一次重试；
+而当租约过期的 `PROCESSING` 行重试预算已耗尽时，`RECLAIM` 会将其直接收敛到 `DEAD`。
+Worker 领取只查询当前节点已注册投递通道对应的候选记录（通过 `polling.jitter`
+分散多实例轮询节奏，通过 `polling.max-claim-contention-retries` 限制 MP 单批锁冲突重试次数）。
 
 CQE 保持应用边界清晰：
 
@@ -123,6 +126,7 @@ egon:
           business:
             enabled: true
             timeout: 5s
+            retry-on-missing-definition: true
 ```
 
 | 配置键 | 默认值 | 含义 |
@@ -131,6 +135,7 @@ egon:
 | `egon.cola.component.transactional-outbox.state-machine.claim-evaluation-timeout` | `1s` | 技术消息领取状态决策的时间预算 |
 | `egon.cola.component.transactional-outbox.state-machine.business.enabled` | `false` | 仅为 `true` 时注册可选业务消费者 |
 | `egon.cola.component.transactional-outbox.state-machine.business.timeout` | `5s` | 单次业务迁移及事务的最长执行时间 |
+| `egon.cola.component.transactional-outbox.state-machine.business.retry-on-missing-definition` | `true` | 滚动发布期间遇到尚未注册的新版本业务定义时按可重试失败退避，而非立即死信 |
 
 MyBatis-Plus Store 的受管结构与显式迁移配置如下：
 

@@ -428,6 +428,7 @@ class ComponentContractGovernanceTest {
                 "egon.cola.component.transactional-outbox.state-machine.claim-evaluation-timeout",
                 "egon.cola.component.transactional-outbox.state-machine.business.enabled",
                 "egon.cola.component.transactional-outbox.state-machine.business.timeout",
+                "egon.cola.component.transactional-outbox.state-machine.business.retry-on-missing-definition",
                 "egon.cola.component.transactional-outbox.storage.mp.sql-session-factory-bean-name",
                 "egon.cola.component.transactional-outbox.storage.mp.migration-mode",
                 "egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout",
