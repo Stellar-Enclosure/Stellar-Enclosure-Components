@@ -95,7 +95,11 @@ class DdcRpcClientInterceptorFactoryTest {
                 Map.entry("ReportUsage", DdcRpcOperation.AI_REPORT),
                 Map.entry("GetVersionHead", DdcRpcOperation.AI_READ),
                 Map.entry("ReplaceSkillDraft", DdcRpcOperation.AI_WRITE),
-                Map.entry("PublishSkillDraft", DdcRpcOperation.AI_PUBLISH)
+                Map.entry("PublishSkillDraft", DdcRpcOperation.AI_PUBLISH),
+                Map.entry("ListSiCatalog", DdcRpcOperation.AI_READ),
+                Map.entry("ResolveSiResource", DdcRpcOperation.AI_READ),
+                Map.entry("SemanticSearchSiResources", DdcRpcOperation.AI_READ),
+                Map.entry("RegisterManagedSiResource", DdcRpcOperation.AI_WRITE)
         );
 
         assertThat(resolver.operationsByBareMethod()).containsExactlyInAnyOrderEntriesOf(expected);

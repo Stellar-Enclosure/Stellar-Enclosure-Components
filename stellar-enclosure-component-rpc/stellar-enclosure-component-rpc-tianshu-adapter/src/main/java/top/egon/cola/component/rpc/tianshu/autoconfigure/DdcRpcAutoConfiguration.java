@@ -25,6 +25,7 @@ import top.egon.cola.component.tianshu.api.client.DdcAiSyncClient;
 import top.egon.cola.component.tianshu.api.client.DdcPromptClient;
 import top.egon.cola.component.tianshu.api.client.DdcSkillClient;
 import top.egon.cola.component.tianshu.api.client.DdcServiceRegistryClient;
+import top.egon.cola.component.tianshu.api.client.DdcSiCatalogClient;
 import top.egon.cola.component.tianshu.autoconfigure.DdcAutoConfiguration;
 import top.egon.cola.component.tianshu.autoconfigure.DdcRedisAutoConfiguration;
 import top.egon.cola.component.tianshu.autoconfigure.DdcRegistryAutoConfiguration;
@@ -44,6 +45,9 @@ import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientFactory;
 import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientHandle;
 import top.egon.cola.component.rpc.tianshu.client.ai.DdcAiProtoConverter;
 import top.egon.cola.component.rpc.tianshu.client.registry.RpcDdcServiceRegistryClient;
+import top.egon.cola.component.rpc.tianshu.client.si.DdcSiCatalogRpcClient;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.DdcSiResourceGrpcServiceGrpc;
+import top.egon.cola.component.rpc.tianshu.mapping.DdcSiProtoMapper;
 import top.egon.cola.component.rpc.tianshu.registry.*;
 import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistry;
 import top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterAutoConfiguration;
@@ -358,6 +362,47 @@ public class DdcRpcAutoConfiguration {
     public RpcProviderDirectory ddcRpcProviderDirectory(
             DdcServiceRegistryClient client) {
         return new DdcRpcProviderDirectory(client);
+    }
+
+    @Bean("ddcSiProtoMapperImpl")
+    @ConditionalOnMissingBean(DdcSiProtoMapper.class)
+    public DdcSiProtoMapper ddcSiProtoMapper() {
+        return Mappers.getMapper(DdcSiProtoMapper.class);
+    }
+
+    @Bean(name = "ddcSiResourceChannel", destroyMethod = "shutdownNow")
+    @ConditionalOnProperty(
+            prefix = "egon.cola.component.tianshu.si.rpc",
+            name = "enabled",
+            havingValue = "true"
+    )
+    @ConditionalOnMissingBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
+    public io.grpc.ManagedChannel ddcSiResourceChannel(
+            @Qualifier("egon.cola.component.tianshu.rpc-top.egon.cola.component.rpc.tianshu.autoconfigure.DdcRpcProperties")
+            DdcRpcProperties rpcProperties) {
+        return io.grpc.ManagedChannelBuilder.forTarget(rpcProperties.requireTarget())
+                .usePlaintext()
+                .build();
+    }
+
+    @Bean("ddcSiResourceBlockingStub")
+    @ConditionalOnBean(name = "ddcSiResourceChannel")
+    @ConditionalOnMissingBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
+    public DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub ddcSiResourceBlockingStub(
+            @Qualifier("ddcSiResourceChannel") io.grpc.ManagedChannel channel) {
+        return DdcSiResourceGrpcServiceGrpc.newBlockingStub(channel);
+    }
+
+    @Bean("ddcSiCatalogRpcClient")
+    @ConditionalOnBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
+    @ConditionalOnMissingBean(DdcSiCatalogClient.class)
+    public DdcSiCatalogClient ddcSiCatalogRpcClient(
+            @Qualifier("ddcSiResourceBlockingStub")
+            DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub stub,
+            @Qualifier("ddcSiProtoMapperImpl") DdcSiProtoMapper protoMapper,
+            @Qualifier("egon.cola.component.tianshu.rpc-top.egon.cola.component.rpc.tianshu.autoconfigure.DdcRpcProperties")
+            DdcRpcProperties rpcProperties) {
+        return new DdcSiCatalogRpcClient(stub, protoMapper, rpcProperties.getDefaultTimeout());
     }
 
     private RpcProcessIdentity directIdentity(

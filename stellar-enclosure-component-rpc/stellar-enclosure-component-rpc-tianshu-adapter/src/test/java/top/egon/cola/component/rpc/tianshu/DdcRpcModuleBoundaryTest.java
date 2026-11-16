@@ -19,6 +19,7 @@ class DdcRpcModuleBoundaryTest {
             "client/config",
             "client/registry",
             "client/management",
+            "client/si",
             "mapping",
             "registry",
             "security",

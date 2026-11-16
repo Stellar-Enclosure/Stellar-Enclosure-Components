@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package egon.tianshu.v1;
+
+option java_multiple_files = true;
+option java_package = "top.egon.cola.component.rpc.tianshu.contract.proto.v1";
+option java_outer_classname = "DdcSiResourceProto";
+
+service DdcSiResourceGrpcService {
+  rpc ListSiCatalog(ListSiCatalogRequest) returns (ListSiCatalogResponse);
+  rpc ResolveSiResource(ResolveSiResourceRequest) returns (ResolveSiResourceResponse);
+  rpc SemanticSearchSiResources(SemanticSearchSiRequest) returns (SemanticSearchSiResponse);
+  rpc RegisterManagedSiResource(RegisterManagedSiRequest) returns (RegisterManagedSiResponse);
+}
+
+message SiReferenceProto {
+  string target_type = 1;
+  string target_key = 2;
+  int32 pinned_version_no = 3;
+  bool required = 4;
+  string role_hint = 5;
+}
+
+message SiResourceProto {
+  int64 tenant_id = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  string env_code = 4;
+  int64 resource_id = 5;
+  string kind = 6;
+  string resource_key = 7;
+  string display_name = 8;
+  string description = 9;
+  string status = 10;
+  string source_type = 11;
+  int32 active_version_no = 12;
+  string digest_sha256 = 13;
+  map<string, string> labels = 14;
+  repeated SiReferenceProto references = 15;
+  string spec_json = 16;
+  int64 published_epoch_millis = 17;
+  int64 updated_epoch_millis = 18;
+}
+
+message SiSearchHitProto {
+  SiResourceProto resource = 1;
+  double hybrid_score = 2;
+  double vector_score = 3;
+  double fts_score = 4;
+  string matched_chunk_text = 5;
+  bool degraded_to_fts_only = 6;
+  int32 rank = 7;
+}
+
+message ListSiCatalogRequest {
+  int64 tenant_id = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  string env_code = 4;
+  string app_code = 5;
+  string kind = 6;
+  repeated string resource_keys = 7;
+  map<string, string> labels = 8;
+  bool include_deprecated = 9;
+  string keyword = 10;
+  int32 page_no = 11;
+  int32 page_size = 12;
+  string request_id = 13;
+}
+
+message ListSiCatalogResponse {
+  repeated SiResourceProto items = 1;
+  int64 total = 2;
+}
+
+message ResolveSiResourceRequest {
+  int64 tenant_id = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  string env_code = 4;
+  string app_code = 5;
+  string kind = 6;
+  string resource_key = 7;
+  int32 pinned_version_no = 8;
+  string request_id = 9;
+}
+
+message ResolveSiResourceResponse {
+  SiResourceProto resource = 1;
+}
+
+message SemanticSearchSiRequest {
+  int64 tenant_id = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  string env_code = 4;
+  string kind = 5;
+  string query_text = 6;
+  map<string, string> labels = 7;
+  int32 top_k = 8;
+  bool include_deprecated = 9;
+  string request_id = 10;
+}
+
+message SemanticSearchSiResponse {
+  repeated SiSearchHitProto hits = 1;
+}
+
+message RegisterManagedSiRequest {
+  int64 tenant_id = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  string env_code = 4;
+  string service_name = 5;
+  string instance_id = 6;
+  string kind = 7;
+  string resource_key = 8;
+  string display_name = 9;
+  string description = 10;
+  string spec_json = 11;
+  string spec_hash = 12;
+  map<string, string> labels = 13;
+  repeated SiReferenceProto references = 14;
+  bool auto_publish_if_new = 15;
+  string request_id = 16;
+}
+
+message RegisterManagedSiResponse {
+  SiResourceProto resource = 1;
+}
