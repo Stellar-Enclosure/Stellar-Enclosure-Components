@@ -75,6 +75,24 @@ class OutboxLifecycleServiceTest {
     }
 
     @Test
+    void reclaimTransitionsToDeadWhenAttemptBudgetIsExhausted() {
+        OutboxLifecycleService service = service();
+
+        assertThat(service.evaluate(
+                OutboxStatus.PROCESSING.getMessage(),
+                OutboxLifecycleSignalEnum.RECLAIM,
+                2,
+                3
+        )).isEqualTo(OutboxStatus.PROCESSING);
+        assertThat(service.evaluate(
+                OutboxStatus.PROCESSING.getMessage(),
+                OutboxLifecycleSignalEnum.RECLAIM,
+                3,
+                3
+        )).isEqualTo(OutboxStatus.DEAD);
+    }
+
+    @Test
     void everyConfiguredLifecycleSignalUsesTheExpectedStateMachineTarget() {
         OutboxLifecycleService service = service();
 

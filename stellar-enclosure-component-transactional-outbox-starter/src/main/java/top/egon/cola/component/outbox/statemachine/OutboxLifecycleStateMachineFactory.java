@@ -60,7 +60,9 @@ public class OutboxLifecycleStateMachineFactory {
             add(transitions, OutboxStatus.RETRY_WAIT.getMessage(), OutboxStatus.PROCESSING.getMessage(),
                     OutboxLifecycleSignalEnum.CLAIM, null);
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.PROCESSING.getMessage(),
-                    OutboxLifecycleSignalEnum.RECLAIM, null);
+                    OutboxLifecycleSignalEnum.RECLAIM, RETRY_WITH_BUDGET);
+            add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.DEAD.getMessage(),
+                    OutboxLifecycleSignalEnum.RECLAIM, RETRY_EXHAUSTED);
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.SUCCEEDED.getMessage(),
                     OutboxLifecycleSignalEnum.DELIVERY_SUCCEEDED, null);
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.RETRY_WAIT.getMessage(),
