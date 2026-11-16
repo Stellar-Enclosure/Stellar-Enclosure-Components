@@ -17,7 +17,8 @@ public record AgentFlowProperties(
         Map<String, @Valid AgentFlowConfigDTO> flows,
         @Valid SessionSettings session,
         @Valid MemorySettings memory,
-        @Valid RagSettings rag) {
+        @Valid RagSettings rag,
+        @Valid LegacyStaticWorkflowSettings legacyStaticWorkflow) {
 
     @ConstructorBinding
     public AgentFlowProperties {
@@ -27,16 +28,33 @@ public record AgentFlowProperties(
         session = session == null ? new SessionSettings(null) : session;
         memory = memory == null ? new MemorySettings(null, null, null) : memory;
         rag = rag == null ? new RagSettings(false) : rag;
+        legacyStaticWorkflow = legacyStaticWorkflow == null
+                ? new LegacyStaticWorkflowSettings(true)
+                : legacyStaticWorkflow;
     }
 
     public AgentFlowProperties(boolean enabled, Duration executionTimeout, Duration shutdownTimeout,
                                Map<String, AgentFlowConfigDTO> flows) {
-        this(enabled, executionTimeout, shutdownTimeout, flows, null, null, null);
+        this(enabled, executionTimeout, shutdownTimeout, flows, null, null, null, null);
     }
 
     public AgentFlowProperties(boolean enabled, Duration executionTimeout, Duration shutdownTimeout,
                                Map<String, AgentFlowConfigDTO> flows, SessionSettings session) {
-        this(enabled, executionTimeout, shutdownTimeout, flows, session, null, null);
+        this(enabled, executionTimeout, shutdownTimeout, flows, session, null, null, null);
+    }
+
+    public AgentFlowProperties(boolean enabled, Duration executionTimeout, Duration shutdownTimeout,
+                               Map<String, AgentFlowConfigDTO> flows, SessionSettings session,
+                               MemorySettings memory, RagSettings rag) {
+        this(enabled, executionTimeout, shutdownTimeout, flows, session, memory, rag, null);
+    }
+
+    /** 遗留静态多智能体工作流策略开关（默认启用以保持老业务兼容）。 */
+    public record LegacyStaticWorkflowSettings(Boolean enabled) {
+
+        public LegacyStaticWorkflowSettings {
+            enabled = enabled == null || enabled;
+        }
     }
 
     public record MemorySettings(String mode, String dataSourceRef, String schema) {

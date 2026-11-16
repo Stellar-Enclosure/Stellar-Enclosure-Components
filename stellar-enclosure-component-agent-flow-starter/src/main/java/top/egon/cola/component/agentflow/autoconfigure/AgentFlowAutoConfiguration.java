@@ -83,24 +83,32 @@ public class AgentFlowAutoConfiguration {
 
     @Bean(name = "sequentialAgentWorkflowBuilderStrategy")
     @ConditionalOnMissingBean(name = "sequentialAgentWorkflowBuilderStrategy")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.legacy-static-workflow", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public SequentialAgentWorkflowBuilderStrategy sequentialAgentWorkflowBuilderStrategy() {
         return new SequentialAgentWorkflowBuilderStrategy();
     }
 
     @Bean(name = "parallelAgentWorkflowBuilderStrategy")
     @ConditionalOnMissingBean(name = "parallelAgentWorkflowBuilderStrategy")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.legacy-static-workflow", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public ParallelAgentWorkflowBuilderStrategy parallelAgentWorkflowBuilderStrategy() {
         return new ParallelAgentWorkflowBuilderStrategy();
     }
 
     @Bean(name = "loopAgentWorkflowBuilderStrategy")
     @ConditionalOnMissingBean(name = "loopAgentWorkflowBuilderStrategy")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.legacy-static-workflow", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public LoopAgentWorkflowBuilderStrategy loopAgentWorkflowBuilderStrategy() {
         return new LoopAgentWorkflowBuilderStrategy();
     }
 
     @Bean(name = "agentWorkflowBuilderStrategies")
     @ConditionalOnMissingBean(name = "agentWorkflowBuilderStrategies")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.legacy-static-workflow", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public List<AgentWorkflowBuilderStrategy> agentWorkflowBuilderStrategies(
             @Qualifier("sequentialAgentWorkflowBuilderStrategy") SequentialAgentWorkflowBuilderStrategy sequential,
             @Qualifier("parallelAgentWorkflowBuilderStrategy") ParallelAgentWorkflowBuilderStrategy parallel,
@@ -110,6 +118,8 @@ public class AgentFlowAutoConfiguration {
 
     @Bean(name = "agentWorkflowStrategyFactory")
     @ConditionalOnMissingBean(name = "agentWorkflowStrategyFactory")
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.legacy-static-workflow", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
     public AgentWorkflowStrategyFactory agentWorkflowStrategyFactory(
             @Qualifier("agentWorkflowBuilderStrategies") List<AgentWorkflowBuilderStrategy> strategies) {
         return new AgentWorkflowStrategyFactory(strategies);
@@ -133,8 +143,8 @@ public class AgentFlowAutoConfiguration {
     @ConditionalOnMissingBean(name = "agentFlowFactory")
     public AgentFlowFactory agentFlowFactory(
             @Qualifier("springAiModelAdapterFactory") SpringAiModelAdapterFactory modelAdapterFactory,
-            @Qualifier("agentWorkflowStrategyFactory") AgentWorkflowStrategyFactory strategyFactory) {
-        return new AgentFlowFactory(modelAdapterFactory, strategyFactory);
+            ObjectProvider<AgentWorkflowStrategyFactory> strategyFactoryProvider) {
+        return new AgentFlowFactory(modelAdapterFactory, strategyFactoryProvider.getIfAvailable());
     }
 
     @Bean(name = "agentFlowRegistryFactory")

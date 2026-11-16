@@ -134,6 +134,9 @@ public class AgentFlowFactory {
             List<BaseAgent> children = workflow.subAgentNames().stream()
                     .map(child -> buildNode(flowId, child, workflows, memo, visiting))
                     .toList();
+            if (strategyFactory == null) {
+                throw new AgentFlowConfigurationException(flowId, name, "legacy static workflow strategies are disabled");
+            }
             BaseAgent built = strategyFactory.getStrategy(workflow.type()).build(workflow, children);
             memo.put(name, built);
             return built;
