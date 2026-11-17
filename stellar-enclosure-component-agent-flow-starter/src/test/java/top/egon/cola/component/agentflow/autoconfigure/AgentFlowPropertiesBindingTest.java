@@ -121,6 +121,53 @@ class AgentFlowPropertiesBindingTest {
                 .hasStackTraceContaining("schema");
     }
 
+    @Test
+    void binds_three_tier_memory_and_context_defaults_and_rejects_out_of_range_values() {
+        AgentFlowProperties defaults = binder(Map.of())
+                .bindOrCreate("egon.cola.component.agent-flow", AgentFlowProperties.class);
+        assertThat(defaults.memory().threeTierEnabled()).isFalse();
+        assertThat(defaults.memory().sessionWindowTurns()).isEqualTo(20);
+        assertThat(defaults.memory().textMaxChars()).isEqualTo(10_000);
+        assertThat(defaults.memory().doc().tableName()).isEqualTo("doc_memory");
+        assertThat(defaults.memory().doc().maxBatchSize()).isEqualTo(32);
+        assertThat(defaults.context().safetyMarginTokens()).isEqualTo(512);
+        assertThat(defaults.context().minKeepHistoryTurns()).isEqualTo(2);
+        assertThat(defaults.context().combineContextIntoFinalUserMessage()).isTrue();
+
+        AgentFlowProperties custom = strict(Map.ofEntries(
+                Map.entry("egon.cola.component.agent-flow.memory.three-tier.enabled", "true"),
+                Map.entry("egon.cola.component.agent-flow.memory.session-window-turns", "12"),
+                Map.entry("egon.cola.component.agent-flow.memory.text-max-chars", "8000"),
+                Map.entry("egon.cola.component.agent-flow.memory.doc.table-name", "custom_doc_memory"),
+                Map.entry("egon.cola.component.agent-flow.memory.doc.max-batch-size", "16"),
+                Map.entry("egon.cola.component.agent-flow.context.safety-margin-tokens", "256"),
+                Map.entry("egon.cola.component.agent-flow.context.min-keep-history-turns", "3"),
+                Map.entry("egon.cola.component.agent-flow.context.combine-context-into-final-user-message", "false")));
+        assertThat(custom.memory().threeTierEnabled()).isTrue();
+        assertThat(custom.memory().sessionWindowTurns()).isEqualTo(12);
+        assertThat(custom.memory().textMaxChars()).isEqualTo(8_000);
+        assertThat(custom.memory().doc().tableName()).isEqualTo("custom_doc_memory");
+        assertThat(custom.memory().doc().maxBatchSize()).isEqualTo(16);
+        assertThat(custom.context().safetyMarginTokens()).isEqualTo(256);
+        assertThat(custom.context().minKeepHistoryTurns()).isEqualTo(3);
+        assertThat(custom.context().combineContextIntoFinalUserMessage()).isFalse();
+
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.session-window-turns", "0")))
+                .hasStackTraceContaining("session-window-turns");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.session-window-turns", "201")))
+                .hasStackTraceContaining("session-window-turns");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.text-max-chars", "10001")))
+                .hasStackTraceContaining("text-max-chars");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.doc.max-batch-size", "0")))
+                .hasStackTraceContaining("max-batch-size");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.memory.doc.table-name", "bad;drop")))
+                .hasStackTraceContaining("table-name");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.context.safety-margin-tokens", "-1")))
+                .hasStackTraceContaining("safety-margin-tokens");
+        assertThatThrownBy(() -> strict(Map.of("egon.cola.component.agent-flow.context.unknown-key", "x")))
+                .hasStackTraceContaining("unknown-key");
+    }
+
     private static AgentFlowProperties strict(Map<String, String> values) {
         return binder(values).bind("egon.cola.component.agent-flow", Bindable.of(AgentFlowProperties.class),
                 new NoUnboundElementsBindHandler(BindHandler.DEFAULT)).orElseThrow(

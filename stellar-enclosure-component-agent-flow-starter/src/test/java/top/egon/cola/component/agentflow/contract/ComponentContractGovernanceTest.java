@@ -93,24 +93,28 @@ class ComponentContractGovernanceTest {
             Path.of("README.md"),
             Path.of("README.zh-CN.md")};
 
-    private static final Map<String, List<String>> NEUTRAL_ENUM_CODES = Map.of(
-            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionEvent$TypeEnum",
-            List.of("PROGRESS", "TOOL_STARTED", "TOOL_FINISHED", "OUTPUT", "TERMINAL"),
-            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$StatusEnum",
-            List.of("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"),
-            AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$SideEffectOutcomeEnum",
-            List.of("NONE", "CONFIRMED", "UNKNOWN"),
-            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$StrategyEnum",
-            List.of("REASONING", "SEQUENTIAL", "PARALLEL", "BOUNDED_LOOP", "HANDOFF"),
-            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$MergeEnum",
-            List.of("OUTPUT_AGENT", "COLLECT_BY_AGENT"),
-            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$TerminationModeEnum",
-            List.of("ROOT_TERMINAL", "PREDICATE"),
-            AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$ConditionOpEnum",
-            List.of("EQ", "NE", "GT", "GE", "LT", "LE", "AND", "OR", "NOT"),
-            AGENT_FLOW_PACKAGE + ".api.memory.MemoryScopeVO$RetentionScopeEnum",
-            List.of("SESSION", "INSTANCE", "USER", "HOST"),
-            MEMORY_TYPE, List.of("FACT", "PREFERENCE", "EXPERIENCE"));
+    private static final Map<String, List<String>> NEUTRAL_ENUM_CODES = Map.ofEntries(
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionEvent$TypeEnum",
+                    List.of("PROGRESS", "TOOL_STARTED", "TOOL_FINISHED", "OUTPUT", "TERMINAL")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$StatusEnum",
+                    List.of("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.execution.AgentExecutionResult$SideEffectOutcomeEnum",
+                    List.of("NONE", "CONFIRMED", "UNKNOWN")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$StrategyEnum",
+                    List.of("REASONING", "SEQUENTIAL", "PARALLEL", "BOUNDED_LOOP", "HANDOFF")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$MergeEnum",
+                    List.of("OUTPUT_AGENT", "COLLECT_BY_AGENT")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$TerminationModeEnum",
+                    List.of("ROOT_TERMINAL", "PREDICATE")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".agentic.AgenticPlanVO$ConditionOpEnum",
+                    List.of("EQ", "NE", "GT", "GE", "LT", "LE", "AND", "OR", "NOT")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.memory.MemoryScopeVO$RetentionScopeEnum",
+                    List.of("SESSION", "INSTANCE", "USER", "HOST")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.memory.MemoryOwnerTypeEnum",
+                    List.of("AGENT", "SESSION", "CUSTOM")),
+            Map.entry(AGENT_FLOW_PACKAGE + ".api.context.ContextTrimReasonEnum",
+                    List.of("BUDGET_OTHERS", "BUDGET_DOC_MEMORY", "BUDGET_TEXT_MEMORY", "BUDGET_HISTORY_TURN")),
+            Map.entry(MEMORY_TYPE, List.of("FACT", "PREFERENCE", "EXPERIENCE")));
 
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
     private static final Pattern ENUM_HEADER =

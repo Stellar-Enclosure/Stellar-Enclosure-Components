@@ -58,6 +58,10 @@
             <version>${agent-flow.spring-ai.version}</version>
         </dependency>
         <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-client-chat</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.google.adk</groupId>
             <artifactId>google-adk</artifactId>
             <version>${agent-flow.google-adk.version}</version>

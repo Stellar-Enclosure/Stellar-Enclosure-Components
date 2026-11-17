@@ -59,6 +59,8 @@ class AgentFlowComponentContractTest {
 
         assertTrue(module.contains("<artifactId>stellar-enclosure-component-common-core</artifactId>"));
         assertTrue(module.contains("<artifactId>spring-ai-model</artifactId>"));
+        assertContainsAll(module, "<groupId>org.springframework.ai</groupId>", "<artifactId>spring-ai-client-chat</artifactId>");
+        assertFalse(module.contains("spring-ai-model-chat-memory-repository-jdbc"));
         assertTrue(module.contains("<artifactId>google-adk</artifactId>"));
         assertTrue(module.contains("<artifactId>google-adk-spring-ai</artifactId>"));
         assertTrue(module.contains("<exclusions>"));
@@ -241,6 +243,11 @@ class AgentFlowComponentContractTest {
                 "execution.AgentExecutionContextVO$ToolCallRequestVO", "execution.AgentExecutionContextVO$ToolReferenceVO",
                 "execution.AgentExecutionEvent", "execution.AgentExecutionResult", "context.ContextScopeVO",
                 "context.ContextQuery", "context.ContextSource", "context.ContextFragmentResult",
+                "context.ContextTrimReasonEnum", "context.ContextAssemblyReportVO",
+                "context.ContextAssemblyReportVO$ContextTrimDetailVO",
+                "memory.MemoryOwnerTypeEnum", "memory.TextMemoryBindCommand", "memory.TextMemorySaveCommand",
+                "memory.TextMemoryVO", "memory.TextMemoryService",
+                "memory.DocMemoryQuery", "memory.DocMemoryVO", "memory.DocMemoryReader",
                 "capability.CallPermitProvider", "capability.CallPermitVO", "session.SessionStore",
                 "session.SessionStateResult", "session.SessionWriteCommand")) {
             for (Method method : Class.forName(api + type).getDeclaredMethods()) {
@@ -248,6 +255,7 @@ class AgentFlowComponentContractTest {
                 assertFalse(signature.contains("com.google.adk"), signature);
                 assertFalse(signature.contains("org.springframework.ai"), signature);
                 assertFalse(signature.contains("io.reactivex"), signature);
+                assertFalse(signature.contains("javax.sql"), signature);
                 assertFalse(signature.contains("top.egon.cola.platform.tianji"), signature);
             }
         }
