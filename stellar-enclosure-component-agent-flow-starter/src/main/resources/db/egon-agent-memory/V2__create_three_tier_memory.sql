@@ -49,7 +49,7 @@ CREATE TABLE egon_agent_memory.text_memory (
         AND owner_key <> '' AND owner_key !~ '[[:cntrl:]]'
     ),
     CONSTRAINT chk_text_memory_len CHECK (
-        char_length(content_text) <= 10000 AND position(chr(0) in content_text) = 0
+        char_length(content_text) <= 10000
     ),
     CONSTRAINT chk_text_memory_version CHECK (
         version >= 1 AND updated_at >= created_at
@@ -71,7 +71,6 @@ CREATE TABLE egon_agent_memory.doc_memory (
         AND title !~ '[[:cntrl:]]'
     ),
     CONSTRAINT chk_doc_memory_content CHECK (
-        position(chr(0) in content_md) = 0
-        AND (content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$')
+        content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'
     )
 );
