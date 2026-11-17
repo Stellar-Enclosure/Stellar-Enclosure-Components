@@ -60,6 +60,7 @@
         <module>stellar-enclosure-component-rpc</module>
         <module>stellar-enclosure-component-rule-engine-starter</module>
         <module>stellar-enclosure-component-agent-flow-starter</module>
+        <module>stellar-enclosure-component-llm-client-starter</module>
         <module>stellar-enclosure-component-access-guard-starter</module>
         <module>stellar-enclosure-component-method-extension</module>
         <module>stellar-enclosure-component-transactional-outbox-starter</module>
