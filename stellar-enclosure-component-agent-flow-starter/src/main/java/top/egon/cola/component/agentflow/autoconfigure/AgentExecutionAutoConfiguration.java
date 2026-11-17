@@ -6,26 +6,44 @@ import org.springframework.beans.factory.ListableBeanFactory;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.ai.tokenizer.JTokkitTokenCountEstimator;
+import org.springframework.ai.tokenizer.TokenCountEstimator;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.type.MethodMetadata;
 import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
 import top.egon.cola.component.agentflow.api.session.SessionStore;
 import top.egon.cola.component.agentflow.api.context.ContextSource;
+import top.egon.cola.component.agentflow.api.memory.DocMemoryReader;
 import top.egon.cola.component.agentflow.api.memory.MemoryStore;
+import top.egon.cola.component.agentflow.api.memory.TextMemoryService;
 import top.egon.cola.component.agentflow.adapter.adk.AdkAgentExecutorAdapter;
 import top.egon.cola.component.agentflow.adapter.mcp.McpToolAdapter;
+import top.egon.cola.component.agentflow.adapter.springai.ContextAssemblyAdvisor;
+import top.egon.cola.component.agentflow.adapter.springai.ContextInitAdvisor;
+import top.egon.cola.component.agentflow.adapter.springai.DocMemoryAdvisor;
+import top.egon.cola.component.agentflow.adapter.springai.OthersContextAdvisor;
+import top.egon.cola.component.agentflow.adapter.springai.SessionHistoryAdvisor;
+import top.egon.cola.component.agentflow.adapter.springai.SpringAiContextChatClient;
 import top.egon.cola.component.agentflow.adapter.springai.SpringAiExecutionModelAdapter;
+import top.egon.cola.component.agentflow.adapter.springai.TextMemoryAdvisor;
 import top.egon.cola.component.agentflow.agentic.AgenticPlanCompiler;
+import top.egon.cola.component.agentflow.context.ContextAssemblyEngine;
 import top.egon.cola.component.agentflow.context.DefaultContextAssembler;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor;
 import top.egon.cola.component.agentflow.execution.DefaultAgentExecutor.ExecutionAdapter;
+import top.egon.cola.component.agentflow.memory.InMemoryDocMemoryReader;
 import top.egon.cola.component.agentflow.memory.InMemoryMemoryStore;
+import top.egon.cola.component.agentflow.memory.InMemorySessionChatMemoryRepository;
+import top.egon.cola.component.agentflow.memory.InMemoryTextMemoryService;
+import top.egon.cola.component.agentflow.memory.TurnAlignedChatMemory;
 import top.egon.cola.component.agentflow.session.InMemorySessionStore;
+import top.egon.cola.component.common.core.validation.ValidationUtils;
 
 import java.time.Clock;
 import java.util.Map;
@@ -77,6 +95,11 @@ public class AgentExecutionAutoConfiguration {
             if (AgentFlowProperties.MemorySettings.JDBC.equals(properties.memory().mode())
                     && !configuredBean(beans, "jdbcMemoryStore", MemoryStore.class, "AgentMemoryJdbcAutoConfiguration", "agentJdbcMemoryStore")) {
                 throw new IllegalStateException("Agent Flow JDBC memory requires Spring JDBC, the PostgreSQL driver and the selected DataSource");
+            }
+            if (AgentFlowProperties.MemorySettings.JDBC.equals(properties.memory().mode())
+                    && properties.memory().threeTierEnabled()
+                    && !beans.containsBeanDefinition("threeTierSessionRepository")) {
+                throw new IllegalStateException("Agent Flow JDBC three-tier memory requires Spring JDBC, the PostgreSQL driver and the selected DataSource");
             }
             if (properties.rag().enabled()
                     && !configuredBean(beans, "ragContextSource", ContextSource.class, "AgentMemoryRagAutoConfiguration", "agentMemoryRagContextSource")) {
@@ -150,5 +173,126 @@ public class AgentExecutionAutoConfiguration {
         String beanName = "inMemory".equals(storeRef) ? "agentSessionStore" : storeRef;
         SessionStore store = beans.getBean(beanName, SessionStore.class);
         return new DefaultAgentExecutor(clock, validator, assembler, timers, store, adapters);
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.memory.three-tier",
+            name = "enabled", havingValue = "true")
+    static class ThreeTierMemoryAndContextConfiguration {
+
+        @Bean("agentTokenCountEstimator")
+        @ConditionalOnMissingBean(name = "agentTokenCountEstimator")
+        TokenCountEstimator agentTokenCountEstimator() {
+            return new JTokkitTokenCountEstimator();
+        }
+
+        @Bean("threeTierSessionRepository")
+        @ConditionalOnMissingBean(name = "threeTierSessionRepository")
+        @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.memory", name = "mode",
+                havingValue = AgentFlowProperties.MemorySettings.IN_MEMORY, matchIfMissing = true)
+        TurnAlignedChatMemory.TurnAwareChatMemoryRepository threeTierSessionRepository(
+                @Qualifier("agentExecutionClock") Clock clock) {
+            return new InMemorySessionChatMemoryRepository(clock);
+        }
+
+        @Bean("turnAlignedChatMemory")
+        @ConditionalOnMissingBean(name = "turnAlignedChatMemory")
+        TurnAlignedChatMemory turnAlignedChatMemory(
+                @Qualifier("threeTierSessionRepository") TurnAlignedChatMemory.TurnAwareChatMemoryRepository repository,
+                @Qualifier("agentFlowProperties") AgentFlowProperties properties,
+                @Qualifier("agentExecutionClock") Clock clock) {
+            return new TurnAlignedChatMemory(repository, properties.memory().sessionWindowTurns(), clock);
+        }
+
+        @Bean("agentTextMemoryService")
+        @ConditionalOnMissingBean(name = "agentTextMemoryService")
+        @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.memory", name = "mode",
+                havingValue = AgentFlowProperties.MemorySettings.IN_MEMORY, matchIfMissing = true)
+        TextMemoryService agentTextMemoryService(
+                @Qualifier("agentExecutionClock") Clock clock,
+                @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
+                @Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+            return new InMemoryTextMemoryService(clock, validationUtils, properties.memory().textMaxChars());
+        }
+
+        @Bean("agentDocMemoryReader")
+        @ConditionalOnMissingBean(DocMemoryReader.class)
+        @ConditionalOnProperty(prefix = "egon.cola.component.agent-flow.memory", name = "mode",
+                havingValue = AgentFlowProperties.MemorySettings.IN_MEMORY, matchIfMissing = true)
+        DocMemoryReader agentDocMemoryReader(
+                @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
+                @Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+            return new InMemoryDocMemoryReader(validationUtils, properties.memory().doc().maxBatchSize());
+        }
+
+        @Bean("agentContextAssemblyEngine")
+        @ConditionalOnMissingBean(name = "agentContextAssemblyEngine")
+        ContextAssemblyEngine agentContextAssemblyEngine(
+                @Qualifier("agentTokenCountEstimator") TokenCountEstimator tokenCountEstimator) {
+            return new ContextAssemblyEngine(tokenCountEstimator);
+        }
+
+        @Bean("contextInitAdvisor")
+        @ConditionalOnMissingBean(name = "contextInitAdvisor")
+        ContextInitAdvisor contextInitAdvisor(
+                @Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+            return new ContextInitAdvisor(properties);
+        }
+
+        @Bean("sessionHistoryAdvisor")
+        @ConditionalOnMissingBean(name = "sessionHistoryAdvisor")
+        SessionHistoryAdvisor sessionHistoryAdvisor(
+                @Qualifier("turnAlignedChatMemory") TurnAlignedChatMemory turnAlignedChatMemory) {
+            return new SessionHistoryAdvisor(turnAlignedChatMemory);
+        }
+
+        @Bean("textMemoryAdvisor")
+        @ConditionalOnMissingBean(name = "textMemoryAdvisor")
+        TextMemoryAdvisor textMemoryAdvisor(
+                @Qualifier("agentTextMemoryService") TextMemoryService textMemoryService) {
+            return new TextMemoryAdvisor(textMemoryService);
+        }
+
+        @Bean("docMemoryAdvisor")
+        @ConditionalOnMissingBean(name = "docMemoryAdvisor")
+        DocMemoryAdvisor docMemoryAdvisor(
+                @Qualifier("agentDocMemoryReader") DocMemoryReader docMemoryReader) {
+            return new DocMemoryAdvisor(docMemoryReader);
+        }
+
+        @Bean("othersContextAdvisor")
+        @ConditionalOnMissingBean(name = "othersContextAdvisor")
+        OthersContextAdvisor othersContextAdvisor() {
+            return new OthersContextAdvisor();
+        }
+
+        @Bean("contextAssemblyAdvisor")
+        @ConditionalOnMissingBean(name = "contextAssemblyAdvisor")
+        ContextAssemblyAdvisor contextAssemblyAdvisor(
+                @Qualifier("agentContextAssemblyEngine") ContextAssemblyEngine engine) {
+            return new ContextAssemblyAdvisor(engine);
+        }
+
+        @Bean("springAiContextChatClient")
+        @ConditionalOnMissingBean(name = "springAiContextChatClient")
+        SpringAiContextChatClient springAiContextChatClient(
+                @Qualifier("contextInitAdvisor") ContextInitAdvisor contextInitAdvisor,
+                @Qualifier("sessionHistoryAdvisor") SessionHistoryAdvisor sessionHistoryAdvisor,
+                @Qualifier("textMemoryAdvisor") TextMemoryAdvisor textMemoryAdvisor,
+                @Qualifier("docMemoryAdvisor") DocMemoryAdvisor docMemoryAdvisor,
+                @Qualifier("othersContextAdvisor") OthersContextAdvisor othersContextAdvisor,
+                @Qualifier("contextAssemblyAdvisor") ContextAssemblyAdvisor contextAssemblyAdvisor,
+                @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
+                @Qualifier("agentFlowProperties") AgentFlowProperties properties) {
+            return new SpringAiContextChatClient(
+                    contextInitAdvisor,
+                    sessionHistoryAdvisor,
+                    textMemoryAdvisor,
+                    docMemoryAdvisor,
+                    othersContextAdvisor,
+                    contextAssemblyAdvisor,
+                    validationUtils,
+                    properties);
+        }
     }
 }

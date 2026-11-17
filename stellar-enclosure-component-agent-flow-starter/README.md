@@ -182,6 +182,16 @@ The updated starter is versioned `0.0.2-SNAPSHOT` for source-reactor development
 
 Configuration-built parallel agents use a context-aware scheduler so invocation trace and cancellation reach the branch subscriptions. Trusted code-first parallel agents must use `AgentFlowSchedulers.contextAwareIo()` or wrap their scheduler with `contextAware`; an independently configured native scheduler does not inherit that guarantee. Provider work scheduled on its own threads still needs its own context propagation.
 
+## Three-Tier Memory & Unified Spring AI Context (Path A)
+
+Enable the opt-in Path A three-tier memory and five-zone context pipeline with `egon.cola.component.agent-flow.memory.three-tier.enabled=true` (default `false` so existing `V1` hosts upgrade safely).
+
+- **Level 1 (`session_message` / `TurnAlignedChatMemory`)**: Implements Spring AI `ChatMemory` & `ChatMemoryRepository` with turn-aligned sliding window (`egon.cola.component.agent-flow.memory.session-window-turns`, default `20`, range `1..200`), preserving complete `AssistantMessage.ToolCall` + `ToolResponseMessage` sequences without mid-chain splits; streams append only after full completion.
+- **Level 2 (`text_memory` / `TextMemoryService`)**: Mid-term plain text store returning a stable downstream `id` via `bindOrCreate`, optimistic locking (`version`), and strict rejection (`TEXT_MEMORY_TOO_LARGE`) above `egon.cola.component.agent-flow.memory.text-max-chars` (default `10000`, never silently truncated).
+- **Level 3 (`doc_memory` / `DocMemoryReader`)**: Read-only SPI managed by downstream systems (no Spring AI default table dependency); `JdbcDocMemoryReader` executes tenant-isolated `unnest(...) WITH ORDINALITY` lookups preserving caller `ids` order (configurable `egon.cola.component.agent-flow.memory.doc.*`, batch ceiling `32`). Runtime PostgreSQL role MUST hold `SELECT` only on `doc_memory` (`SELECT, INSERT, DELETE` on `session_message`; `SELECT, INSERT, UPDATE` on `text_memory`).
+- **Unified Context (`SpringAiContextChatClient` & 6 `BaseAdvisor`s)**: Assembles `System Prompt`, `Session History`, `Memory [Text+Doc]`, `Others`, and `User Prompt` through ordered advisors (`100`..`500`, `900`) and `ContextAssemblyEngine` (`egon.cola.component.agent-flow.context.*`: `safety-margin-tokens=512`, `min-keep-history-turns=2`, `combine-context-into-final-user-message=true`), isolating untrusted memory inside `<context_data trust="reference_only">` and trimming `Others -> Tail DocMemory -> TextMemory -> Oldest Full Turn`.
+- **Incremental DDL**: `db/egon-agent-memory/V2__create_three_tier_memory.sql` (checksum tracked in `three-tier-manifest.json`; `V1__create_memory_store.sql` and `manifest.json` remain unchanged).
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```

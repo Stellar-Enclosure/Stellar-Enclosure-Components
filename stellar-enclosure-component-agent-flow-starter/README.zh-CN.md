@@ -182,6 +182,16 @@ configuration -> validation -> ADK graph compilation -> registry -> session exec
 
 配置构建的并行 Agent 使用上下文感知调度器，使运行 Trace 与取消信号传到分支订阅。受信 Code-First 并行 Agent 必须使用 `AgentFlowSchedulers.contextAwareIo()` 或通过 `contextAware` 包装其调度器；独立配置的原生调度器不具有此保证。Provider 自己调度到其他线程的工作仍需自行传播上下文。
 
+## 三级 Memory 与 Spring AI 一体化 Context（路径 A）
+
+通过 `egon.cola.component.agent-flow.memory.three-tier.enabled=true` 按需开启路径 A 三级记忆与五区上下文管线（默认为 `false`，保持既有 `V1` 宿主页平滑零感知升级）。
+
+- **Level 1（`session_message` / `TurnAlignedChatMemory`）**：实现 Spring AI `ChatMemory` 与 `ChatMemoryRepository`，按完整 `turn_id` 执行滑动窗口（`egon.cola.component.agent-flow.memory.session-window-turns`，默认 `20` 轮，支持 `1..200` 自定义），完整持久化与还原 `AssistantMessage.ToolCall` 和 `ToolResponseMessage`，头部永不断链；流式执行仅在正常完成后原子回写。
+- **Level 2（`text_memory` / `TextMemoryService`）**：中期纯文本存储，`bindOrCreate` 幂等绑定并下发稳定 `id`，支持 `version` 乐观锁更新，服务与数据库双重校验 `egon.cola.component.agent-flow.memory.text-max-chars`（默认/上限 `10000` 字符，超限严格拒绝 `TEXT_MEMORY_TOO_LARGE`，绝不静默截断）。
+- **Level 3（`doc_memory` / `DocMemoryReader`）**：不用 Spring AI 默认表，由下游管理 PgSQL Markdown 长期记忆；组件通过只读 SPI 与默认 `JdbcDocMemoryReader`（支持配置 `egon.cola.component.agent-flow.memory.doc.*`，单次上限 `32` 条）基于 `unnest(...) WITH ORDINALITY` 按传入 `ids` 保序查出，并严格隔离 `tenant_key`。运行时 DB Role 对 `doc_memory` 仅授 `SELECT` 权限（`session_message` 仅 `SELECT, INSERT, DELETE`；`text_memory` 仅 `SELECT, INSERT, UPDATE`）。
+- **一体化 Context（`SpringAiContextChatClient` 与 6 个 `BaseAdvisor`）**：按 Order `100`..`500`、`900` 责任链收集 `System Prompt`、`Session History`、`Memory [Text+Doc]`、`Others`、`User Prompt`，经 `ContextAssemblyEngine`（`egon.cola.component.agent-flow.context.*`：`safety-margin-tokens=512`、`min-keep-history-turns=2`、`combine-context-into-final-user-message=true`）将非系统区隔离渲染为 `<context_data trust="reference_only">`，超预算按 `Others -> 尾部 DocMemory -> TextMemory -> 最旧整轮 History` 裁剪。
+- **增量 DDL**：`db/egon-agent-memory/V2__create_three_tier_memory.sql`（SHA-256 记录在 `three-tier-manifest.json`；既有 `V1__create_memory_store.sql` 与 `manifest.json` 保持完全不可变）。
+
 ```bash
 ./mvnw -B -ntp -pl stellar-enclosure-component-agent-flow-starter -am test
 ```
