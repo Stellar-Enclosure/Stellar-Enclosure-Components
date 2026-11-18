@@ -1,32 +1,29 @@
 package top.egon.cola.component.rpc.consumer.channel;
 
-/** Stable transport identity shared by all logical RPC queries. */
-public record RpcChannelKey(String host, int port, boolean secure) {
+import lombok.EqualsAndHashCode;
+import top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO;
 
-    public RpcChannelKey {
-        host = normalizeHost(host);
-        if (port <= 0 || port > 65535) {
-            throw new IllegalArgumentException("RPC channel port is invalid");
-        }
+import java.util.Objects;
+
+/** Shared transport identity for one revision of a stable Kubernetes Service binding. */
+@EqualsAndHashCode
+public final class RpcChannelKey {
+
+    private final String bindingId;
+    private final long bindingVersion;
+    private final String dnsTarget;
+
+    private RpcChannelKey(RpcServiceTargetVO target) {
+        bindingId = target.bindingId();
+        bindingVersion = target.version();
+        dnsTarget = target.dnsTarget();
     }
 
-    public static RpcChannelKey from(RpcEndpoint endpoint) {
-        if (endpoint == null) {
-            throw new IllegalArgumentException("RPC endpoint is required");
-        }
-        return new RpcChannelKey(endpoint.host(), endpoint.port(), endpoint.secure());
+    public static RpcChannelKey from(RpcServiceTargetVO target) {
+        return new RpcChannelKey(Objects.requireNonNull(target, "target"));
     }
 
-    private static String normalizeHost(String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("RPC channel host is required");
-        }
-        String normalized = value.trim();
-        if ("0.0.0.0".equals(normalized)
-                || "::".equals(normalized)
-                || "[::]".equals(normalized)) {
-            throw new IllegalArgumentException("RPC channel host must be routable");
-        }
-        return normalized;
+    public String dnsTarget() {
+        return dnsTarget;
     }
 }

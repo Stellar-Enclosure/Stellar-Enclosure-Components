@@ -9,21 +9,17 @@ import io.grpc.MethodDescriptor;
 import io.grpc.stub.ClientCalls;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
-import top.egon.cola.component.rpc.consumer.channel.RpcChannelLease;
-import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
 import top.egon.cola.component.rpc.consumer.interceptor.RpcClientInterceptorFactory;
 import top.egon.cola.component.rpc.consumer.interceptor.RpcClientInvocation;
 import top.egon.cola.component.rpc.consumer.interceptor.RpcConsumerClientInterceptor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationExecutor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationPlan;
-import top.egon.cola.component.rpc.consumer.loadbalance.RpcLoadBalancers;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferencePolicy;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -42,42 +38,15 @@ public final class RpcGenericInvoker {
             new ByteArrayMarshaller();
 
     private final RpcGenericTargetCache targetCache;
-    private final RpcConsumerChannelPool channelPool;
     private final RpcInvocationExecutor executor;
     private final RpcProcessIdentity processIdentity;
     private final List<RpcClientInterceptorFactory> interceptorFactories;
-    public RpcGenericInvoker(
-            RpcGenericTargetCache targetCache,
-            RpcConsumerChannelPool channelPool,
-            RpcInvocationExecutor executor,
-            RpcProcessIdentity processIdentity,
-            List<RpcClientInterceptorFactory> interceptorFactories,
-            RpcLoadBalancers loadBalancers) {
+    public RpcGenericInvoker(RpcGenericTargetCache targetCache, RpcInvocationExecutor executor,
+                             RpcProcessIdentity processIdentity, List<RpcClientInterceptorFactory> interceptorFactories) {
         this.targetCache = Objects.requireNonNull(targetCache, "targetCache");
-        this.channelPool = Objects.requireNonNull(channelPool, "channelPool");
         this.executor = Objects.requireNonNull(executor, "executor");
-        this.processIdentity = Objects.requireNonNull(
-                processIdentity,
-                "processIdentity"
-        );
-        this.interceptorFactories = interceptorFactories == null
-                ? List.of() : List.copyOf(interceptorFactories);
-        Objects.requireNonNull(loadBalancers, "loadBalancers");
-    }
-
-    public RpcGenericInvoker(
-            RpcGenericTargetCache targetCache,
-            RpcConsumerChannelPool channelPool,
-            RpcInvocationExecutor executor,
-            RpcProcessIdentity processIdentity) {
-        this(
-                targetCache,
-                channelPool,
-                executor,
-                processIdentity,
-                List.of(),
-                new RpcLoadBalancers()
-        );
+        this.processIdentity = Objects.requireNonNull(processIdentity, "processIdentity");
+        this.interceptorFactories = interceptorFactories == null ? List.of() : List.copyOf(interceptorFactories);
     }
 
     public byte[] invokeBlocking(RpcGenericInvocation invocation) {
@@ -137,45 +106,13 @@ public final class RpcGenericInvoker {
     private RpcInvocationPlan plan(
             RpcGenericInvocation invocation,
             RpcGenericTargetCache.Entry entry) {
-        RpcReferencePolicy policy = new RpcReferencePolicy(
-                invocation.timeoutMs(),
-                invocation.retries(),
-                invocation.loadBalance(),
-                invocation.failStrategy(),
-                invocation.failStrategy()
-                        == top.egon.cola.component.rpc.annotation.FailStrategy.LOCAL_FALLBACK
-                        ? "generic"
-                        : "",
-                invocation.affinityKey() == null
-                        ? null
-                        : context -> invocation.affinityKey()
-        );
-        return new RpcInvocationPlan(
-                invocation.serviceName(),
-                invocation.fullMethodName(),
-                invocation.mode(),
-                policy,
-                entry.strategy(),
-                entry.loadBalancer(),
-                channelPool,
-                byte[].class,
-                rawInvoker(invocation),
-                invocation.fallback() == null
-                        ? null
-                        : request -> invocation.fallback().apply(
-                                Arrays.copyOf(
-                                        (byte[]) request,
-                                        ((byte[]) request).length
-                                )
-                        )
-        );
+        RpcReferencePolicy policy = new RpcReferencePolicy(Math.min(invocation.timeoutMs(), targetCache.defaultTimeoutMs()));
+        return new RpcInvocationPlan(invocation.serviceName(), invocation.fullMethodName(), policy,
+                entry.strategy(), byte[].class, rawInvoker(invocation, entry));
     }
 
-    private RpcInvocationPlan.UnaryInvoker rawInvoker(
-            RpcGenericInvocation invocation) {
-        MethodDescriptor<byte[], byte[]> method = rawMethod(
-                invocation.fullMethodName()
-        );
+    private RpcInvocationPlan.UnaryInvoker rawInvoker(RpcGenericInvocation invocation, RpcGenericTargetCache.Entry entry) {
+        MethodDescriptor<byte[], byte[]> method = entry.method();
         return (request, lease, timeout, invocationId) -> {
             byte[] payload = Arrays.copyOf(
                     (byte[]) request,
@@ -184,7 +121,8 @@ public final class RpcGenericInvoker {
             RpcClientInvocation context = RpcClientInvocation.generic(
                     invocation,
                     processIdentity,
-                    invocationId
+                    invocationId,
+                    entry.strategy().target()
             );
             List<ClientInterceptor> interceptors = new ArrayList<>();
             interceptors.add(RpcConsumerClientInterceptor.forTarget(
@@ -230,7 +168,7 @@ public final class RpcGenericInvoker {
         };
     }
 
-    private MethodDescriptor<byte[], byte[]> rawMethod(String fullMethodName) {
+    static MethodDescriptor<byte[], byte[]> rawMethod(String fullMethodName) {
         return MethodDescriptor.<byte[], byte[]>newBuilder()
                 .setType(MethodDescriptor.MethodType.UNARY)
                 .setFullMethodName(fullMethodName)
@@ -240,9 +178,6 @@ public final class RpcGenericInvoker {
     }
 
     private byte[] copyResponse(Object value) {
-        if (value == null) {
-            return null;
-        }
         if (!(value instanceof byte[] bytes)) {
             throw new EgonRpcException(
                     EgonRpcErrorCode.RPC_INTERNAL,

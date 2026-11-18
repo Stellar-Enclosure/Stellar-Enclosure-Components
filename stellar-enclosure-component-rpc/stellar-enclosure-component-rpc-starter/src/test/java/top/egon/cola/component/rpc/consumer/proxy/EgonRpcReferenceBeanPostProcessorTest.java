@@ -12,262 +12,122 @@ import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.config.EgonRpcProperties;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinition;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinitionResolver;
-import top.egon.cola.component.rpc.consumer.reference.RpcReferenceMode;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategy;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategyFactory;
-import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
 import top.egon.cola.component.rpc.support.TestGrpcDescriptorFixtures.UnaryFixtureGrpc;
 
+import java.util.Set;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class EgonRpcReferenceBeanPostProcessorTest {
-
     private static final ValidationUtils VALIDATION_UTILS =
             new ValidationUtils(Validation.buildDefaultValidatorFactory().getValidator());
 
     @Test
-    void injectsGatewayReferenceThroughOneFixedGatewayStrategy() {
-        RpcReferenceStrategyFactory strategyFactory = mock(
-                RpcReferenceStrategyFactory.class
-        );
+    void injectsOneTrustedBindingAndRetainsNativeIdentity() {
+        RpcReferenceStrategyFactory strategies = mock(RpcReferenceStrategyFactory.class);
         RpcReferenceStrategy strategy = mock(RpcReferenceStrategy.class);
-        RpcConsumerProxyFactory proxyFactory = mock(
-                RpcConsumerProxyFactory.class
-        );
-        SampleContract gatewayProxy = mock(SampleContract.class);
-        when(strategyFactory.create(any(RpcReferenceDefinition.class)))
-                .thenReturn(strategy);
-        doReturn(gatewayProxy).when(proxyFactory).create(
-                any(RpcContractDescriptor.class),
-                any(RpcReferenceDefinition.class),
-                any(RpcReferenceStrategy.class)
-        );
-        GatewayReferences bean = new GatewayReferences();
+        RpcConsumerProxyFactory proxies = mock(RpcConsumerProxyFactory.class);
+        SampleContract proxy = mock(SampleContract.class);
+        when(strategies.create(any(RpcReferenceDefinition.class))).thenReturn(strategy);
+        doReturn(proxy).when(proxies).create(any(RpcContractDescriptor.class), any(RpcReferenceDefinition.class), any(RpcReferenceStrategy.class));
+        References bean = new References();
 
-        processor(strategyFactory, proxyFactory)
-                .postProcessBeforeInitialization(bean, "gatewayReferences");
+        processor(strategies, proxies).postProcessBeforeInitialization(bean, "references");
 
-        assertThat(bean.reference).isSameAs(gatewayProxy);
-        verify(strategyFactory).create(
-                org.mockito.ArgumentMatchers.argThat(definition ->
-                        definition.mode() == RpcReferenceMode.GATEWAY)
-        );
+        assertThat(bean.reference).isSameAs(proxy);
+        verify(strategies).create(argThat(definition -> definition.target().bindingId().equals("sample-binding")
+                && definition.target().dnsTarget().equals("dns:///sample-rpc.apps-prod.svc.cluster.local:18122")
+                && definition.serviceIdentity().serviceName().equals("egon.rpc.fixture.v1.UnaryFixtureService")
+                && definition.serviceIdentity().group().equals("default")));
     }
 
     @Test
-    void injectsDirectReferenceWithoutInstallingGatewayDemand() {
-        RpcReferenceStrategyFactory strategyFactory = mock(
-                RpcReferenceStrategyFactory.class
-        );
+    void rejectsUnknownBindingBeforeCreatingAnyStrategy() {
+        RpcReferenceStrategyFactory strategies = mock(RpcReferenceStrategyFactory.class);
+        assertThatThrownBy(() -> processor(strategies, mock(RpcConsumerProxyFactory.class))
+                .postProcessBeforeInitialization(new UnknownReference(), "unknownClient"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("unknownClient")
+                .hasMessageContaining("reference").hasMessageContaining("binding is not configured");
+        verifyNoInteractions(strategies);
+    }
+
+    @Test
+    void closesStrategyIfProxyCompilationFails() {
+        RpcReferenceStrategyFactory strategies = mock(RpcReferenceStrategyFactory.class);
         RpcReferenceStrategy strategy = mock(RpcReferenceStrategy.class);
-        RpcConsumerProxyFactory proxyFactory = mock(
-                RpcConsumerProxyFactory.class
-        );
-        SampleContract directProxy = mock(SampleContract.class);
-        when(strategyFactory.create(any(RpcReferenceDefinition.class)))
-                .thenReturn(strategy);
-        doReturn(directProxy).when(proxyFactory).create(
-                any(RpcContractDescriptor.class),
-                any(RpcReferenceDefinition.class),
-                any(RpcReferenceStrategy.class)
-        );
-        DirectReferences bean = new DirectReferences();
+        when(strategies.create(any(RpcReferenceDefinition.class))).thenReturn(strategy);
+        RpcConsumerProxyFactory proxies = mock(RpcConsumerProxyFactory.class);
+        when(proxies.create(any(), any(), any())).thenThrow(new IllegalArgumentException("invalid proxy"));
 
-        processor(strategyFactory, proxyFactory)
-                .postProcessBeforeInitialization(bean, "directReferences");
-
-        assertThat(bean.reference).isSameAs(directProxy);
-        verify(strategyFactory).create(
-                org.mockito.ArgumentMatchers.argThat(definition ->
-                        definition.mode() == RpcReferenceMode.DIRECT)
-        );
+        assertThatThrownBy(() -> processor(strategies, proxies)
+                .postProcessBeforeInitialization(new References(), "brokenClient"))
+                .hasMessageContaining("brokenClient").hasMessageContaining("invalid proxy");
+        verify(strategy).close();
     }
 
     @Test
-    void allowsSameContractInSeparateFixedModeFields() {
-        RpcReferenceStrategyFactory strategyFactory = mock(
-                RpcReferenceStrategyFactory.class
-        );
-        RpcReferenceStrategy gatewayStrategy = mock(
-                RpcReferenceStrategy.class
-        );
-        RpcReferenceStrategy directStrategy = mock(RpcReferenceStrategy.class);
-        when(strategyFactory.create(any(RpcReferenceDefinition.class)))
-                .thenReturn(gatewayStrategy, directStrategy);
-        RpcConsumerProxyFactory proxyFactory = mock(
-                RpcConsumerProxyFactory.class
-        );
-        SampleContract gatewayProxy = mock(SampleContract.class);
-        SampleContract directProxy = mock(SampleContract.class);
-        doReturn(gatewayProxy, directProxy).when(proxyFactory).create(
-                any(RpcContractDescriptor.class),
-                any(RpcReferenceDefinition.class),
-                any(RpcReferenceStrategy.class)
-        );
-
-        BothReferences bean = new BothReferences();
-        processor(strategyFactory, proxyFactory)
-                .postProcessBeforeInitialization(bean, "bothReferences");
-
-        assertThat(bean.gatewayReference).isSameAs(gatewayProxy);
-        assertThat(bean.directReference).isSameAs(directProxy);
-    }
-
-    @Test
-    void rejectsGatewayReferenceWithDirectOnlyFields() {
-        assertThatThrownBy(() -> processor(
-                mock(RpcReferenceStrategyFactory.class),
-                mock(RpcConsumerProxyFactory.class)
-        ).postProcessBeforeInitialization(
-                new InvalidGatewayReference(),
-                "conflictingClient"
-        ))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("conflictingClient")
-                .hasMessageContaining("reference")
-                .hasMessageContaining("@EgonRpcReference")
-                .hasMessageContaining("only valid for DIRECT");
-    }
-
-    @Test
-    void reportsMissingSelectedModeFromStrategyFactory() {
-        RpcReferenceStrategyFactory strategyFactory = mock(
-                RpcReferenceStrategyFactory.class
-        );
-        when(strategyFactory.create(any(RpcReferenceDefinition.class)))
-                .thenThrow(new IllegalStateException(
-                        "RPC selected mode directory is required"
-                ));
-        assertThatThrownBy(() -> processor(
-                strategyFactory,
-                mock(RpcConsumerProxyFactory.class)
-        ).postProcessBeforeInitialization(
-                new DirectReferences(),
-                "missingDirectClient"
-        ))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("missingDirectClient")
-                .hasMessageContaining("reference")
-                .hasMessageContaining("selected mode directory");
+    void reportsStableTargetCreationFailureWithBeanAndField() {
+        RpcReferenceStrategyFactory strategies = mock(RpcReferenceStrategyFactory.class);
+        when(strategies.create(any(RpcReferenceDefinition.class))).thenThrow(new IllegalStateException("stable target unavailable"));
+        assertThatThrownBy(() -> processor(strategies, mock(RpcConsumerProxyFactory.class))
+                .postProcessBeforeInitialization(new References(), "unavailableClient"))
+                .hasMessageContaining("unavailableClient").hasMessageContaining("reference").hasMessageContaining("stable target unavailable");
     }
 
     @Test
     void keepsInvalidContractFailures() {
-        assertThatThrownBy(() -> processor(
-                mock(RpcReferenceStrategyFactory.class),
-                mock(RpcConsumerProxyFactory.class)
-        ).postProcessBeforeInitialization(
-                new MissingServiceReference(),
-                "missingServiceClient"
-        )).isInstanceOfSatisfying(EgonRpcException.class, exception ->
-                assertThat(exception.getRpcErrorCode()).isEqualTo(
-                        EgonRpcErrorCode.RPC_INVALID_CONTRACT
-                ));
-
-        assertThatThrownBy(() -> processor(
-                mock(RpcReferenceStrategyFactory.class),
-                mock(RpcConsumerProxyFactory.class)
-        ).postProcessBeforeInitialization(
-                new NonInterfaceReference(),
-                "invalidFieldClient"
-        ))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("invalidFieldClient")
-                .hasMessageContaining("interface");
+        assertThatThrownBy(() -> processor(mock(RpcReferenceStrategyFactory.class), mock(RpcConsumerProxyFactory.class))
+                .postProcessBeforeInitialization(new MissingServiceReference(), "missingServiceClient"))
+                .isInstanceOfSatisfying(EgonRpcException.class,
+                        exception -> assertThat(exception.getRpcErrorCode()).isEqualTo(EgonRpcErrorCode.RPC_INVALID_CONTRACT));
+        assertThatThrownBy(() -> processor(mock(RpcReferenceStrategyFactory.class), mock(RpcConsumerProxyFactory.class))
+                .postProcessBeforeInitialization(new NonInterfaceReference(), "invalidFieldClient"))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("invalidFieldClient").hasMessageContaining("interface");
     }
 
-    private EgonRpcReferenceBeanPostProcessor processor(
-            RpcReferenceStrategyFactory strategyFactory,
-            RpcConsumerProxyFactory proxyFactory) {
+    private EgonRpcReferenceBeanPostProcessor processor(RpcReferenceStrategyFactory strategies, RpcConsumerProxyFactory proxies) {
         EgonRpcProperties properties = new EgonRpcProperties();
-        RpcProcessIdentity identity = new RpcProcessIdentity(
-                "proxy-test",
-                "test",
-                "127.0.0.1",
-                1,
-                "proxy-1"
-        );
-        return new EgonRpcReferenceBeanPostProcessor(
-                new RpcContractValidator(VALIDATION_UTILS),
-                new RpcReferenceDefinitionResolver(properties, identity),
-                strategyFactory,
-                proxyFactory
-        );
+        properties.getConsumer().getBindings().put("sample-binding", new EgonRpcProperties.RpcServiceBindingConfig()
+                .setVersion(1).setNamespace("apps-prod").setService("sample-rpc").setPort(18122)
+                .setMethods(Set.of("egon.rpc.fixture.v1.UnaryFixtureService/Echo")));
+        return new EgonRpcReferenceBeanPostProcessor(new RpcContractValidator(VALIDATION_UTILS),
+                new RpcReferenceDefinitionResolver(properties), strategies, proxies);
     }
 
-    private static final class GatewayReferences {
-
-        @EgonRpcReference(
-                mode = RpcReferenceMode.GATEWAY,
-                timeoutMs = 1200)
+    private static final class References {
+        @EgonRpcReference(bindingId = "sample-binding", timeoutMs = 1200)
         private SampleContract reference;
     }
-
-    private static final class DirectReferences {
-
-        @EgonRpcReference(
-                bizCode = "commerce",
-                appCode = "orders"
-        )
+    private static final class UnknownReference {
+        @EgonRpcReference(bindingId = "missing-binding")
         private SampleContract reference;
     }
-
-    private static final class BothReferences {
-
-        @EgonRpcReference(
-                mode = RpcReferenceMode.GATEWAY)
-        private SampleContract gatewayReference;
-
-        @EgonRpcReference(
-                bizCode = "commerce",
-                appCode = "orders"
-        )
-        private SampleContract directReference;
-    }
-
-    private static final class InvalidGatewayReference {
-
-        @EgonRpcReference(
-                mode = RpcReferenceMode.GATEWAY,
-                bizCode = "commerce",
-                appCode = "orders"
-        )
-        private SampleContract reference;
-    }
-
     private static final class MissingServiceReference {
-
-        @EgonRpcReference
+        @EgonRpcReference(bindingId = "sample-binding")
         private MissingServiceContract reference;
     }
-
     private static final class NonInterfaceReference {
-
-        @EgonRpcReference
+        @EgonRpcReference(bindingId = "sample-binding")
         private String reference;
     }
-
-    @EgonRpcService(
-            grpcClass = UnaryFixtureGrpc.class,
-            group = "default",
-            version = "1.0.0"
-    )
+    @EgonRpcService(grpcClass = UnaryFixtureGrpc.class, group = "default", version = "1.0.0")
     private interface SampleContract {
-
         @EgonRpcMethod(name = "Echo")
         StringValue echo(StringValue request);
     }
-
     private interface MissingServiceContract {
-
         @EgonRpcMethod(name = "Echo")
         StringValue echo(StringValue request);
     }

@@ -11,7 +11,7 @@ import java.lang.annotation.Target;
  * Protocol-neutral metadata shared by RPC and HTTP declarations.
  *
  * <p>The descriptive fields (ownership, tags, lifecycle) and the call-shaping
- * fields (timeout, retries, load balancing) mean the same thing whether a service
+ * deadline fields mean the same thing whether a service
  * is reached over gRPC or over HTTP. Defining them once here, rather than copying
  * them into each protocol's annotation, is what stops the two surfaces from
  * drifting: a field added for RPC alone would quietly leave the HTTP catalogue
@@ -71,16 +71,8 @@ public @interface EgonServiceMeta {
     long timeoutMs() default -1;
 
     /**
-     * Retry attempts after the initial call. Negative means unset, deferring to
-     * the enclosing layer; zero is reserved for "explicitly do not retry", which
-     * is a different statement from saying nothing.
+     * Zero additional attempts. Nonzero retries need an explicit method
+     * approval contract and are rejected by the current RPC resolver.
      */
-    int retries() default -1;
-
-    /**
-     * Load balancing policy for calls to this element.
-     *
-     * @see LoadBalance#INHERIT
-     */
-    LoadBalance loadBalance() default LoadBalance.INHERIT;
+    int retries() default 0;
 }

@@ -1,44 +1,32 @@
 package top.egon.cola.component.rpc.consumer.reference;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
-import top.egon.cola.component.rpc.consumer.provider.RpcProviderQuery;
 
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.Objects;
 
-/** Immutable resolved target, mode and per-method policy index. */
+/** Immutable deployment target and native logical identity compiled at injection time. */
 public record RpcReferenceDefinition(
-        RpcReferenceMode mode,
-        RpcServiceIdentity serviceIdentity,
-        RpcProviderQuery directQuery,
-        Map<Method, RpcReferencePolicy> typedPolicies
+        @NotNull @Valid RpcServiceTargetVO target,
+        @NotNull RpcServiceIdentity serviceIdentity,
+        @NotNull Map<Method, @Valid RpcReferencePolicy> typedPolicies
 ) {
-
     public RpcReferenceDefinition {
-        mode = Objects.requireNonNull(mode, "mode");
+        target = Objects.requireNonNull(target, "target");
         serviceIdentity = Objects.requireNonNull(serviceIdentity, "serviceIdentity");
-        if (mode == RpcReferenceMode.DIRECT && directQuery == null) {
-            throw new IllegalArgumentException("DIRECT reference requires provider query");
-        }
-        if (mode == RpcReferenceMode.GATEWAY && directQuery != null) {
-            throw new IllegalArgumentException("GATEWAY reference cannot carry provider query");
-        }
         typedPolicies = typedPolicies == null ? Map.of() : Map.copyOf(typedPolicies);
     }
 
     public RpcReferencePolicy policyFor(Method method) {
         RpcReferencePolicy policy = typedPolicies.get(method);
-        if (policy == null) {
-            throw new IllegalArgumentException(
-                    "RPC method is not part of the resolved reference: " + method);
-        }
+        if (policy == null) throw new IllegalArgumentException("RPC method is not part of the resolved reference");
         return policy;
     }
 
     public String queryIdentity() {
-        return mode == RpcReferenceMode.DIRECT
-                ? directQuery.toString()
-                : serviceIdentity.registrySuffix();
+        return target.bindingId() + "@" + target.version();
     }
 }

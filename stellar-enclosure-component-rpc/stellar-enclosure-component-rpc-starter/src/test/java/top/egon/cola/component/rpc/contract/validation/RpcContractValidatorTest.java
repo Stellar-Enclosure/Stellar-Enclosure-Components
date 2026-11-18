@@ -106,6 +106,20 @@ class RpcContractValidatorTest {
     void shouldRejectBlankServiceIdentity() {
         assertInvalid(BlankGroupContract.class);
         assertInvalid(BlankVersionContract.class);
+        assertInvalid(UnsafeGroupContract.class);
+        assertInvalid(UnsafeVersionContract.class);
+    }
+
+    @Test
+    void keepsNativeDescriptorIdentitySeparateFromCatalogueMetadata() {
+        RpcContractDescriptor descriptor = validator.validate(CatalogueContract.class);
+        assertThat(descriptor.serviceName()).isEqualTo("egon.rpc.fixture.v1.UnaryFixtureService");
+        assertThat(descriptor.group()).isEqualTo("catalogue-group");
+        assertThat(descriptor.version()).isEqualTo("1.0.0+build.2");
+        assertThat(EgonRpcService.class.getDeclaredMethods())
+                .extracting(java.lang.reflect.Method::getName)
+                .contains("grpcClass", "group", "version", "serviceName", "weight", "tags", "deprecated")
+                .doesNotContain("loadBalance");
     }
 
     private void assertInvalid(Class<?> contractType) {
@@ -261,6 +275,25 @@ class RpcContractValidatorTest {
     @EgonRpcService(grpcClass = UnaryFixtureGrpc.class, version = "")
     interface BlankVersionContract {
 
+        @EgonRpcMethod(name = "Echo")
+        StringValue echo(StringValue request);
+    }
+
+    @EgonRpcService(grpcClass = UnaryFixtureGrpc.class, group = "bad/group")
+    interface UnsafeGroupContract {
+        @EgonRpcMethod(name = "Echo")
+        StringValue echo(StringValue request);
+    }
+
+    @EgonRpcService(grpcClass = UnaryFixtureGrpc.class, version = "version\nheader")
+    interface UnsafeVersionContract {
+        @EgonRpcMethod(name = "Echo")
+        StringValue echo(StringValue request);
+    }
+
+    @EgonRpcService(grpcClass = UnaryFixtureGrpc.class, serviceName = "catalogue-only-name",
+            group = "catalogue-group", version = "1.0.0+build.2", weight = 300, tags = {"catalogue"}, deprecated = true)
+    interface CatalogueContract {
         @EgonRpcMethod(name = "Echo")
         StringValue echo(StringValue request);
     }

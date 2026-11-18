@@ -7,27 +7,22 @@ import org.springframework.util.ClassUtils;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.rpc.annotation.EgonRpcMethod;
 import top.egon.cola.component.rpc.annotation.EgonRpcService;
-import top.egon.cola.component.rpc.annotation.FailStrategy;
-import top.egon.cola.component.rpc.annotation.LoadBalance;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
-import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
-import top.egon.cola.component.rpc.consumer.channel.RpcEndpoint;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationExecutor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationPlan;
-import top.egon.cola.component.rpc.consumer.loadbalance.RpcLoadBalancers;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinition;
-import top.egon.cola.component.rpc.consumer.reference.RpcReferenceMode;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferencePolicy;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategy;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
-import top.egon.cola.component.rpc.exception.RpcStatusExceptionMapper;
 import top.egon.cola.component.rpc.support.TestGrpcDescriptorFixtures.UnaryFixtureGrpc;
 
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
@@ -118,75 +113,27 @@ public class RpcConsumerMethodInterceptorTest {
     }
 
     private RpcConsumerProxyFactory factory(RpcInvocationExecutor executor) {
-        return new RpcConsumerProxyFactory(
-                new RpcContractValidator(VALIDATION_UTILS),
-                mock(RpcConsumerChannelPool.class),
-                executor,
-                new RpcProcessIdentity(
-                        "proxy-test",
-                        "test",
-                        "127.0.0.1",
-                        1,
-                        "proxy-1"
-                ),
-                new RpcLoadBalancers(),
-                new RpcStatusExceptionMapper(),
-                1000,
-                List.of()
-        );
+        return new RpcConsumerProxyFactory(executor,
+                new RpcProcessIdentity("proxy-test", "test", "127.0.0.1", 1, "proxy-1"), List.of());
     }
 
     private RpcReferenceDefinition definition(RpcContractDescriptor contract) {
         Map<Method, RpcReferencePolicy> policies = contract.methods().stream()
-                .collect(java.util.stream.Collectors.toMap(
-                        method -> method.javaMethod(),
-                        ignored -> new RpcReferencePolicy(
-                                1000,
-                                0,
-                                LoadBalance.ROUND_ROBIN,
-                                FailStrategy.FAIL_CLOSED,
-                                "",
-                                null
-                        )
-                ));
-        return new RpcReferenceDefinition(
-                RpcReferenceMode.GATEWAY,
+                .collect(java.util.stream.Collectors.toMap(method -> method.javaMethod(), ignored -> new RpcReferencePolicy(1000)));
+        return new RpcReferenceDefinition(target(),
                 new top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity(
-                        contract.serviceName(),
-                        contract.group(),
-                        contract.version()
-                ),
-                null,
-                policies
-        );
+                        contract.serviceName(), contract.group(), contract.version()), policies);
+    }
+
+    private RpcServiceTargetVO target() {
+        return new RpcServiceTargetVO("sample-binding", 1, "apps-prod", "sample-rpc", 18122,
+                Set.of("egon.rpc.fixture.v1.UnaryFixtureService/Echo"));
     }
 
     private RpcReferenceStrategy strategy() {
-        return new RpcReferenceStrategy() {
-            @Override
-            public RpcReferenceMode mode() {
-                return RpcReferenceMode.GATEWAY;
-            }
-
-            @Override
-            public String queryIdentity() {
-                return "proxy-test";
-            }
-
-            @Override
-            public long revision() {
-                return 1;
-            }
-
-            @Override
-            public List<? extends RpcEndpoint> candidates() {
-                return List.of();
-            }
-
-            @Override
-            public void close() {
-            }
-        };
+        RpcReferenceStrategy strategy = mock(RpcReferenceStrategy.class);
+        when(strategy.target()).thenReturn(target());
+        return strategy;
     }
 
     @EgonRpcService(

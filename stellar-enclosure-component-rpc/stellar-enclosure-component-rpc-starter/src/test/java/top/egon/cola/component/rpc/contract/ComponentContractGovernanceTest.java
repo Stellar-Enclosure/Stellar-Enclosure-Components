@@ -9,17 +9,13 @@ import top.egon.cola.component.common.core.enums.ResultCode;
 import top.egon.cola.component.common.core.exception.CommonException;
 import top.egon.cola.component.common.core.validation.BaseValidator;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.rpc.annotation.FailStrategy;
-import top.egon.cola.component.rpc.annotation.LoadBalance;
-import top.egon.cola.component.rpc.consumer.gateway.RpcGatewayState;
+import top.egon.cola.component.rpc.config.EgonRpcProperties;
+import top.egon.cola.component.rpc.config.RpcTransportSecurity;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationMode;
 import top.egon.cola.component.rpc.consumer.lifecycle.RpcConsumerRuntimeState;
-import top.egon.cola.component.rpc.consumer.reference.RpcReferenceMode;
 import top.egon.cola.component.rpc.context.invocation.RpcFailureStage;
 import top.egon.cola.component.rpc.contract.descriptor.RpcType;
 import top.egon.cola.component.rpc.provider.lifecycle.RpcProviderRuntimeState;
-import top.egon.cola.component.rpc.provider.registration.RpcLeaseOperationResult;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistrationMode;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
@@ -44,10 +40,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Step 10 合同：RPC 的自定义异常、typed code、手写 enum 与 validator 必须落在公共合同上
+ * 公共合同治理：RPC 的自定义异常、typed code、仍在使用的手写 enum 与 validator 必须落在公共合同上
  * （REQ-002、REQ-003、REQ-004、REQ-005、REQ-006、REQ-007、REQ-027）。
  *
- * <p>本文件只固定本 Step 列出的六条算法差异；Channel 生命周期、租约与 gRPC 状态映射行为由原回归证明保持。</p>
+ * <p>云原生迁移 Step 5 删除物理目录、客户端选址与旧引用模式后，本文件继续固定保留类型的编码、校验与异常合同，
+ * 并验证旧实现没有回流。相邻天枢适配器的源码合同保留到计划 Step 34；其现存协议编码不因当前模块删实现而改号。</p>
  */
 class ComponentContractGovernanceTest {
 
@@ -105,13 +102,51 @@ class ComponentContractGovernanceTest {
     private static final Path REPO_ROOT = Path.of("../../../");
 
     private static final Path[] FAMILY_TEXT_ROOTS = {
-            repo("stellar-enclosure-archetypes/source-projects/stellar-enclosure-source-light/src"),
-            repo("stellar-enclosure-archetypes/source-projects/stellar-enclosure-source-service"),
-            repo("stellar-enclosure-archetypes/source-projects/stellar-enclosure-source-web"),
-            repo("stellar-enclosure-platform/stellar-enclosure-tianquan-shoubing/stellar-enclosure-tianquan-shoubing-rpc-contract/src")};
+            repo("Stellar-Enclosure-COLA/source-projects/stellar-enclosure-source-light/src"),
+            repo("Stellar-Enclosure-COLA/source-projects/stellar-enclosure-source-service"),
+            repo("Stellar-Enclosure-COLA/source-projects/stellar-enclosure-source-web"),
+            repo("tianquan-shoubing-service/stellar-enclosure-tianquan-shoubing-rpc-contract/src")};
 
-    /** 本模块 13 个手写 enum 的固定编码；已有数字保持，无编码常量按当前顺序落 0..N-1。 */
+    /** 保留的手写 enum 固定编码；删除实现不重排仍在使用或已发布的 code。 */
     private static final Map<String, List<String>> ENUM_CODES = enumCodes();
+
+    /** 当前 starter 已退役的物理目录、选址与引用模式；不提前要求 Step 34 的相邻适配器完成删除。 */
+    private static final List<String> RETIRED_RPC_TYPES = List.of(
+            ".annotation.FailStrategy",
+            ".annotation.LoadBalance",
+            ".consumer.direct.DirectRpcInvocationChannelProvider",
+            ".consumer.direct.RpcDirectClientFactory",
+            ".consumer.direct.RpcDirectClientHandle",
+            ".consumer.direct.RpcDirectClientSettings",
+            ".consumer.gateway.GatewayRpcInvocationChannelProvider",
+            ".consumer.gateway.RpcConsumerGatewayManager",
+            ".consumer.gateway.RpcGatewayDirectory",
+            ".consumer.gateway.RpcGatewayEndpoint",
+            ".consumer.gateway.RpcGatewayQuery",
+            ".consumer.gateway.RpcGatewaySnapshot",
+            ".consumer.gateway.RpcGatewayState",
+            ".consumer.gateway.RpcGatewaySubscription",
+            ".consumer.loadbalance.RpcLoadBalanceContext",
+            ".consumer.loadbalance.RpcLoadBalanceKeyResolver",
+            ".consumer.loadbalance.RpcLoadBalancer",
+            ".consumer.loadbalance.RpcLoadBalancers",
+            ".consumer.provider.ProviderRpcInvocationChannelProvider",
+            ".consumer.provider.RpcConsumerProviderManager",
+            ".consumer.provider.RpcProviderDirectory",
+            ".consumer.provider.RpcProviderEndpoint",
+            ".consumer.provider.RpcProviderQuery",
+            ".consumer.provider.RpcProviderSnapshot",
+            ".consumer.provider.RpcProviderSubscription",
+            ".consumer.reference.DirectRpcReferenceStrategy",
+            ".consumer.reference.GatewayRpcReferenceStrategy",
+            ".consumer.reference.RpcReferenceMode",
+            ".provider.registration.RpcLeaseOperationResult",
+            ".provider.registration.RpcProviderLease",
+            ".provider.registration.RpcProviderLeaseIdentity",
+            ".provider.registration.RpcProviderLeaseManager",
+            ".provider.registration.RpcProviderRegistration",
+            ".provider.registration.RpcProviderRegistrationMode",
+            ".provider.registration.RpcProviderRegistry");
 
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
     private static final Pattern ENUM_HEADER =
@@ -123,10 +158,6 @@ class ComponentContractGovernanceTest {
             Pattern.compile("\\bclass\\s+(\\w*Exception)\\s+extends\\s+(\\w+)");
     private static final Pattern VALIDATOR_DECLARATION =
             Pattern.compile("\\b(?:class|interface)\\s+(\\w*Validator)\\b");
-    private static final Pattern SHARED_VALIDATOR_FACTORY = Pattern.compile(
-            "static\\s+final\\s+ValidationUtils\\s+\\w+\\s*=\\s*new ValidationUtils\\(\\s*"
-                    + "Validation\\.buildDefaultValidatorFactory\\(\\)\\.getValidator\\(\\)\\s*\\)");
-
     private final List<Object> validatedBeans = new ArrayList<>();
 
     // 算法第 1 行：自定义异常只在所属 common.exception，技术异常根以 CommonException 为公共根。
@@ -283,20 +314,37 @@ class ComponentContractGovernanceTest {
                 .as("REQ-004 管理面判定语义保持，不改成按 code 分支")
                 .contains("public boolean management()")
                 .contains("name().startsWith(\"MANAGEMENT_\")");
-        assertThat(FailStrategy.valueOf("INHERIT")).isSameAs(FailStrategy.INHERIT);
-        assertThat(LoadBalance.valueOf("SMOOTH_WEIGHTED_ROUND_ROBIN"))
-                .isSameAs(LoadBalance.SMOOTH_WEIGHTED_ROUND_ROBIN);
-        assertThat(RpcLeaseOperationResult.renewed(java.time.Instant.EPOCH).renewed()).isTrue();
-        assertThat(RpcLeaseOperationResult.leaseMismatch().status())
-                .isSameAs(RpcLeaseOperationResult.Status.LEASE_MISMATCH);
-        assertThat(RpcGatewayState.values()).hasSize(5);
         assertThat(RpcInvocationMode.values()).containsExactly(
                 RpcInvocationMode.BLOCKING, RpcInvocationMode.ASYNC);
-        assertThat(RpcReferenceMode.values()).containsExactly(
-                RpcReferenceMode.GATEWAY, RpcReferenceMode.DIRECT);
         assertThat(RpcType.values()).containsExactly(RpcType.UNARY);
-        assertThat(RpcProviderRegistrationMode.values()).containsExactly(
-                RpcProviderRegistrationMode.REQUIRED, RpcProviderRegistrationMode.DISABLED);
+    }
+
+    @Test
+    void retiredPhysicalRoutingTypesCannotReturnToTheStarter() throws Exception {
+        String sources = text(MAIN_SOURCES);
+        for (String suffix : RETIRED_RPC_TYPES) {
+            String type = RPC_PACKAGE + suffix;
+            assertThat(MAIN_SOURCES.resolve(type.replace('.', '/') + ".java"))
+                    .as("Step 5 已退役实现不得保留源码或运行时 fallback: %s", type)
+                    .doesNotExist();
+            assertThat(sources)
+                    .as("Step 5 starter 不得再依赖已退役的类型 %s", type)
+                    .doesNotContain(type);
+        }
+    }
+
+    @Test
+    void internalTransportRemainsTheControlledH2cStringContract() throws Exception {
+        assertThat(RpcTransportSecurity.class.isEnum())
+                .as("h2c 是已确定的传输配置，不增加新的物理模式 enum")
+                .isFalse();
+        assertThat(RpcTransportSecurity.H2C).isEqualTo("h2c");
+        assertThat(EgonRpcProperties.class.getMethod("getTransport").getReturnType()).isEqualTo(String.class);
+        assertThat(new EgonRpcProperties().getTransport()).isEqualTo(RpcTransportSecurity.H2C);
+        assertThat(EgonRpcProperties.class.getDeclaredField("transport")
+                .getAnnotation(jakarta.validation.constraints.Pattern.class).regexp())
+                .as("原生约束只接受既定 h2c 配置")
+                .isEqualTo(RpcTransportSecurity.H2C);
     }
 
     // 算法第 4 行：validator 继承 BaseValidator，原生约束先于协议关系规则，且只注入具名门面。
@@ -346,11 +394,23 @@ class ComponentContractGovernanceTest {
                 .doesNotContain("KafkaTemplate")
                 .doesNotContain("RedissonClient");
 
-        // 非 Spring 编程式入口仍可用，但进程级门面只能绑定一次，不得按请求重建 ValidatorFactory。
-        String sharedDefaults = programmaticDefaults();
-        assertThat(SHARED_VALIDATOR_FACTORY.matcher(sharedDefaults).find())
-                .as("REQ-007 编程式默认门面必须是进程内绑定一次的 static final")
-                .isTrue();
+        // 引用入口只接收已装配的 validator，不再由已退役的 Direct 工厂自建默认校验设施。
+        Class<?> referencePostProcessor = Class.forName(
+                RPC_PACKAGE + ".consumer.proxy.EgonRpcReferenceBeanPostProcessor");
+        assertThat(referencePostProcessor.getConstructors())
+                .as("引用入口只保留已装配 validator 的规范构造器")
+                .hasSize(1);
+        assertThat(referencePostProcessor.getConstructors()[0].getParameterTypes()).containsExactly(
+                Class.forName(VALIDATOR_TYPES.get(0)),
+                Class.forName(RPC_PACKAGE + ".consumer.reference.RpcReferenceDefinitionResolver"),
+                Class.forName(RPC_PACKAGE + ".consumer.reference.RpcReferenceStrategyFactory"),
+                Class.forName(RPC_PACKAGE + ".consumer.proxy.RpcConsumerProxyFactory"));
+        assertThat(read(MAIN_SOURCES.resolve(
+                "top/egon/cola/component/rpc/consumer/proxy/EgonRpcReferenceBeanPostProcessor.java")))
+                .as("REQ-007 引用注入不能重建 validator 或默认门面")
+                .doesNotContain("ValidatorFactory")
+                .doesNotContain("new ValidationUtils(")
+                .doesNotContain("new RpcContractValidator(");
 
         Class<?> validatorType = Class.forName(VALIDATOR_TYPES.get(0));
         Object validator = validatorType
@@ -453,33 +513,21 @@ class ComponentContractGovernanceTest {
 
     private static Map<String, List<String>> enumCodes() {
         Map<String, List<String>> codes = new LinkedHashMap<>();
-        codes.put(RPC_PACKAGE + ".annotation.FailStrategy",
-                List.of("INHERIT=0", "FAIL_OPEN=1", "FAIL_CLOSED=2", "LOCAL_FALLBACK=3"));
-        codes.put(RPC_PACKAGE + ".annotation.LoadBalance",
-                List.of("INHERIT=0", "ROUND_ROBIN=1", "SMOOTH_WEIGHTED_ROUND_ROBIN=2", "RANDOM=3",
-                        "WEIGHTED_RANDOM=4", "CONSISTENT_HASH=5", "LEAST_IN_FLIGHT=6"));
         codes.put(ERROR_CODE_TYPE,
                 List.of("RPC_INVALID_CONTRACT=0", "RPC_PROVIDER_START_FAILED=1", "RPC_REGISTRATION_FAILED=2",
                         "RPC_YUHENG_UNAVAILABLE=3", "RPC_YUHENG_AMBIGUOUS=4", "RPC_SERVICE_NOT_FOUND=5",
                         "RPC_METHOD_NOT_FOUND=6", "RPC_DEADLINE_EXCEEDED=7", "RPC_CANCELLED=8",
                         "RPC_PROVIDER_UNAVAILABLE=9", "RPC_RATE_LIMITED=10", "RPC_INVALID_REQUEST=11",
                         "RPC_PROVIDER_REJECTED=12", "RPC_INTERNAL=13"));
-        codes.put(RPC_PACKAGE + ".consumer.gateway.RpcGatewayState",
-                List.of("STARTING=0", "READY=1", "UNAVAILABLE=2", "AMBIGUOUS=3", "STOPPED=4"));
         codes.put(RPC_PACKAGE + ".consumer.invocation.RpcInvocationMode",
                 List.of("BLOCKING=0", "ASYNC=1"));
         codes.put(RPC_PACKAGE + ".consumer.lifecycle.RpcConsumerRuntimeState",
                 List.of("NEW=0", "STARTING=1", "READY=2", "DEGRADED=3", "DRAINING=4", "FAILED=5", "STOPPED=6"));
-        codes.put(RPC_PACKAGE + ".consumer.reference.RpcReferenceMode", List.of("GATEWAY=0", "DIRECT=1"));
         codes.put(RPC_PACKAGE + ".context.invocation.RpcFailureStage",
                 List.of("GATEWAY=0", "PROVIDER=1"));
         codes.put(RPC_PACKAGE + ".contract.descriptor.RpcType", List.of("UNARY=0"));
         codes.put(RPC_PACKAGE + ".provider.lifecycle.RpcProviderRuntimeState",
                 List.of("NEW=0", "STARTING=1", "READY=2", "DEGRADED=3", "DRAINING=4", "FAILED=5", "STOPPED=6"));
-        codes.put(RPC_PACKAGE + ".provider.registration.RpcLeaseOperationResult$Status",
-                List.of("RENEWED=0", "DELETED=1", "NOT_FOUND=2", "LEASE_MISMATCH=3"));
-        codes.put(RPC_PACKAGE + ".provider.registration.RpcProviderRegistrationMode",
-                List.of("REQUIRED=0", "DISABLED=1"));
         codes.put(TIANSHU_PACKAGE + ".security.DdcRpcOperation",
                 List.of("SDK_REGISTER=0", "SDK_HEARTBEAT=1", "SDK_OFFLINE=2", "CONFIG_PULL=3", "PUBLISH_ACK=4",
                         "REGISTRY_REGISTER=5", "REGISTRY_HEARTBEAT=6", "REGISTRY_DEREGISTER=7", "REGISTRY_READ=8",
@@ -582,16 +630,6 @@ class ComponentContractGovernanceTest {
 
     interface UnannotatedContract {
         String get(String request);
-    }
-
-    private static String programmaticDefaults() throws IOException {
-        StringBuilder builder = new StringBuilder();
-        for (String type : List.of(
-                RPC_PACKAGE + ".consumer.direct.RpcDirectClientFactory",
-                RPC_PACKAGE + ".consumer.proxy.EgonRpcReferenceBeanPostProcessor")) {
-            builder.append(read(MAIN_SOURCES.resolve(type.replace('.', '/') + ".java"))).append('\n');
-        }
-        return builder.toString();
     }
 
     private static List<String> directoryNames(Path directory) throws IOException {

@@ -24,15 +24,15 @@ class RpcProviderMetadataMergerTest {
                 20,
                 calls,
                 "later",
-                Map.of("yuheng.region", "cn-east")
+                Map.of("catalog.owner", "identity-team")
         );
         RpcProviderMetadataContributor earlier = contributor(
                 10,
                 calls,
                 "earlier",
                 Map.of(
-                        "yuheng.zone", "zone-a",
-                        "yuheng.weight", "100"
+                        "catalog.resource-kind", "identity-directory",
+                        "catalog.schema-version", "1"
                 )
         );
         RpcProviderMetadataMerger merger =
@@ -41,16 +41,16 @@ class RpcProviderMetadataMergerTest {
         Map<String, String> metadata = merger.merge(
                 SERVICE,
                 Map.of(
-                        "yuheng.weight", "100",
+                        "catalog.schema-version", "1",
                         "custom.key", "value"
                 )
         );
 
         assertThat(calls).containsExactly("earlier", "later");
         assertThat(metadata)
-                .containsEntry("yuheng.zone", "zone-a")
-                .containsEntry("yuheng.region", "cn-east")
-                .containsEntry("yuheng.weight", "100")
+                .containsEntry("catalog.resource-kind", "identity-directory")
+                .containsEntry("catalog.owner", "identity-team")
+                .containsEntry("catalog.schema-version", "1")
                 .containsEntry("custom.key", "value");
         assertThatThrownBy(() -> metadata.put("another", "value"))
                 .isInstanceOf(UnsupportedOperationException.class);
@@ -59,12 +59,12 @@ class RpcProviderMetadataMergerTest {
     @Test
     void rejectsDifferentValuesForTheSameKeyAcrossAnySource() {
         RpcProviderMetadataMerger merger = new RpcProviderMetadataMerger(
-                List.of(service -> Map.of("yuheng.zone", "zone-b"))
+                List.of(service -> Map.of("catalog.owner", "other-team"))
         );
 
         assertThatThrownBy(() -> merger.merge(
                 SERVICE,
-                Map.of("yuheng.zone", "zone-a")
+                Map.of("catalog.owner", "identity-team")
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("conflict");
     }
@@ -92,19 +92,35 @@ class RpcProviderMetadataMergerTest {
     }
 
     @Test
-    void leavesAdapterSpecificMetadataValidationOutsideRpcCore() {
+    void preservesOpaqueLogicalMetadataWithoutInterpretingItAsRouting() {
         RpcProviderMetadataMerger merger =
                 new RpcProviderMetadataMerger(List.of());
 
         assertThat(merger.merge(SERVICE, Map.of(
-                "yuheng.weight", "adapter-defined",
+                "catalog.category", "application-defined",
                 "tianshu.extension", "adapter-owned",
                 "egon.internal.extension", "application-owned"
         ))).containsExactly(
+                Map.entry("catalog.category", "application-defined"),
                 Map.entry("egon.internal.extension", "application-owned"),
-                Map.entry("tianshu.extension", "adapter-owned"),
-                Map.entry("yuheng.weight", "adapter-defined")
+                Map.entry("tianshu.extension", "adapter-owned")
         );
+    }
+
+    @Test
+    void logicalSnapshotOrderAndContentsDoNotDependOnSourceMapOrder() {
+        Map<String, String> configured = new LinkedHashMap<>();
+        configured.put("catalog.version", "1");
+        configured.put("catalog.owner", "identity-team");
+        RpcProviderMetadataMerger merger = new RpcProviderMetadataMerger(List.of());
+        Map<String, String> snapshot = merger.merge(SERVICE, configured);
+        configured.put("catalog.owner", "changed-after-snapshot");
+
+        assertThat(snapshot.entrySet()).containsExactly(
+                Map.entry("catalog.owner", "identity-team"),
+                Map.entry("catalog.version", "1"));
+        assertThat(snapshot).isEqualTo(merger.merge(SERVICE, Map.of(
+                "catalog.owner", "identity-team", "catalog.version", "1")));
     }
 
     @Test

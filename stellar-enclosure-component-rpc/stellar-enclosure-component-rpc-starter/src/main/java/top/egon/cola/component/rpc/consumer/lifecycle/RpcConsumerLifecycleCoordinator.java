@@ -1,11 +1,10 @@
 package top.egon.cola.component.rpc.consumer.lifecycle;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.SmartLifecycle;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
-import top.egon.cola.component.rpc.consumer.gateway.RpcConsumerGatewayManager;
-import top.egon.cola.component.rpc.consumer.provider.RpcConsumerProviderManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,13 +12,12 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Owns deterministic Consumer start, admission gate and reverse-order drain. */
+@Slf4j
 public final class RpcConsumerLifecycleCoordinator
         implements SmartLifecycle, AutoCloseable {
 
     private final Object monitor = new Object();
     private final RpcConsumerChannelPool pool;
-    private final RpcConsumerGatewayManager gatewayManager;
-    private final RpcConsumerProviderManager providerManager;
     private final List<? extends AutoCloseable> closeHooks;
 
     private volatile RpcConsumerRuntimeState state = RpcConsumerRuntimeState.NEW;
@@ -28,12 +26,8 @@ public final class RpcConsumerLifecycleCoordinator
 
     public RpcConsumerLifecycleCoordinator(
             RpcConsumerChannelPool pool,
-            RpcConsumerGatewayManager gatewayManager,
-            RpcConsumerProviderManager providerManager,
             List<? extends AutoCloseable> closeHooks) {
         this.pool = Objects.requireNonNull(pool, "pool");
-        this.gatewayManager = gatewayManager;
-        this.providerManager = providerManager;
         this.closeHooks = closeHooks == null ? List.of() : List.copyOf(closeHooks);
     }
 
@@ -51,19 +45,8 @@ public final class RpcConsumerLifecycleCoordinator
             state = RpcConsumerRuntimeState.STARTING;
             try {
                 pool.start();
-                if (gatewayManager != null) {
-                    gatewayManager.start();
-                }
-                if (providerManager != null) {
-                    providerManager.start();
-                }
-                // Calling isRunning makes a manager startup fault observable while
-                // an empty optional demand remains a valid degraded runtime.
-                if (gatewayManager != null) {
-                    gatewayManager.isRunning();
-                }
-                if (providerManager != null) {
-                    providerManager.isRunning();
+                if (!pool.isRunning()) {
+                    throw unavailable("RPC channel pool is closed");
                 }
                 state = RpcConsumerRuntimeState.READY;
             } catch (RuntimeException exception) {
@@ -116,8 +99,6 @@ public final class RpcConsumerLifecycleCoordinator
             }
             state = RpcConsumerRuntimeState.DRAINING;
             closeHooks();
-            stopQuietly(gatewayManager);
-            stopQuietly(providerManager);
             pool.close();
             state = RpcConsumerRuntimeState.STOPPED;
             runOnce(callback);
@@ -131,8 +112,6 @@ public final class RpcConsumerLifecycleCoordinator
 
     private void cleanupAfterFailure() {
         closeHooks();
-        stopQuietly(gatewayManager);
-        stopQuietly(providerManager);
         pool.close();
     }
 
@@ -142,20 +121,9 @@ public final class RpcConsumerLifecycleCoordinator
         for (AutoCloseable hook : reverse) {
             try {
                 hook.close();
-            } catch (Exception ignored) {
-                // Preserve the primary startup/stop transition and continue cleanup.
+            } catch (Exception failure) {
+                log.warn("RPC consumer cleanup hook failed ({})", failure.getClass().getSimpleName());
             }
-        }
-    }
-
-    private void stopQuietly(SmartLifecycle lifecycle) {
-        if (lifecycle == null) {
-            return;
-        }
-        try {
-            lifecycle.stop();
-        } catch (RuntimeException ignored) {
-            // Cleanup must not mask the primary lifecycle result.
         }
     }
 

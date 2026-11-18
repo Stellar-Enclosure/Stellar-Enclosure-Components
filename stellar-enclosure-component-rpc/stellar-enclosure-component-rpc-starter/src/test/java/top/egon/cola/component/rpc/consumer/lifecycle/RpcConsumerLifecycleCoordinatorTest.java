@@ -1,10 +1,7 @@
 package top.egon.cola.component.rpc.consumer.lifecycle;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.context.SmartLifecycle;
 import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
-import top.egon.cola.component.rpc.consumer.gateway.RpcConsumerGatewayManager;
-import top.egon.cola.component.rpc.consumer.provider.RpcConsumerProviderManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,11 +18,10 @@ class RpcConsumerLifecycleCoordinatorTest {
     @Test
     void startsInOrderAndStopsInReverseOwnershipOrderOnce() {
         RpcConsumerChannelPool pool = mock(RpcConsumerChannelPool.class);
-        RpcConsumerGatewayManager gateway = mock(RpcConsumerGatewayManager.class);
-        RpcConsumerProviderManager provider = mock(RpcConsumerProviderManager.class);
+        when(pool.isRunning()).thenReturn(true);
         List<String> events = new ArrayList<>();
         RpcConsumerLifecycleCoordinator coordinator = new RpcConsumerLifecycleCoordinator(
-                pool, gateway, provider, List.of(() -> events.add("hook.close")));
+                pool, List.of(() -> events.add("strategy.close"), () -> events.add("cache.close")));
 
         coordinator.start();
         assertThat(coordinator.state()).isEqualTo(RpcConsumerRuntimeState.READY);
@@ -37,20 +33,17 @@ class RpcConsumerLifecycleCoordinatorTest {
         assertThat(coordinator.state()).isEqualTo(RpcConsumerRuntimeState.STOPPED);
         assertThat(callbacks).hasValue(1);
         verify(pool).start();
-        verify(gateway).start();
-        verify(provider).start();
+        assertThat(events).containsExactly("cache.close", "strategy.close");
         verify(pool).close();
     }
 
     @Test
     void startupFailureClosesAlreadyStartedResourcesAndRejectsCalls() {
         RpcConsumerChannelPool pool = mock(RpcConsumerChannelPool.class);
-        RpcConsumerGatewayManager gateway = mock(RpcConsumerGatewayManager.class);
-        RpcConsumerProviderManager provider = mock(RpcConsumerProviderManager.class);
-        RuntimeException failure = new RuntimeException("discovery");
-        when(gateway.isRunning()).thenThrow(failure);
+        RuntimeException failure = new RuntimeException("pool-start");
+        when(pool.isRunning()).thenThrow(failure);
         RpcConsumerLifecycleCoordinator coordinator = new RpcConsumerLifecycleCoordinator(
-                pool, gateway, provider, List.of());
+                pool, List.of());
 
         assertThatThrownBy(coordinator::start).isSameAs(failure);
         assertThat(coordinator.state()).isEqualTo(RpcConsumerRuntimeState.FAILED);

@@ -1,196 +1,162 @@
 package top.egon.cola.component.rpc.consumer.reference;
 
+import jakarta.annotation.PostConstruct;
+import jakarta.validation.constraints.NotNull;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationContext;
+import org.springframework.lang.Nullable;
+import org.springframework.validation.annotation.Validated;
+import top.egon.cola.component.rpc.annotation.EgonRpcMethod;
 import top.egon.cola.component.rpc.annotation.EgonRpcReference;
 import top.egon.cola.component.rpc.annotation.EgonRpcService;
 import top.egon.cola.component.rpc.annotation.EgonServiceMeta;
-import top.egon.cola.component.rpc.annotation.FailStrategy;
-import top.egon.cola.component.rpc.annotation.LoadBalance;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.config.EgonRpcProperties;
-import top.egon.cola.component.rpc.consumer.loadbalance.RpcLoadBalanceKeyResolver;
-import top.egon.cola.component.rpc.consumer.provider.RpcProviderQuery;
-import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.descriptor.RpcMethodDescriptor;
+import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-/** Resolves annotations and trusted named beans once at injection time. */
-public final class RpcReferenceDefinitionResolver {
-
-    private final EgonRpcProperties.Consumer consumer;
-    private final RpcProcessIdentity processIdentity;
+/** Compiles trusted deployment bindings while retaining native descriptor identity. */
+@Slf4j
+@Validated
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
+public class RpcReferenceDefinitionResolver {
+    @NonNull
+    @Qualifier("egon.cola.component.rpc-top.egon.cola.component.rpc.config.EgonRpcProperties")
+    private final EgonRpcProperties properties;
+    @Nullable
+    @Qualifier("applicationContext")
     private final ApplicationContext applicationContext;
+    private volatile Map<String, RpcServiceTargetVO> targets;
+    private long timeoutCeilingMs;
 
-    public RpcReferenceDefinitionResolver(
-            EgonRpcProperties properties,
-            RpcProcessIdentity processIdentity) {
-        this(properties, processIdentity, null);
+    public RpcReferenceDefinitionResolver(EgonRpcProperties properties) {
+        this(properties, null);
     }
 
-    public RpcReferenceDefinitionResolver(
-            EgonRpcProperties properties,
-            RpcProcessIdentity processIdentity,
-            ApplicationContext applicationContext) {
-        if (properties == null || processIdentity == null) {
-            throw invalid("RPC reference resolver properties and process identity are required");
+    @PostConstruct
+    public synchronized void initialize() {
+        if (targets != null) {
+            return;
         }
-        this.consumer = properties.getConsumer();
-        this.consumer.validateSharedSettings();
-        this.processIdentity = processIdentity;
-        this.applicationContext = applicationContext;
+        var consumer = properties.getConsumer();
+        if (consumer == null || consumer.getBindings() == null || consumer.getDefaultTimeoutMs() <= 0) {
+            throw invalid("RPC consumer bindings and a positive timeout are required");
+        }
+        Map<String, RpcServiceTargetVO> configured = new LinkedHashMap<>();
+        for (var entry : consumer.getBindings().entrySet()) {
+            var binding = entry.getValue();
+            if (binding == null) {
+                throw invalid("RPC reference deployment binding is invalid");
+            }
+            try {
+                configured.put(entry.getKey(), new RpcServiceTargetVO(entry.getKey(), binding.getVersion(),
+                        binding.getNamespace(), binding.getService(), binding.getPort(), binding.getMethods()));
+            } catch (IllegalArgumentException exception) {
+                throw invalid("RPC reference deployment binding is invalid");
+            }
+        }
+        timeoutCeilingMs = consumer.getDefaultTimeoutMs();
+        targets = Map.copyOf(configured);
     }
 
-    public RpcReferenceDefinition resolve(
-            Field field,
-            RpcContractDescriptor descriptor) {
-        Objects.requireNonNull(field, "field");
-        Objects.requireNonNull(descriptor, "descriptor");
-        if (!descriptor.contractType().isAssignableFrom(field.getType())
-                && !field.getType().isAssignableFrom(descriptor.contractType())) {
+    public long defaultTimeoutMs() {
+        initialize();
+        return timeoutCeilingMs;
+    }
+
+    public RpcReferenceDefinition resolve(@NotNull Field field, @NotNull RpcContractDescriptor descriptor) {
+        if (field == null || descriptor == null) {
+            throw invalid("RPC reference field and descriptor are required");
+        }
+        if (!field.getType().equals(descriptor.contractType())) {
             throw invalid("RPC reference field type does not match contract");
         }
         EgonRpcReference reference = field.getAnnotation(EgonRpcReference.class);
         if (reference == null) {
             throw invalid("RPC reference field must declare @EgonRpcReference");
         }
-        RpcReferenceMode mode = reference.mode();
-        validateMode(reference, mode);
+        if (!reference.group().isEmpty() && !reference.group().equals(descriptor.group())
+                || !reference.version().isEmpty() && !reference.version().equals(descriptor.version())) {
+            throw invalid("RPC reference logical identity does not match its native contract");
+        }
+        RpcServiceIdentity identity = RpcServiceIdentity.from(descriptor);
+        Set<String> methods = descriptor.methods().stream().map(RpcMethodDescriptor::fullMethodName).collect(Collectors.toUnmodifiableSet());
+        RpcServiceTargetVO target = resolve(annotationBindingId(reference.bindingId()), identity, methods).target();
         EgonRpcService service = descriptor.contractType().getAnnotation(EgonRpcService.class);
         EgonServiceMeta typeMeta = descriptor.contractType().getAnnotation(EgonServiceMeta.class);
-        Map<java.lang.reflect.Method, RpcReferencePolicy> policies = new LinkedHashMap<>();
+        Map<Method, RpcReferencePolicy> policies = new LinkedHashMap<>();
         for (RpcMethodDescriptor method : descriptor.methods()) {
-            policies.put(method.javaMethod(), resolvePolicy(
-                    method.javaMethod().getAnnotation(EgonServiceMeta.class),
-                    typeMeta,
-                    service,
-                    reference,
-                    field,
-                    descriptor));
+            var methodMeta = method.javaMethod().getAnnotation(EgonServiceMeta.class);
+            var rpcMethod = method.javaMethod().getAnnotation(EgonRpcMethod.class);
+            rejectRetries(reference.retries(), service == null ? 0 : service.retries(), typeMeta == null ? 0 : typeMeta.retries(),
+                    methodMeta == null ? 0 : methodMeta.retries(), rpcMethod == null ? 0 : rpcMethod.retries());
+            policies.put(method.javaMethod(), new RpcReferencePolicy(timeout(
+                    defaultTimeoutMs(), reference.timeoutMs(), service == null ? -1 : service.timeoutMs(),
+                    typeMeta == null ? -1 : typeMeta.timeoutMs(), methodMeta == null ? -1 : methodMeta.timeoutMs(),
+                    rpcMethod == null ? -1 : rpcMethod.timeoutMs())));
         }
-        RpcProviderQuery directQuery = mode == RpcReferenceMode.DIRECT
-                ? directQuery(reference, descriptor) : null;
-        return new RpcReferenceDefinition(
-                mode,
-                new top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity(
-                        descriptor.serviceName(),
-                        effectiveGroup(reference, descriptor.group()),
-                        effectiveVersion(reference, descriptor.version())),
-                directQuery,
-                policies);
+        return new RpcReferenceDefinition(target, identity, policies);
     }
 
-    private RpcReferencePolicy resolvePolicy(
-            EgonServiceMeta methodMeta,
-            EgonServiceMeta typeMeta,
-            EgonRpcService service,
-            EgonRpcReference reference,
-            Field field,
-            RpcContractDescriptor descriptor) {
-        long timeout = timeout(
-                methodMeta == null ? -1 : methodMeta.timeoutMs(),
-                reference.timeoutMs(),
-                service == null ? -1 : service.timeoutMs(),
-                typeMeta == null ? -1 : typeMeta.timeoutMs(),
-                consumer.getDefaultTimeoutMs());
-        int retries = retries(
-                methodMeta == null ? -1 : methodMeta.retries(),
-                reference.retries(),
-                service == null ? -1 : service.retries(),
-                typeMeta == null ? -1 : typeMeta.retries());
-        LoadBalance loadBalance = firstLoadBalance(
-                methodMeta == null ? LoadBalance.INHERIT : methodMeta.loadBalance(),
-                reference.loadBalance(),
-                service == null ? LoadBalance.INHERIT : service.loadBalance(),
-                typeMeta == null ? LoadBalance.INHERIT : typeMeta.loadBalance(),
-                consumer.getDefaultLoadBalance());
-        String fallbackBean = reference.fallbackBean();
-        FailStrategy failStrategy = reference.failStrategy();
-        if (failStrategy == FailStrategy.INHERIT) {
-            failStrategy = FailStrategy.FAIL_CLOSED;
+    public RpcReferenceDefinition resolve(String bindingId, @NotNull RpcServiceIdentity identity, @NotNull Set<String> fullMethods) {
+        initialize();
+        if (identity == null || fullMethods == null || fullMethods.isEmpty()
+                || identity.serviceName() == null || !logicalPart(identity.group()) || !logicalPart(identity.version())) {
+            throw invalid("RPC logical identity and methods are required");
         }
-        validateFallback(field, descriptor, fallbackBean, failStrategy);
-        String resolverBean = reference.loadBalanceKeyResolver();
-        RpcLoadBalanceKeyResolver keyResolver = resolveKeyResolver(
-                field, resolverBean, loadBalance);
-        return new RpcReferencePolicy(
-                timeout, retries, loadBalance, failStrategy, fallbackBean, keyResolver);
-    }
-
-    private RpcProviderQuery directQuery(
-            EgonRpcReference reference,
-            RpcContractDescriptor descriptor) {
-        String env = blank(reference.env()) ? processIdentity.env() : reference.env().trim();
-        String group = effectiveGroup(reference, descriptor.group());
-        String version = effectiveVersion(reference, descriptor.version());
-        return new RpcProviderQuery(
-                directIdentity(reference.bizCode(), "bizCode"),
-                directIdentity(reference.appCode(), "appCode"),
-                env,
-                descriptor.serviceName(),
-                group,
-                version,
-                "grpc");
-    }
-
-    private String directIdentity(String value, String name) {
-        if (!value.contains("${")) {
-            return value;
-        }
-        if (applicationContext == null) {
-            throw invalid("DIRECT RPC reference " + name + " placeholder requires an application context");
-        }
-        String resolved;
-        try {
-            resolved = applicationContext.getEnvironment().resolveRequiredPlaceholders(value);
-        } catch (IllegalArgumentException exception) {
-            throw invalid("DIRECT RPC reference " + name + " placeholder is unresolved", exception);
-        }
-        if (blank(resolved) || resolved.contains("${")) {
-            throw invalid("DIRECT RPC reference " + name + " must resolve to a non-blank identity");
-        }
-        return resolved;
-    }
-
-    private String effectiveGroup(
-            EgonRpcReference reference,
-            String fallback) {
-        String override = reference.group();
-        return blank(override) ? fallback : override.trim();
-    }
-
-    private String effectiveVersion(
-            EgonRpcReference reference,
-            String fallback) {
-        String override = reference.version();
-        return blank(override) ? fallback : override.trim();
-    }
-
-    private void validateMode(EgonRpcReference reference, RpcReferenceMode mode) {
-        if (mode == null) {
-            throw invalid("RPC reference mode is required");
-        }
-        if (mode == RpcReferenceMode.DIRECT) {
-            if (blank(reference.bizCode()) || blank(reference.appCode())) {
-                throw invalid("DIRECT RPC reference requires bizCode and appCode");
+        for (String method : fullMethods) {
+            if (!RpcServiceTargetVO.isNativeMethodName(method) || !method.startsWith(identity.serviceName() + "/")) {
+                throw invalid("RPC method does not match the native service identity");
             }
-            return;
         }
-        if (mode == RpcReferenceMode.GATEWAY
-                && (!blank(reference.bizCode())
-                || !blank(reference.appCode())
-                || !blank(reference.env()))) {
-            throw invalid("bizCode, appCode and env are only valid for DIRECT references");
+        if (!RpcServiceTargetVO.isBindingId(bindingId)) {
+            throw invalid("RPC reference requires a valid deployment binding ID");
         }
+        RpcServiceTargetVO target = targets.get(bindingId);
+        if (target == null) {
+            throw invalid("RPC reference binding is not configured");
+        }
+        if (!target.methods().containsAll(fullMethods)) {
+            throw invalid("RPC method is not approved by the deployment binding");
+        }
+        return new RpcReferenceDefinition(target, identity, Map.of());
     }
 
-    private long timeout(long... values) {
-        long resolved = Long.MAX_VALUE;
+    private String annotationBindingId(String value) {
+        if (value != null && value.contains("${")) {
+            if (applicationContext == null) {
+                throw invalid("RPC binding placeholder requires an application context");
+            }
+            try {
+                value = applicationContext.getEnvironment().resolveRequiredPlaceholders(value);
+            } catch (IllegalArgumentException exception) {
+                throw invalid("RPC binding placeholder is unresolved");
+            }
+        }
+        if (!RpcServiceTargetVO.isBindingId(value)) {
+            throw invalid("RPC reference requires a valid deployment binding ID");
+        }
+        return value;
+    }
+
+    private static long timeout(long processDefault, long... values) {
+        if (processDefault <= 0) {
+            throw invalid("RPC consumer timeout must be positive");
+        }
+        long resolved = processDefault;
         for (long value : values) {
             if (value == -1) {
                 continue;
@@ -200,100 +166,22 @@ public final class RpcReferenceDefinitionResolver {
             }
             resolved = Math.min(resolved, value);
         }
-        if (resolved == Long.MAX_VALUE) {
-            throw invalid("RPC reference timeout is not configured");
-        }
         return resolved;
     }
 
-    private int retries(int... values) {
-        int resolved = consumer.getMaxRetries();
+    private static void rejectRetries(int... values) {
         for (int value : values) {
-            if (value == -1) {
-                continue;
-            }
-            if (value < 0 || value > consumer.getMaxRetries()) {
-                throw invalid("RPC reference retries exceed consumer max-retries");
-            }
-            resolved = value;
-            break;
-        }
-        return resolved;
-    }
-
-    private LoadBalance firstLoadBalance(LoadBalance... values) {
-        for (LoadBalance value : values) {
-            if (value != null && value != LoadBalance.INHERIT) {
-                return value;
-            }
-        }
-        throw invalid("RPC reference load balance is not configured");
-    }
-
-    private RpcLoadBalanceKeyResolver resolveKeyResolver(
-            Field field,
-            String beanName,
-            LoadBalance loadBalance) {
-        if (loadBalance != LoadBalance.CONSISTENT_HASH && !blank(beanName)) {
-            throw invalid("load-balance key resolver is only valid for CONSISTENT_HASH");
-        }
-        if (loadBalance == LoadBalance.CONSISTENT_HASH) {
-            if (blank(beanName) || applicationContext == null) {
-                throw invalid("CONSISTENT_HASH requires a named resolver bean for "
-                        + field.getName());
-            }
-            try {
-                Object bean = applicationContext.getBean(beanName.trim());
-                if (!(bean instanceof RpcLoadBalanceKeyResolver resolver)) {
-                    throw invalid("resolver bean has wrong type for " + field.getName());
-                }
-                return resolver;
-            } catch (EgonRpcException exception) {
-                throw exception;
-            } catch (RuntimeException exception) {
-                throw invalid("resolver bean is unavailable for " + field.getName(), exception);
-            }
-        }
-        return null;
-    }
-
-    private void validateFallback(
-            Field field,
-            RpcContractDescriptor descriptor,
-            String beanName,
-            FailStrategy failStrategy) {
-        if (failStrategy == FailStrategy.LOCAL_FALLBACK && blank(beanName)) {
-            throw invalid("LOCAL_FALLBACK requires fallback bean for " + field.getName());
-        }
-        if (failStrategy != FailStrategy.LOCAL_FALLBACK && !blank(beanName)) {
-            throw invalid("fallback bean is only valid for LOCAL_FALLBACK");
-        }
-        if (!blank(beanName)) {
-            if (applicationContext == null) {
-                throw invalid("fallback bean is unavailable for " + field.getName());
-            }
-            try {
-                Object bean = applicationContext.getBean(beanName.trim());
-                if (!descriptor.contractType().isInstance(bean)) {
-                    throw invalid("fallback bean has wrong type for " + field.getName());
-                }
-            } catch (EgonRpcException exception) {
-                throw exception;
-            } catch (RuntimeException exception) {
-                throw invalid("fallback bean is unavailable for " + field.getName(), exception);
+            if (value != 0 && value != -1) {
+                throw invalid("RPC retries require explicit method approval");
             }
         }
     }
 
-    private boolean blank(String value) {
-        return value == null || value.isBlank();
+    private static boolean logicalPart(String value) {
+        return value != null && value.matches("[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}");
     }
 
-    private EgonRpcException invalid(String message) {
+    private static EgonRpcException invalid(String message) {
         return new EgonRpcException(EgonRpcErrorCode.RPC_INVALID_CONTRACT, message);
-    }
-
-    private EgonRpcException invalid(String message, Throwable cause) {
-        return new EgonRpcException(EgonRpcErrorCode.RPC_INVALID_CONTRACT, message, cause);
     }
 }

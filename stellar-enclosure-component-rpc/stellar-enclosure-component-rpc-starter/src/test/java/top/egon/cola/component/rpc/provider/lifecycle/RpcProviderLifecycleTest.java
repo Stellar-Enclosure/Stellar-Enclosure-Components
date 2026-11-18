@@ -16,37 +16,34 @@ import io.grpc.stub.ServerCalls;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.test.util.ReflectionTestUtils;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.rpc.config.EgonRpcProperties;
-import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
-import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
-import top.egon.cola.component.rpc.provider.server.RpcProviderServerInterceptor;
-import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
+import top.egon.cola.component.rpc.config.EgonRpcProperties;
+import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
 import top.egon.cola.component.rpc.provider.binding.RpcProviderBeanScanner;
 import top.egon.cola.component.rpc.provider.binding.RpcProviderMethodRegistry;
-import top.egon.cola.component.rpc.provider.metadata.RpcProviderMetadataMerger;
-import top.egon.cola.component.rpc.provider.registration.RpcLeaseOperationResult;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderLease;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderLeaseIdentity;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderLeaseManager;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistration;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistrationMode;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistry;
 import top.egon.cola.component.rpc.provider.server.RpcProviderServerFactory;
+import top.egon.cola.component.rpc.provider.server.RpcProviderServerInterceptor;
 import top.egon.cola.component.rpc.provider.server.RpcServerServiceDefinitionFactory;
 import top.egon.cola.component.rpc.support.RpcProviderTestFixtures;
 
-import java.time.Instant;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class RpcProviderLifecycleTest {
 
@@ -54,322 +51,211 @@ class RpcProviderLifecycleTest {
             new ValidationUtils(Validation.buildDefaultValidatorFactory().getValidator());
 
     @Test
+    void rejectsTheReservedGammaFallbackPortBeforeBinding() {
+        RpcProviderServerFactory factory = new RpcProviderServerFactory();
+        assertThatThrownBy(() -> factory.create("127.0.0.1", 19099, List.of(), List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("reserved GAMMA fallback port");
+    }
+
+    @Test
     void serverFactoryExecutesInterceptorsInDeclaredOrder() throws Exception {
         List<String> order = new ArrayList<>();
-        @SuppressWarnings("unchecked")
-        MethodDescriptor<Message, Message> method =
-                (MethodDescriptor<Message, Message>)
-                        (MethodDescriptor<?, ?>) new RpcContractValidator(VALIDATION_UTILS)
-                                .validate(
-                                        RpcProviderTestFixtures.EchoContract.class
-                                )
-                                .methods()
-                                .getFirst()
-                                .grpcMethod();
-        ServerServiceDefinition service = ServerServiceDefinition.builder(
-                        method.getServiceName()
-                )
-                .addMethod(method, ServerCalls.asyncUnaryCall(
-                        (request, observer) -> {
-                            observer.onNext(request);
-                            observer.onCompleted();
-                        }
-                ))
+        MethodDescriptor<Message, Message> method = echoMethod();
+        ServerServiceDefinition service = ServerServiceDefinition.builder(method.getServiceName())
+                .addMethod(method, ServerCalls.asyncUnaryCall((request, observer) -> {
+                    observer.onNext(request);
+                    observer.onCompleted();
+                }))
                 .build();
-        ServerInterceptor first = interceptor("first", order);
-        ServerInterceptor second = interceptor("second", order);
         Server server = new RpcProviderServerFactory().create(
-                "127.0.0.1",
-                0,
-                List.of(service),
-                List.of(first, second)
+                "127.0.0.1", 0, List.of(service),
+                List.of(interceptor("first", order), interceptor("second", order))
         ).start();
-        ManagedChannel channel = ManagedChannelBuilder.forAddress(
-                        "127.0.0.1",
-                        server.getPort()
-                )
-                .usePlaintext()
-                .build();
+        ManagedChannel channel = plaintextChannel(server.getPort());
         try {
             Message response = ClientCalls.blockingUnaryCall(
-                    channel,
-                    method,
-                    CallOptions.DEFAULT,
-                    StringValue.of("hello")
-            );
+                    channel, method, CallOptions.DEFAULT.withDeadlineAfter(5, TimeUnit.SECONDS),
+                    StringValue.of("hello"));
 
             assertThat(response).isEqualTo(StringValue.of("hello"));
             assertThat(order).containsExactly("first", "second");
         } finally {
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
-            server.shutdownNow().awaitTermination();
+            server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }
 
     @Test
-    void bindsRegistersAndDeregistersThroughTheNeutralRegistry() {
-        RecordingRegistry registry = new RecordingRegistry();
+    void productionH2cStartsWithoutCertificatesOrRegistryAndDrainsOnce() throws Exception {
         try (AnnotationConfigApplicationContext context = providerContext()) {
-            RpcProviderLifecycle lifecycle = lifecycle(
-                    context,
-                    registry,
-                    configuredProperties()
-            );
-
-            lifecycle.start();
-
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.READY);
-            assertThat(lifecycle.boundPort()).isPositive();
-            assertThat(registry.registration.port())
-                    .isEqualTo(lifecycle.boundPort());
-            assertThat(registry.registration.serviceIdentity())
-                    .isEqualTo(new RpcServiceIdentity(
-                            "egon.rpc.fixture.v1.UnaryFixtureService",
-                            "test",
-                            "1.0.0"
-                    ));
-            assertThat(registry.registration.processIdentity().env())
-                    .isEqualTo("test");
-            assertThat(registry.registration.processIdentity().instanceId())
-                    .isEqualTo("provider-process");
-            assertThat(registry.registration.metadata())
-                    .containsEntry("egon.rpc.transport", "grpc")
-                    .containsEntry("egon.rpc.serialization", "protobuf")
-                    .containsEntry("egon.rpc.runtime-version", "test");
-
-            lifecycle.stop();
-
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.STOPPED);
-            assertThat(registry.events)
-                    .containsExactly("register", "deregister");
-        }
-    }
-
-    @Test
-    void disabledRegistrationMakesProvidersLocallyAvailableWithoutRegistry() {
-        EgonRpcProperties properties = configuredProperties();
-        properties.getProvider().setRegistrationMode(
-                RpcProviderRegistrationMode.DISABLED
-        );
-        try (AnnotationConfigApplicationContext context = providerContext()) {
-            RpcProviderAvailabilityRegistry availability =
-                    new RpcProviderAvailabilityRegistry();
+            RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
             RpcProviderMethodRegistry methods = scan(context);
-            RpcProviderLifecycle lifecycle = new RpcProviderLifecycle(
-                    methods,
-                    new RpcServerServiceDefinitionFactory(availability),
-                    new RpcProviderServerFactory(),
-                    null,
-                    availability,
-                    List.of(new RpcProviderServerInterceptor()),
-                    properties,
-                    processIdentity()
-            );
-
+            RpcProviderLifecycle lifecycle = lifecycle(methods, availability,
+                    new RpcProviderServerFactory(), configuredProperties());
             lifecycle.start();
+            ManagedChannel channel = plaintextChannel(lifecycle.boundPort());
+            try {
+                lifecycle.start();
+                assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.READY);
+                assertThat(lifecycle.isRunning()).isTrue();
+                assertAvailable(methods, availability, true);
+                Message response = ClientCalls.blockingUnaryCall(
+                        channel, echoMethod(),
+                        CallOptions.DEFAULT.withDeadlineAfter(5, TimeUnit.SECONDS),
+                        StringValue.of("hello"));
+                assertThat(response).isEqualTo(StringValue.of("provider:hello"));
 
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.READY);
+                AtomicInteger callbacks = new AtomicInteger();
+                lifecycle.stop(callbacks::incrementAndGet);
+                lifecycle.stop(callbacks::incrementAndGet);
 
-            assertThat(methods.providers()).allSatisfy(binding ->
-                    assertThat(availability.isAvailable(
-                            binding.serviceIdentity()
-                    )).isTrue()
-            );
-
-            AtomicInteger callbacks = new AtomicInteger();
-            lifecycle.stop(callbacks::incrementAndGet);
-            lifecycle.stop(callbacks::incrementAndGet);
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.STOPPED);
-            assertThat(callbacks).hasValue(1);
-            assertThat(methods.providers()).allSatisfy(binding ->
-                    assertThat(availability.isAvailable(
-                            binding.serviceIdentity()
-                    )).isFalse()
-            );
+                assertThat(callbacks).hasValue(1);
+                assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.STOPPED);
+                assertThat(lifecycle.isRunning()).isFalse();
+                assertThat(lifecycle.boundPort()).isEqualTo(-1);
+                assertAvailable(methods, availability, false);
+                assertThatThrownBy(lifecycle::start).isInstanceOf(EgonRpcException.class)
+                        .hasMessageContaining("not restartable");
+            } finally {
+                channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+                lifecycle.stop();
+            }
         }
     }
 
     @Test
-    void requiredRegistrationFailsFastWhenRegistrySpiIsMissing() {
+    void failedListenerStartClosesPreparedServerAndLeavesNoAvailability() throws Exception {
         try (AnnotationConfigApplicationContext context = providerContext()) {
-            RpcProviderAvailabilityRegistry availability =
-                    new RpcProviderAvailabilityRegistry();
-            RpcProviderLifecycle lifecycle = new RpcProviderLifecycle(
-                    scan(context),
-                    new RpcServerServiceDefinitionFactory(availability),
-                    new RpcProviderServerFactory(),
-                    null,
-                    availability,
-                    List.of(new RpcProviderServerInterceptor()),
-                    configuredProperties(),
-                    processIdentity()
-            );
+            RpcProviderMethodRegistry methods = scan(context);
+            RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
+            Server server = mock(Server.class);
+            when(server.start()).thenThrow(new IOException("bind failed"));
+            RpcProviderLifecycle lifecycle = lifecycle(methods, availability,
+                    factory(server), configuredProperties());
 
-            assertThatThrownBy(lifecycle::start)
-                    .isInstanceOf(EgonRpcException.class)
-                    .hasMessageContaining("RpcProviderRegistry")
-                    .hasMessageContaining("registration-mode=disabled");
-            assertThat(lifecycle.isRunning()).isFalse();
+            assertThatThrownBy(lifecycle::start).isInstanceOf(EgonRpcException.class)
+                    .hasRootCauseMessage("bind failed");
+
             assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.FAILED);
+            assertThat(lifecycle.isRunning()).isFalse();
+            assertThat(lifecycle.boundPort()).isEqualTo(-1);
+            assertAvailable(methods, availability, false);
+            verify(server).shutdownNow();
+            assertThatThrownBy(lifecycle::start).isInstanceOf(EgonRpcException.class)
+                    .hasMessageContaining("not restartable");
         }
     }
 
     @Test
-    void nonFailFastRegistrationRecoversFromDegradedOnHeartbeat() {
-        RecordingRegistry registry = new RecordingRegistry();
-        registry.failRegistration = true;
-        EgonRpcProperties properties = configuredProperties();
-        properties.getProvider().setRegistrationFailFast(false);
+    void drainClosesAvailabilityBeforeShutdownAndForcesAfterConfiguredTimeout() throws Exception {
         try (AnnotationConfigApplicationContext context = providerContext()) {
-            RpcProviderLifecycle lifecycle = lifecycle(
-                    context,
-                    registry,
-                    properties
-            );
-
+            RpcProviderMethodRegistry methods = scan(context);
+            RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
+            Server server = mock(Server.class);
+            when(server.start()).thenReturn(server);
+            when(server.awaitTermination(100, TimeUnit.MILLISECONDS)).thenReturn(false);
+            RpcProviderLifecycle lifecycle = lifecycle(methods, availability,
+                    factory(server), configuredProperties());
             lifecycle.start();
+            doAnswer(invocation -> {
+                assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.DRAINING);
+                assertThat(lifecycle.isRunning()).isFalse();
+                assertAvailable(methods, availability, false);
+                return server;
+            }).when(server).shutdown();
 
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.DEGRADED);
-            assertThat(lifecycle.isRunning()).isTrue();
-
-            registry.failRegistration = false;
-            ReflectionTestUtils.invokeMethod(lifecycle, "heartbeatAndRefreshState");
-
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.READY);
             lifecycle.stop();
+
+            var order = inOrder(server);
+            order.verify(server).shutdown();
+            order.verify(server).awaitTermination(100, TimeUnit.MILLISECONDS);
+            order.verify(server).shutdownNow();
+            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.STOPPED);
         }
     }
 
     @Test
-    void failsFastForUnroutableAdvertisedHost() {
-        EgonRpcProperties properties = configuredProperties();
-        properties.getProvider().setAdvertisedHost("0.0.0.0");
+    void interruptedDrainRestoresInterruptAndForcesShutdown() throws Exception {
         try (AnnotationConfigApplicationContext context = providerContext()) {
-            RpcProviderLifecycle lifecycle = lifecycle(
-                    context,
-                    new RecordingRegistry(),
-                    properties
-            );
-
-            assertThatThrownBy(lifecycle::start)
-                    .isInstanceOf(EgonRpcException.class);
-            assertThat(lifecycle.isRunning()).isFalse();
-            assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.FAILED);
+            RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
+            Server server = mock(Server.class);
+            when(server.start()).thenReturn(server);
+            when(server.awaitTermination(100, TimeUnit.MILLISECONDS))
+                    .thenThrow(new InterruptedException("interrupted"));
+            RpcProviderLifecycle lifecycle = lifecycle(scan(context), availability,
+                    factory(server), configuredProperties());
+            lifecycle.start();
+            try {
+                lifecycle.stop();
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+                verify(server).shutdownNow();
+                assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.STOPPED);
+            } finally {
+                Thread.interrupted();
+            }
         }
     }
 
     @Test
     void preservesNoProviderErrorSemantics() {
-        RecordingRegistry registry = new RecordingRegistry();
-        EgonRpcProperties properties = configuredProperties();
-        RpcProviderAvailabilityRegistry availability =
-                new RpcProviderAvailabilityRegistry();
-        RpcProcessIdentity identity = processIdentity();
-        RpcProviderLifecycle lifecycle = new RpcProviderLifecycle(
-                new RpcProviderMethodRegistry(List.of()),
-                new RpcServerServiceDefinitionFactory(availability),
-                new RpcProviderServerFactory(),
-                leaseManager(registry, availability, properties, identity),
-                availability,
-                List.of(new RpcProviderServerInterceptor()),
-                properties,
-                identity
-        );
+        RpcProviderLifecycle lifecycle = lifecycle(new RpcProviderMethodRegistry(List.of()),
+                new RpcProviderAvailabilityRegistry(), new RpcProviderServerFactory(),
+                configuredProperties());
 
-        assertThatThrownBy(lifecycle::start)
-                .isInstanceOf(EgonRpcException.class)
+        assertThatThrownBy(lifecycle::start).isInstanceOf(EgonRpcException.class)
                 .hasMessageContaining("no RPC Provider bean");
-        assertThat(registry.events).isEmpty();
         assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.FAILED);
+        assertThat(lifecycle.isRunning()).isFalse();
     }
 
     @Test
-    void contributorFailureStopsProviderWithoutRegisteringAnyLease() {
-        RecordingRegistry registry = new RecordingRegistry();
+    void invalidListenerSettingsFailBeforeCreatingServer() {
         try (AnnotationConfigApplicationContext context = providerContext()) {
             EgonRpcProperties properties = configuredProperties();
-            RpcProviderAvailabilityRegistry availability =
-                    new RpcProviderAvailabilityRegistry();
-            RpcProcessIdentity identity = processIdentity();
-            RpcProviderMetadataMerger metadataMerger =
-                    new RpcProviderMetadataMerger(List.of(service -> {
-                        throw new IllegalStateException("contributor failed");
-                    }));
-            RpcProviderLifecycle lifecycle = new RpcProviderLifecycle(
-                    scan(context),
-                    new RpcServerServiceDefinitionFactory(availability),
-                    new RpcProviderServerFactory(),
-                    new RpcProviderLeaseManager(
-                            registry,
-                            availability,
-                            properties,
-                            identity,
-                            "test",
-                            metadataMerger
-                    ),
-                    availability,
-                    List.of(new RpcProviderServerInterceptor()),
-                    properties,
-                    identity
-            );
+            properties.getProvider().setGracefulShutdownTimeoutMs(-1);
+            RpcProviderServerFactory factory = mock(RpcProviderServerFactory.class);
+            RpcProviderLifecycle lifecycle = lifecycle(scan(context),
+                    new RpcProviderAvailabilityRegistry(), factory, properties);
 
-            assertThatThrownBy(lifecycle::start)
-                    .isInstanceOf(EgonRpcException.class)
-                    .hasRootCauseMessage("contributor failed");
-            assertThat(registry.events).isEmpty();
+            assertThatThrownBy(lifecycle::start).isInstanceOf(EgonRpcException.class)
+                    .hasMessageContaining("shutdown timeout");
             assertThat(lifecycle.state()).isEqualTo(RpcProviderRuntimeState.FAILED);
-            assertThat(lifecycle.isRunning()).isFalse();
+            verify(factory, never()).create(anyString(), anyInt(), any(), any());
         }
     }
 
+    @Test
+    void rejectsTooSmallInboundMessageLimit() {
+        assertThatThrownBy(() -> new RpcProviderServerFactory(1023))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("at least 1024");
+    }
+
     private AnnotationConfigApplicationContext providerContext() {
-        AnnotationConfigApplicationContext context =
-                new AnnotationConfigApplicationContext();
+        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
         context.registerBean(RpcProviderTestFixtures.EchoProvider.class);
         context.refresh();
         return context;
     }
 
-    private RpcProviderMethodRegistry scan(
-            AnnotationConfigApplicationContext context) {
-        return new RpcProviderBeanScanner(
-                context,
-                new RpcContractValidator(VALIDATION_UTILS)
-        ).scan();
+    private RpcProviderMethodRegistry scan(AnnotationConfigApplicationContext context) {
+        return new RpcProviderBeanScanner(context, new RpcContractValidator(VALIDATION_UTILS)).scan();
     }
 
-    private RpcProviderLifecycle lifecycle(
-            AnnotationConfigApplicationContext context,
-            RecordingRegistry registry,
-            EgonRpcProperties properties) {
-        RpcProviderAvailabilityRegistry availability =
-                new RpcProviderAvailabilityRegistry();
-        RpcProcessIdentity identity = processIdentity();
-        return new RpcProviderLifecycle(
-                scan(context),
-                new RpcServerServiceDefinitionFactory(availability),
-                new RpcProviderServerFactory(),
-                leaseManager(registry, availability, properties, identity),
-                availability,
-                List.of(new RpcProviderServerInterceptor()),
-                properties,
-                identity
-        );
+    private RpcProviderLifecycle lifecycle(RpcProviderMethodRegistry methods,
+                                           RpcProviderAvailabilityRegistry availability,
+                                           RpcProviderServerFactory serverFactory,
+                                           EgonRpcProperties properties) {
+        return new RpcProviderLifecycle(methods,
+                new RpcServerServiceDefinitionFactory(availability), serverFactory,
+                availability, List.of(new RpcProviderServerInterceptor()), properties);
     }
 
-    private RpcProviderLeaseManager leaseManager(
-            RpcProviderRegistry registry,
-            RpcProviderAvailabilityRegistry availability,
-            EgonRpcProperties properties,
-            RpcProcessIdentity identity) {
-        return new RpcProviderLeaseManager(
-                registry,
-                availability,
-                properties,
-                identity,
-                "test",
-                new RpcProviderMetadataMerger(List.of())
-        );
+    private RpcProviderServerFactory factory(Server server) {
+        RpcProviderServerFactory factory = mock(RpcProviderServerFactory.class);
+        when(factory.create(anyString(), anyInt(), any(), any())).thenReturn(server);
+        return factory;
     }
 
     private EgonRpcProperties configuredProperties() {
@@ -377,73 +263,39 @@ class RpcProviderLifecycleTest {
         properties.getProvider().setEnabled(true);
         properties.getProvider().setBindAddress("127.0.0.1");
         properties.getProvider().setPort(0);
-        properties.getProvider().setAdvertisedHost("127.0.0.1");
         properties.getProvider().setGracefulShutdownTimeoutMs(100);
         return properties;
     }
 
-    private RpcProcessIdentity processIdentity() {
-        return new RpcProcessIdentity(
-                "provider-test",
-                "test",
-                "default",
-                "127.0.0.1",
-                1,
-                "provider-process"
-        );
+    @SuppressWarnings("unchecked")
+    private MethodDescriptor<Message, Message> echoMethod() {
+        return (MethodDescriptor<Message, Message>) (MethodDescriptor<?, ?>)
+                new RpcContractValidator(VALIDATION_UTILS)
+                        .validate(RpcProviderTestFixtures.EchoContract.class)
+                        .methods().getFirst().grpcMethod();
+    }
+
+    private ManagedChannel plaintextChannel(int port) {
+        return ManagedChannelBuilder.forAddress("127.0.0.1", port)
+                .usePlaintext().disableServiceConfigLookUp().disableRetry().build();
+    }
+
+    private void assertAvailable(RpcProviderMethodRegistry methods,
+                                 RpcProviderAvailabilityRegistry availability,
+                                 boolean expected) {
+        assertThat(methods.providers()).allSatisfy(binding ->
+                assertThat(availability.isAvailable(binding.serviceIdentity())).isEqualTo(expected));
     }
 
     private ServerInterceptor interceptor(String name, List<String> order) {
         return new ServerInterceptor() {
             @Override
             public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
-                    ServerCall<ReqT, RespT> call,
-                    io.grpc.Metadata headers,
+                    ServerCall<ReqT, RespT> call, io.grpc.Metadata headers,
                     ServerCallHandler<ReqT, RespT> next) {
                 order.add(name);
                 return next.startCall(call, headers);
             }
         };
-    }
-
-    private static final class RecordingRegistry
-            implements RpcProviderRegistry {
-
-        private final List<String> events = new ArrayList<>();
-
-        private RpcProviderRegistration registration;
-
-        private boolean failRegistration;
-
-        @Override
-        public RpcProviderLease register(
-                RpcProviderRegistration registration) {
-            events.add("register");
-            if (failRegistration) {
-                throw new IllegalStateException("registry unavailable");
-            }
-            this.registration = registration;
-            Instant now = Instant.now();
-            return new RpcProviderLease(
-                    registration.processIdentity().instanceId(),
-                    UUID.randomUUID().toString(),
-                    now,
-                    now.plusSeconds(registration.leaseSeconds())
-            );
-        }
-
-        @Override
-        public RpcLeaseOperationResult heartbeat(
-                RpcProviderLeaseIdentity lease) {
-            events.add("heartbeat");
-            return RpcLeaseOperationResult.renewed(Instant.now());
-        }
-
-        @Override
-        public RpcLeaseOperationResult deregister(
-                RpcProviderLeaseIdentity lease) {
-            events.add("deregister");
-            return RpcLeaseOperationResult.deleted();
-        }
     }
 }

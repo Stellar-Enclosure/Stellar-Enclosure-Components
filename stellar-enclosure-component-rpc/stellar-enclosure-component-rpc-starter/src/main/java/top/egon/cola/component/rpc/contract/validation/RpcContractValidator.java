@@ -2,6 +2,11 @@ package top.egon.cola.component.rpc.contract.validation;
 
 import com.google.protobuf.Message;
 import io.grpc.MethodDescriptor.MethodType;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import top.egon.cola.component.common.core.validation.BaseValidator;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.rpc.annotation.EgonRpcMethod;
@@ -26,10 +31,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CompletionStage;
 
+@Slf4j
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class RpcContractValidator extends BaseValidator {
 
+    @NonNull
+    @Qualifier("generatedGrpcDescriptorResolver")
     private final GeneratedGrpcDescriptorResolver descriptorResolver;
 
+    @NonNull
+    @Qualifier("egonColaValidationUtils")
     private final ValidationUtils validationUtils;
 
     private final ConcurrentMap<Class<?>, RpcContractDescriptor> cache =
@@ -37,13 +48,6 @@ public class RpcContractValidator extends BaseValidator {
 
     public RpcContractValidator(ValidationUtils validationUtils) {
         this(new GeneratedGrpcDescriptorResolver(), validationUtils);
-    }
-
-    public RpcContractValidator(
-            GeneratedGrpcDescriptorResolver descriptorResolver,
-            ValidationUtils validationUtils) {
-        this.descriptorResolver = descriptorResolver;
-        this.validationUtils = validationUtils;
     }
 
     @Override
@@ -72,8 +76,8 @@ public class RpcContractValidator extends BaseValidator {
         if (service == null) {
             throw invalid("RPC contract is missing @EgonRpcService");
         }
-        requireText(service.group(), "RPC group");
-        requireText(service.version(), "RPC version");
+        requireLogicalIdentity(service.group(), "RPC group");
+        requireLogicalIdentity(service.version(), "RPC version");
         GeneratedGrpcDescriptorResolver.ResolvedGrpcService generated =
                 descriptorResolver.resolve(service.grpcClass());
         List<Method> javaMethods = Arrays.stream(contractType.getMethods())
@@ -210,6 +214,12 @@ public class RpcContractValidator extends BaseValidator {
     private void requireText(String value, String fieldName) {
         if (value == null || value.isBlank()) {
             throw invalid(fieldName + " is required");
+        }
+    }
+
+    private void requireLogicalIdentity(String value, String fieldName) {
+        if (value == null || !value.matches("[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")) {
+            throw invalid(fieldName + " is invalid");
         }
     }
 

@@ -44,18 +44,13 @@ public class RpcStatusExceptionMapper {
                 .isPresent()) {
             return EgonRpcErrorCode.RPC_RATE_LIMITED;
         }
-        return RpcFailureStage.from(trailers)
-                .filter(stage -> stage == RpcFailureStage.PROVIDER)
-                .isPresent()
-                ? EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE
-                : EgonRpcErrorCode.RPC_YUHENG_UNAVAILABLE;
+        return EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE;
     }
 
     private String sanitizedMessage(Status status, EgonRpcErrorCode code) {
         return switch (code) {
             case RPC_DEADLINE_EXCEEDED -> "RPC deadline exceeded";
             case RPC_CANCELLED -> "RPC call was cancelled";
-            case RPC_YUHENG_UNAVAILABLE -> "RPC Gateway is unavailable";
             case RPC_PROVIDER_UNAVAILABLE -> "RPC Provider is unavailable";
             case RPC_RATE_LIMITED -> "RPC request was rate limited";
             case RPC_INVALID_REQUEST -> "RPC request is invalid";

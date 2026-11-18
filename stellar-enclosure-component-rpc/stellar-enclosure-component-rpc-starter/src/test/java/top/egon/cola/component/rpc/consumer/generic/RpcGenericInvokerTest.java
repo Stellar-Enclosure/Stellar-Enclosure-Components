@@ -1,24 +1,23 @@
 package top.egon.cola.component.rpc.consumer.generic;
 
 import com.google.protobuf.StringValue;
+import io.grpc.ManagedChannel;
 import io.grpc.Server;
+import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.rpc.annotation.FailStrategy;
-import top.egon.cola.component.rpc.annotation.LoadBalance;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
-import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelFactory;
-import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
-import top.egon.cola.component.rpc.consumer.channel.RpcEndpoint;
-import top.egon.cola.component.rpc.consumer.interceptor.RpcClientInterceptorFactory;
+import top.egon.cola.component.rpc.config.EgonRpcProperties;
+import top.egon.cola.component.rpc.consumer.channel.RpcChannelLease;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationExecutor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationPlan;
-import top.egon.cola.component.rpc.consumer.loadbalance.RpcLoadBalancers;
-import top.egon.cola.component.rpc.consumer.reference.RpcReferenceMode;
+import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinitionResolver;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategy;
+import top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
@@ -41,327 +40,178 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RpcGenericInvokerTest {
-
     private static final ValidationUtils VALIDATION_UTILS =
             new ValidationUtils(Validation.buildDefaultValidatorFactory().getValidator());
-
-    private static final String SERVICE =
-            "egon.rpc.fixture.v1.UnaryFixtureService";
-
+    private static final String SERVICE = "egon.rpc.fixture.v1.UnaryFixtureService";
     private static final String METHOD = SERVICE + "/Echo";
 
     @Test
-    void invokesCanonicalRawBytesThroughTheExistingUnaryServer() throws Exception {
+    void invokesCanonicalRawBytesThroughTheNativeUnaryServer() throws Exception {
         try (RunningServer running = server()) {
-            RpcGenericInvocation invocation = invocation(
-                    StringValue.of("raw")
-            );
-
-            byte[] response = running.invoker.invokeBlocking(invocation);
-
-            assertThat(StringValue.parseFrom(response))
-                    .isEqualTo(StringValue.of("provider:raw"));
+            byte[] response = running.invoker.invokeBlocking(invocation(StringValue.of("raw"), 2000));
+            assertThat(StringValue.parseFrom(response)).isEqualTo(StringValue.of("provider:raw"));
         }
     }
 
     @Test
     void invokesAsyncAndReturnsTheSameSerializedResponse() throws Exception {
         try (RunningServer running = server()) {
-            CompletionStage<byte[]> response = running.invoker.invokeAsync(
-                    invocation(StringValue.of("async"))
-            );
-
-            assertThat(StringValue.parseFrom(
-                    response.toCompletableFuture().get(5, TimeUnit.SECONDS)))
+            CompletionStage<byte[]> response = running.invoker.invokeAsync(invocation(StringValue.of("async"), 2000));
+            assertThat(StringValue.parseFrom(response.toCompletableFuture().get(5, TimeUnit.SECONDS)))
                     .isEqualTo(StringValue.of("provider:async"));
         }
     }
 
     @Test
-    void invokesDirectGenericTargetWithoutGatewayFallback() throws Exception {
-        try (RunningServer running = server()) {
-            RpcGenericInvocation invocation = RpcGenericInvocation.direct(
-                    "biz",
-                    "app",
-                    "test",
-                    SERVICE,
-                    "test",
-                    "1.0.0",
-                    METHOD,
-                    StringValue.of("direct").toByteArray(),
-                    2000,
-                    0,
-                    LoadBalance.ROUND_ROBIN,
-                    FailStrategy.FAIL_CLOSED,
-                    null
-            );
-
-            byte[] response = running.invoker.invokeBlocking(invocation);
-
-            assertThat(StringValue.parseFrom(response))
-                    .isEqualTo(StringValue.of("provider:direct"));
+    void rejectsUnapprovedBindingOrMethodBeforeDispatch() {
+        RpcInvocationExecutor executor = mock(RpcInvocationExecutor.class);
+        try (RpcGenericTargetCache cache = cache(new AtomicInteger())) {
+            RpcGenericInvoker invoker = new RpcGenericInvoker(cache, executor, identity(), List.of());
+            assertThatThrownBy(() -> invoker.invokeBlocking(new RpcGenericInvocation("unknown-binding", SERVICE,
+                    "test", "1.0.0", METHOD, new byte[0], 1000))).isInstanceOf(EgonRpcException.class);
+            assertThatThrownBy(() -> invoker.invokeBlocking(new RpcGenericInvocation("sample-binding", SERVICE,
+                    "test", "1.0.0", SERVICE + "/Delete", new byte[0], 1000)))
+                    .isInstanceOf(EgonRpcException.class).hasMessageContaining("not approved");
+            org.mockito.Mockito.verifyNoInteractions(executor);
         }
     }
 
     @Test
-    void rejectsNonCanonicalTargetsAndExposesNoCallerMetadataSurface() {
-        assertThatThrownBy(() -> RpcGenericInvocation.gateway(
-                SERVICE,
-                "test",
-                "1.0.0",
-                "egon.rpc.fixture.v1.UnaryFixtureService.Echo",
-                new byte[0],
-                1000,
-                0,
-                LoadBalance.ROUND_ROBIN,
-                FailStrategy.FAIL_CLOSED,
-                null
-        ))
-                .isInstanceOf(EgonRpcException.class)
-                .satisfies(error -> assertThat(((EgonRpcException) error).getRpcErrorCode())
-                        .isEqualTo(EgonRpcErrorCode.RPC_INVALID_REQUEST));
-        assertThatThrownBy(() -> RpcGenericInvocation.gateway(
-                SERVICE,
-                "test",
-                "1.0.0",
-                "other.Service/Echo",
-                new byte[0],
-                1000,
-                0,
-                LoadBalance.ROUND_ROBIN,
-                FailStrategy.FAIL_CLOSED,
-                null
-        )).isInstanceOf(EgonRpcException.class);
-        assertThat(RpcGenericInvocation.class.getDeclaredFields())
-                .noneMatch(field -> Set.of(
-                        "metadata", "authorization", "host", "port"
-                ).contains(field.getName().toLowerCase()));
+    void rejectsNonCanonicalMethodsAndExposesNoCallerNetworkOrFallbackSurface() {
+        assertThatThrownBy(() -> new RpcGenericInvocation("sample-binding", SERVICE, "test", "1.0.0",
+                SERVICE + ".Echo", new byte[0], 1000)).isInstanceOf(EgonRpcException.class);
+        assertThatThrownBy(() -> new RpcGenericInvocation("sample-binding", SERVICE, "test", "1.0.0",
+                "other.Service/Echo", new byte[0], 1000)).isInstanceOf(EgonRpcException.class);
+        assertThatThrownBy(() -> new RpcGenericInvocation("${binding}", SERVICE, "test", "1.0.0",
+                METHOD, new byte[0], 1000)).isInstanceOf(EgonRpcException.class);
+        assertThat(RpcGenericInvocation.class.getDeclaredFields()).noneMatch(field -> Set.of(
+                "metadata", "authorization", "host", "port", "mode", "fallback", "retries", "loadbalance"
+        ).contains(field.getName().toLowerCase()));
     }
 
     @Test
-    void forwardsGenericAsyncCancellationToTheSharedExecutor() {
-        RpcConsumerChannelPool pool = mock(RpcConsumerChannelPool.class);
+    void forwardsAsyncCancellationAndReleasesTheCachedEntry() {
         RpcInvocationExecutor executor = mock(RpcInvocationExecutor.class);
         CompletableFuture<Object> pending = new CompletableFuture<>();
-        when(executor.executeAsync(
-                any(RpcInvocationPlan.class),
-                any()
-        )).thenReturn(pending);
+        when(executor.executeAsync(any(RpcInvocationPlan.class), any())).thenReturn(pending);
         AtomicInteger closes = new AtomicInteger();
-        RpcGenericTargetCache cache = new RpcGenericTargetCache(
-                ignored -> strategy(List.of(), closes),
-                4,
-                Duration.ofSeconds(1)
-        );
-        RpcGenericInvoker invoker = new RpcGenericInvoker(
-                cache,
-                pool,
-                executor,
-                identity()
-        );
+        RpcGenericTargetCache cache = cache(closes);
+        RpcGenericInvoker invoker = new RpcGenericInvoker(cache, executor, identity(), List.of());
 
-        CompletionStage<byte[]> response = invoker.invokeAsync(
-                invocation(StringValue.of("cancel"))
-        );
-
-        assertThat(response.toCompletableFuture().cancel(true)).isTrue();
+        CompletableFuture<byte[]> response = invoker.invokeAsync(invocation(StringValue.of("cancel"), 1000)).toCompletableFuture();
+        assertThat(response.cancel(true)).isTrue();
         assertThat(pending.isCancelled()).isTrue();
         cache.close();
         assertThat(closes).hasValue(1);
     }
 
     @Test
-    void failOpenReturnsNullOnlyAfterGenericAvailabilityExhaustion() {
-        RpcConsumerChannelPool pool = mock(RpcConsumerChannelPool.class);
-        RpcGenericTargetCache cache = new RpcGenericTargetCache(
-                ignored -> strategy(List.of(), new AtomicInteger()),
-                4,
-                Duration.ofSeconds(1)
-        );
-        RpcGenericInvoker invoker = new RpcGenericInvoker(
-                cache,
-                pool,
-                new RpcInvocationExecutor(new RpcStatusExceptionMapper()),
-                identity()
-        );
-
-        RpcGenericInvocation invocation = new RpcGenericInvocation(
-                RpcReferenceMode.GATEWAY,
-                null,
-                null,
-                null,
-                SERVICE,
-                "test",
-                "1.0.0",
-                METHOD,
-                StringValue.of("missing").toByteArray(),
-                1000,
-                0,
-                LoadBalance.ROUND_ROBIN,
-                FailStrategy.FAIL_OPEN,
-                null
-        );
-
-        assertThat(invoker.invokeBlocking(invocation)).isNull();
-        cache.close();
+    void capsRequestTimeoutAndDoesNotChangeTheStableTargetOrMethod() {
+        RpcInvocationExecutor executor = mock(RpcInvocationExecutor.class);
+        when(executor.executeBlocking(any(RpcInvocationPlan.class), any())).thenReturn(new byte[]{7});
+        try (RpcGenericTargetCache cache = cache(new AtomicInteger())) {
+            RpcGenericInvoker invoker = new RpcGenericInvoker(cache, executor, identity(), List.of());
+            assertThat(invoker.invokeBlocking(invocation(StringValue.of("cap"), 6000))).containsExactly((byte) 7);
+            ArgumentCaptor<RpcInvocationPlan> plans = ArgumentCaptor.forClass(RpcInvocationPlan.class);
+            verify(executor).executeBlocking(plans.capture(), any());
+            assertThat(plans.getValue().policy().timeoutMs()).isEqualTo(2000);
+            assertThat(plans.getValue().fullMethodName()).isEqualTo(METHOD);
+            assertThat(plans.getValue().strategy().target().dnsTarget())
+                    .isEqualTo("dns:///sample-rpc.apps-prod.svc.cluster.local:18122");
+        }
     }
 
-    private RpcGenericInvocation invocation(StringValue request) {
-        return RpcGenericInvocation.gateway(
-                SERVICE,
-                "test",
-                "1.0.0",
-                METHOD,
-                request.toByteArray(),
-                2000,
-                0,
-                LoadBalance.ROUND_ROBIN,
-                FailStrategy.FAIL_CLOSED,
-                null
-        );
+    @Test
+    void propagatesAvailabilityFailureWithoutNullSuccessOrFallback() {
+        RpcInvocationExecutor executor = mock(RpcInvocationExecutor.class);
+        when(executor.executeBlocking(any(RpcInvocationPlan.class), any())).thenThrow(
+                new EgonRpcException(EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE, "stable target unavailable"));
+        try (RpcGenericTargetCache cache = cache(new AtomicInteger())) {
+            RpcGenericInvoker invoker = new RpcGenericInvoker(cache, executor, identity(), List.of());
+            assertThatThrownBy(() -> invoker.invokeBlocking(invocation(StringValue.of("missing"), 1000)))
+                    .isInstanceOfSatisfying(EgonRpcException.class, exception ->
+                            assertThat(exception.getRpcErrorCode()).isEqualTo(EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE));
+        }
+    }
+
+    @Test
+    void keepsCommandAndResponsePayloadsDefensive() {
+        byte[] original = new byte[]{1, 2};
+        RpcGenericInvocation command = new RpcGenericInvocation("sample-binding", SERVICE, "test", "1.0.0", METHOD, original, 1000);
+        original[0] = 9;
+        byte[] read = command.requestPayload();
+        read[1] = 8;
+        assertThat(command.requestPayload()).containsExactly(1, 2);
+        RpcInvocationExecutor executor = mock(RpcInvocationExecutor.class);
+        byte[] provider = new byte[]{3};
+        when(executor.executeBlocking(any(RpcInvocationPlan.class), any())).thenReturn(provider);
+        try (RpcGenericTargetCache cache = cache(new AtomicInteger())) {
+            byte[] response = new RpcGenericInvoker(cache, executor, identity(), List.of()).invokeBlocking(command);
+            provider[0] = 4;
+            assertThat(response).containsExactly(3);
+        }
+    }
+
+    private RpcGenericInvocation invocation(StringValue request, long timeoutMs) {
+        return new RpcGenericInvocation("sample-binding", SERVICE, "test", "1.0.0", METHOD, request.toByteArray(), timeoutMs);
+    }
+
+    private RpcReferenceDefinitionResolver resolver() {
+        EgonRpcProperties properties = new EgonRpcProperties();
+        properties.getConsumer().setDefaultTimeoutMs(2000).getBindings().put("sample-binding",
+                new EgonRpcProperties.RpcServiceBindingConfig().setVersion(1).setNamespace("apps-prod")
+                        .setService("sample-rpc").setPort(18122).setMethods(Set.of(METHOD)));
+        return new RpcReferenceDefinitionResolver(properties);
+    }
+
+    private RpcGenericTargetCache cache(AtomicInteger closes) {
+        return new RpcGenericTargetCache(resolver(), definition -> strategy(definition.target(), closes),
+                4, Duration.ofSeconds(1), System::currentTimeMillis);
+    }
+
+    private RpcReferenceStrategy strategy(RpcServiceTargetVO target, AtomicInteger closes) {
+        RpcReferenceStrategy strategy = mock(RpcReferenceStrategy.class);
+        when(strategy.target()).thenReturn(target);
+        org.mockito.Mockito.doAnswer(ignored -> { closes.incrementAndGet(); return null; }).when(strategy).close();
+        return strategy;
     }
 
     private RunningServer server() throws Exception {
-        RpcContractDescriptor contract = new RpcContractValidator(VALIDATION_UTILS).validate(
-                RpcProviderTestFixtures.EchoContract.class
-        );
-        RpcProviderBinding binding = new RpcProviderBinding(
-                new RpcProviderTestFixtures.EchoProvider(),
-                contract
-        );
-        RpcProviderAvailabilityRegistry availability =
-                new RpcProviderAvailabilityRegistry();
+        RpcContractDescriptor contract = new RpcContractValidator(VALIDATION_UTILS).validate(RpcProviderTestFixtures.EchoContract.class);
+        RpcProviderBinding binding = new RpcProviderBinding(new RpcProviderTestFixtures.EchoProvider(), contract);
+        RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
         availability.available(binding.serviceIdentity());
         Server server = NettyServerBuilder.forPort(0)
                 .addService(new RpcServerServiceDefinitionFactory(availability)
-                        .create(new RpcProviderMethodRegistry(List.of(binding)))
-                        .getFirst())
-                .build()
-                .start();
-        RpcEndpoint endpoint = endpoint(server.getPort());
-        RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
-                new RpcConsumerChannelFactory(),
-                1000
-        );
-        RpcGenericTargetCache cache = new RpcGenericTargetCache(
-                ignored -> strategy(
-                        ignored.mode(),
-                        List.of(endpoint),
-                        new AtomicInteger()
-                ),
-                4,
-                Duration.ofSeconds(1)
-        );
-        return new RunningServer(
-                server,
-                pool,
-                cache,
-                new RpcGenericInvoker(
-                        cache,
-                        pool,
-                        new RpcInvocationExecutor(
-                                new RpcStatusExceptionMapper()
-                        ),
-                        identity(),
-                        List.<RpcClientInterceptorFactory>of(),
-                        new RpcLoadBalancers()
-                )
-        );
+                        .create(new RpcProviderMethodRegistry(List.of(binding))).getFirst()).build().start();
+        // A local channel is injected by the test; production targets remain configured Service DNS names.
+        ManagedChannel channel = NettyChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+        RpcGenericTargetCache cache = new RpcGenericTargetCache(resolver(), definition -> {
+            RpcReferenceStrategy strategy = strategy(definition.target(), new AtomicInteger());
+            when(strategy.acquire()).thenAnswer(ignored -> {
+                RpcChannelLease lease = mock(RpcChannelLease.class);
+                when(lease.channel()).thenReturn(channel);
+                return lease;
+            });
+            return strategy;
+        }, 4, Duration.ofSeconds(1), System::currentTimeMillis);
+        return new RunningServer(server, channel, cache,
+                new RpcGenericInvoker(cache, new RpcInvocationExecutor(new RpcStatusExceptionMapper()), identity(), List.of()));
     }
 
-    private RpcReferenceStrategy strategy(
-            List<RpcEndpoint> endpoints,
-            AtomicInteger closes) {
-        return strategy(RpcReferenceMode.GATEWAY, endpoints, closes);
+    private RpcProcessIdentity identity() {
+        return new RpcProcessIdentity("generic-test", "test", "127.0.0.1", 1, "generic-1");
     }
 
-    private RpcReferenceStrategy strategy(
-            RpcReferenceMode mode,
-            List<RpcEndpoint> endpoints,
-            AtomicInteger closes) {
-        return new RpcReferenceStrategy() {
-            @Override
-            public RpcReferenceMode mode() {
-                return mode;
-            }
-
-            @Override
-            public String queryIdentity() {
-                return SERVICE;
-            }
-
-            @Override
-            public long revision() {
-                return 1;
-            }
-
-            @Override
-            public List<? extends RpcEndpoint> candidates() {
-                return endpoints;
-            }
-
-            @Override
-            public void close() {
-                closes.incrementAndGet();
-            }
-        };
-    }
-
-    private RpcEndpoint endpoint(int port) {
-        return new RpcEndpoint() {
-            @Override
-            public String host() {
-                return "127.0.0.1";
-            }
-
-            @Override
-            public int port() {
-                return port;
-            }
-
-            @Override
-            public boolean secure() {
-                return false;
-            }
-        };
-    }
-
-    private static RpcProcessIdentity identity() {
-        return new RpcProcessIdentity(
-                "generic-test",
-                "test",
-                "127.0.0.1",
-                1,
-                "generic-1"
-        );
-    }
-
-    private static final class RunningServer implements AutoCloseable {
-
-        private final Server server;
-        private final RpcConsumerChannelPool pool;
-        private final RpcGenericTargetCache cache;
-        private final RpcGenericInvoker invoker;
-
-        private RunningServer(
-                Server server,
-                RpcConsumerChannelPool pool,
-                RpcGenericTargetCache cache,
-                RpcGenericInvoker invoker) {
-            this.server = server;
-            this.pool = pool;
-            this.cache = cache;
-            this.invoker = invoker;
-        }
-
-        @Override
-        public void close() throws Exception {
+    private record RunningServer(Server server, ManagedChannel channel, RpcGenericTargetCache cache,
+                                 RpcGenericInvoker invoker) implements AutoCloseable {
+        @Override public void close() throws Exception {
             cache.close();
-            pool.close();
-            pool.stop();
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
         }
     }

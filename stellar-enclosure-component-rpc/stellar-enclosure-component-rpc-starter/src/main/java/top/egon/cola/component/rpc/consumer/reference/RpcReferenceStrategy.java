@@ -1,20 +1,12 @@
 package top.egon.cola.component.rpc.consumer.reference;
 
-import top.egon.cola.component.rpc.consumer.channel.RpcEndpoint;
+import top.egon.cola.component.rpc.consumer.channel.RpcChannelLease;
 
-import java.util.List;
-
-/** Fixed-mode candidate snapshot and demand lifecycle exposed to invocation code. */
+/** A single trusted Service target with pool-owned channel and reference lifecycle. */
 public interface RpcReferenceStrategy extends AutoCloseable {
-
-    RpcReferenceMode mode();
-
+    RpcServiceTargetVO target();
     String queryIdentity();
-
     long revision();
-
-    List<? extends RpcEndpoint> candidates();
-
-    @Override
-    void close();
+    RpcChannelLease acquire();
+    @Override void close();
 }

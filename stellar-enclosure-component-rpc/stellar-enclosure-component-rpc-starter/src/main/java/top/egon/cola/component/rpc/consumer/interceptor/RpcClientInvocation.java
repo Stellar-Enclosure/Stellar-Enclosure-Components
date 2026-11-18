@@ -2,6 +2,7 @@ package top.egon.cola.component.rpc.consumer.interceptor;
 
 import com.google.protobuf.Message;
 import top.egon.cola.component.rpc.consumer.generic.RpcGenericInvocation;
+import top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.descriptor.RpcMethodDescriptor;
@@ -22,6 +23,7 @@ public final class RpcClientInvocation {
     private final String fullMethodName;
     private final byte[] rawRequestPayload;
     private final String invocationId;
+    private final RpcServiceTargetVO target;
 
     /** Creates the legacy typed context retained for existing factories. */
     public RpcClientInvocation(
@@ -39,6 +41,7 @@ public final class RpcClientInvocation {
                 contract.version(),
                 method.fullMethodName(),
                 null,
+                null,
                 null
         );
     }
@@ -53,7 +56,9 @@ public final class RpcClientInvocation {
             String version,
             String fullMethodName,
             byte[] rawRequestPayload,
-            String invocationId) {
+            String invocationId,
+            RpcServiceTargetVO target) {
+        this.target = target;
         this.contract = contract;
         this.method = method;
         this.request = request;
@@ -79,7 +84,8 @@ public final class RpcClientInvocation {
     public static RpcClientInvocation generic(
             RpcGenericInvocation invocation,
             RpcProcessIdentity processIdentity,
-            String invocationId) {
+            String invocationId,
+            RpcServiceTargetVO target) {
         Objects.requireNonNull(invocation, "invocation");
         return new RpcClientInvocation(
                 null,
@@ -91,7 +97,8 @@ public final class RpcClientInvocation {
                 invocation.version(),
                 invocation.fullMethodName(),
                 invocation.requestPayload(),
-                invocationId
+                invocationId,
+                Objects.requireNonNull(target, "target")
         );
     }
 
@@ -102,7 +109,8 @@ public final class RpcClientInvocation {
             RpcProcessIdentity processIdentity,
             String group,
             String version,
-            String invocationId) {
+            String invocationId,
+            RpcServiceTargetVO target) {
         Objects.requireNonNull(contract, "contract");
         Objects.requireNonNull(method, "method");
         Objects.requireNonNull(request, "request");
@@ -116,7 +124,8 @@ public final class RpcClientInvocation {
                 version,
                 method.fullMethodName(),
                 null,
-                invocationId
+                invocationId,
+                Objects.requireNonNull(target, "target")
         );
     }
 
@@ -159,6 +168,10 @@ public final class RpcClientInvocation {
     public byte[] rawRequestPayload() {
         return rawRequestPayload == null
                 ? null : Arrays.copyOf(rawRequestPayload, rawRequestPayload.length);
+    }
+
+    public RpcServiceTargetVO target() {
+        return target;
     }
 
     public String invocationId() {

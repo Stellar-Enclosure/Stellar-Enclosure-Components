@@ -4,11 +4,12 @@ import io.grpc.ManagedChannel;
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
+import top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -19,7 +20,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -39,7 +39,7 @@ class RpcConsumerChannelPoolTest {
         });
         RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
                 factory, Duration.ofSeconds(1));
-        RpcEndpoint endpoint = endpoint();
+        RpcServiceTargetVO endpoint = target(1);
         ExecutorService executor = Executors.newFixedThreadPool(16);
         CountDownLatch ready = new CountDownLatch(16);
         CountDownLatch start = new CountDownLatch(1);
@@ -72,7 +72,7 @@ class RpcConsumerChannelPoolTest {
         when(factory.create(any(RpcChannelKey.class))).thenReturn(channel);
         RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
                 factory, Duration.ofMillis(80));
-        RpcChannelLease lease = pool.acquire(endpoint());
+        RpcChannelLease lease = pool.acquire(target(1));
         lease.beginCall();
 
         pool.close();
@@ -90,7 +90,7 @@ class RpcConsumerChannelPoolTest {
         when(factory.create(any(RpcChannelKey.class))).thenReturn(channel);
         RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
                 factory, Duration.ofMillis(20));
-        RpcChannelLease lease = pool.acquire(endpoint());
+        RpcChannelLease lease = pool.acquire(target(1));
         lease.beginCall();
 
         pool.close();
@@ -112,12 +112,12 @@ class RpcConsumerChannelPoolTest {
         RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
                 factory, Duration.ofSeconds(1));
 
-        assertThatThrownBy(() -> pool.acquire(endpoint()))
+        assertThatThrownBy(() -> pool.acquire(target(1)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("connect-failed");
-        assertThat(pool.acquire(endpoint()).channel()).isSameAs(channel);
+        assertThat(pool.acquire(target(1)).channel()).isSameAs(channel);
         pool.close();
-        assertThatThrownBy(() -> pool.acquire(endpoint()))
+        assertThatThrownBy(() -> pool.acquire(target(1)))
                 .isInstanceOf(EgonRpcException.class)
                 .satisfies(error -> assertThat(((EgonRpcException) error).getRpcErrorCode())
                         .isEqualTo(EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE));
@@ -130,7 +130,7 @@ class RpcConsumerChannelPoolTest {
         when(factory.create(any(RpcChannelKey.class))).thenReturn(channel);
         RpcConsumerChannelPool pool = new RpcConsumerChannelPool(
                 factory, Duration.ofSeconds(1));
-        RpcChannelLease lease = pool.acquire(endpoint());
+        RpcChannelLease lease = pool.acquire(target(1));
         lease.beginCall();
         lease.close();
         lease.close();
@@ -139,22 +139,24 @@ class RpcConsumerChannelPoolTest {
         pool.close();
     }
 
-    private static RpcEndpoint endpoint() {
-        return new RpcEndpoint() {
-            @Override
-            public String host() {
-                return "127.0.0.1";
-            }
+    @Test
+    void differentBindingRevisionsDoNotShareAChannel() {
+        RpcConsumerChannelFactory factory = mock(RpcConsumerChannelFactory.class);
+        ManagedChannel first = mock(ManagedChannel.class);
+        ManagedChannel second = mock(ManagedChannel.class);
+        when(factory.create(RpcChannelKey.from(target(1)))).thenReturn(first);
+        when(factory.create(RpcChannelKey.from(target(2)))).thenReturn(second);
 
-            @Override
-            public int port() {
-                return 19090;
-            }
+        try (RpcConsumerChannelPool pool = new RpcConsumerChannelPool(factory, Duration.ofSeconds(1));
+             RpcChannelLease revisionOne = pool.acquire(target(1));
+             RpcChannelLease revisionTwo = pool.acquire(target(2))) {
+            assertThat(revisionOne.channel()).isSameAs(first);
+            assertThat(revisionTwo.channel()).isSameAs(second);
+        }
+    }
 
-            @Override
-            public boolean secure() {
-                return false;
-            }
-        };
+    private static RpcServiceTargetVO target(long version) {
+        return new RpcServiceTargetVO("echo", version, "permission-prod", "echo-rpc", 18122,
+                Set.of("egon.rpc.fixture.v1.UnaryFixtureService/Echo"));
     }
 }

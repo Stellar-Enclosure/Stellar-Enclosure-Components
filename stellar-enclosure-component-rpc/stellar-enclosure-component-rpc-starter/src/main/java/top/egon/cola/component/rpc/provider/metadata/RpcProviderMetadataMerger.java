@@ -1,5 +1,6 @@
 package top.egon.cola.component.rpc.provider.metadata;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.AnnotationAwareOrderComparator;
 import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
 
@@ -11,8 +12,11 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * Merges provider metadata without imposing registry-specific conventions.
+ * Produces an immutable, deterministically ordered logical contract metadata snapshot.
+ * Metadata is opaque catalog input: this component neither discovers endpoints nor selects
+ * physical instances, capacity, versions, or traffic weights.
  */
+@Slf4j
 public final class RpcProviderMetadataMerger {
 
     private final List<RpcProviderMetadataContributor> contributors;
@@ -41,6 +45,8 @@ public final class RpcProviderMetadataMerger {
         mergeSource(merged, configuredMetadata);
         contributors.forEach(contributor ->
                 mergeSource(merged, contributor.contribute(serviceIdentity)));
+        log.debug("Merged logical RPC contract metadata service={} entries={}",
+                serviceIdentity, merged.size());
         return Collections.unmodifiableMap(merged);
     }
 

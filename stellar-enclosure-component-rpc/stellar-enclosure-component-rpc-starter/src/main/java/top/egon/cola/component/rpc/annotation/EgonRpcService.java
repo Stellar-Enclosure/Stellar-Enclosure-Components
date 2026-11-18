@@ -7,7 +7,7 @@ import java.lang.annotation.Target;
 
 /**
  * Marks an interface as an RPC contract and carries the identity every caller and
- * every registry entry is keyed by.
+ * its native generated descriptor is associated with.
  *
  * <p>This is the single source of service-level metadata. {@link EgonRpcProvider}
  * only says which bean implements a contract; nothing descriptive belongs there,
@@ -31,10 +31,8 @@ public @interface EgonRpcService {
     String serviceName() default "";
 
     /**
-     * Relative capacity of instances serving this contract, consumed by the
-     * weighted balancing policies. Expressed as a share rather than an absolute
-     * rate so instances of differing size can be compared without knowing the
-     * cluster's total capacity.
+     * Historical catalogue metadata. It never selects or weights Service
+     * endpoints; traffic weights belong to the approved mesh route.
      */
     int weight() default 100;
 
@@ -51,17 +49,10 @@ public @interface EgonRpcService {
     long timeoutMs() default -1;
 
     /**
-     * Default retry attempts after the initial call. Negative means unset;
-     * zero is reserved for "explicitly do not retry".
+     * Zero additional attempts. A nonzero value requires the later explicit
+     * method approval contract and is rejected by the current resolver.
      */
-    int retries() default -1;
-
-    /**
-     * Load balancing policy applied to calls against this contract.
-     *
-     * @see LoadBalance#INHERIT
-     */
-    LoadBalance loadBalance() default LoadBalance.INHERIT;
+    int retries() default 0;
 
     /**
      * Marks the whole contract as scheduled for removal so tooling can warn

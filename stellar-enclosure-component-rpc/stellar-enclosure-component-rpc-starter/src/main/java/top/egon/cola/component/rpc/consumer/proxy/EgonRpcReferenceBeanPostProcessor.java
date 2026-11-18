@@ -3,7 +3,6 @@ package top.egon.cola.component.rpc.consumer.proxy;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.util.ReflectionUtils;
-import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.rpc.annotation.EgonRpcReference;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinition;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinitionResolver;
@@ -12,15 +11,13 @@ import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategyFactor
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
 
-/** Resolves each annotated field once and installs one fixed-mode CGLIB proxy. */
+/** Resolves each annotated field once and installs one stable-binding CGLIB proxy. */
 public class EgonRpcReferenceBeanPostProcessor implements BeanPostProcessor {
 
     private final RpcContractValidator contractValidator;
     private final RpcReferenceDefinitionResolver definitionResolver;
     private final RpcReferenceStrategyFactory strategyFactory;
     private final RpcConsumerProxyFactory proxyFactory;
-
-    private final boolean legacyMode;
 
     public EgonRpcReferenceBeanPostProcessor(
             RpcContractValidator contractValidator,
@@ -43,25 +40,6 @@ public class EgonRpcReferenceBeanPostProcessor implements BeanPostProcessor {
                 proxyFactory,
                 "proxyFactory"
         );
-        this.legacyMode = false;
-    }
-
-    /**
-     * Compatibility constructor for programmatic clients that already own a
-     * channel provider. New Spring-managed references use the fixed-mode
-     * resolver/strategy constructor above.
-     */
-    public EgonRpcReferenceBeanPostProcessor(
-            RpcConsumerProxyFactory proxyFactory,
-            ValidationUtils validationUtils) {
-        this.contractValidator = new RpcContractValidator(validationUtils);
-        this.definitionResolver = null;
-        this.strategyFactory = null;
-        this.proxyFactory = java.util.Objects.requireNonNull(
-                proxyFactory,
-                "proxyFactory"
-        );
-        this.legacyMode = true;
     }
 
     @Override
@@ -80,7 +58,6 @@ public class EgonRpcReferenceBeanPostProcessor implements BeanPostProcessor {
             Object bean,
             String beanName,
             java.lang.reflect.Field field) {
-        EgonRpcReference reference = field.getAnnotation(EgonRpcReference.class);
         if (!field.getType().isInterface()) {
             throw injectionFailure(
                     beanName,
@@ -93,26 +70,6 @@ public class EgonRpcReferenceBeanPostProcessor implements BeanPostProcessor {
         RpcContractDescriptor descriptor = contractValidator.validate(
                 field.getType()
         );
-        if (legacyMode) {
-            long timeoutMs = reference == null || reference.timeoutMs() <= 0
-                    ? -1 : reference.timeoutMs();
-            try {
-                ReflectionUtils.setField(
-                        field,
-                        bean,
-                        proxyFactory.create(field.getType(), timeoutMs)
-                );
-                return;
-            } catch (RuntimeException exception) {
-                throw injectionFailure(
-                        beanName,
-                        field.getName(),
-                        annotationName(),
-                        exception.getMessage(),
-                        exception
-                );
-            }
-        }
         RpcReferenceDefinition definition;
         try {
             definition = definitionResolver.resolve(field, descriptor);

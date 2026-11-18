@@ -11,8 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
 import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
 import top.egon.cola.component.common.trace.TraceContext;
-import top.egon.cola.component.rpc.annotation.FailStrategy;
-import top.egon.cola.component.rpc.annotation.LoadBalance;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
 import top.egon.cola.component.rpc.context.invocation.RpcMetadataKeys;
 import top.egon.cola.component.rpc.consumer.generic.RpcGenericInvocation;
@@ -105,22 +103,22 @@ class RpcConsumerClientInterceptorTest {
     @Test
     void genericInvocationContextIsRawAndDefensive() {
         byte[] payload = new byte[]{1, 2, 3};
-        RpcGenericInvocation command = RpcGenericInvocation.gateway(
+        RpcGenericInvocation command = new RpcGenericInvocation(
+                "echo-binding",
                 "egon.rpc.test.Echo",
                 "default",
                 "1.0.0",
                 "egon.rpc.test.Echo/Echo",
                 payload,
-                1000,
-                0,
-                LoadBalance.ROUND_ROBIN,
-                FailStrategy.FAIL_CLOSED,
-                null
+                1000
         );
         RpcClientInvocation invocation = RpcClientInvocation.generic(
                 command,
                 identity(),
-                "invocation-2"
+                "invocation-2",
+                new top.egon.cola.component.rpc.consumer.reference.RpcServiceTargetVO(
+                        "echo-binding", 1, "apps-prod", "echo-rpc", 18122,
+                        java.util.Set.of("egon.rpc.test.Echo/Echo"))
         );
         payload[0] = 9;
 

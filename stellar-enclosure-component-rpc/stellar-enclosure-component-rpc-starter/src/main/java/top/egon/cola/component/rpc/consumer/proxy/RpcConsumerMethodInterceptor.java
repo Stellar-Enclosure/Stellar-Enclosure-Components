@@ -18,17 +18,10 @@ import java.util.Objects;
 public final class RpcConsumerMethodInterceptor
         implements MethodInterceptor {
 
-    @FunctionalInterface
-    public interface Dispatcher {
-
-        Object invoke(Object proxy, Method method, Object[] args) throws Throwable;
-    }
-
     private final RpcContractDescriptor contract;
     private final Map<Method, RpcInvocationPlan> plans;
     private final Map<Method, RpcInvocationMode> modes;
     private final RpcInvocationExecutor executor;
-    private final Dispatcher compatibilityDispatcher;
 
     public RpcConsumerMethodInterceptor(
             RpcContractDescriptor contract,
@@ -39,21 +32,6 @@ public final class RpcConsumerMethodInterceptor
         this.plans = Map.copyOf(plans);
         this.modes = Map.copyOf(modes);
         this.executor = Objects.requireNonNull(executor, "executor");
-        this.compatibilityDispatcher = null;
-    }
-
-    public RpcConsumerMethodInterceptor(
-            RpcContractDescriptor contract,
-            Map<Method, RpcInvocationMode> modes,
-            Dispatcher compatibilityDispatcher) {
-        this.contract = Objects.requireNonNull(contract, "contract");
-        this.plans = Map.of();
-        this.modes = Map.copyOf(modes);
-        this.executor = null;
-        this.compatibilityDispatcher = Objects.requireNonNull(
-                compatibilityDispatcher,
-                "compatibilityDispatcher"
-        );
     }
 
     @Override
@@ -76,9 +54,6 @@ public final class RpcConsumerMethodInterceptor
             );
         }
         Object request = request(args, descriptor);
-        if (compatibilityDispatcher != null) {
-            return compatibilityDispatcher.invoke(proxy, method, args);
-        }
         RpcInvocationPlan plan = plans.get(method);
         if (plan == null) {
             throw new EgonRpcException(
