@@ -23,7 +23,11 @@
 
 ## 配置
 
-Starter 启用时必须显式配置 `machine-id`。实现不会根据 IP、MAC、hostname、端口、进程号、随机值或哈希值自动推导机器 ID。
+Starter 支持两种机器 ID（`0..1023`）分配方式：
+1. **显式静态配置（优先）**：直接配置 `egon.cola.component.id.machine-id`（适合本地单机测试、非 Redis 环境或 Kubernetes StatefulSet）。
+2. **Redis 租约动态分配（按 `env + app` 隔离）**：未配置静态 `machine-id` 且容器内存在 `RedissonClient`（或自定义 `MachineIdProvider` Bean）时，自动从 Redis 的 `egon:cola:id:{<env>:<app>}:slot:<0..1023>` 号池中通过环形游标抢占空闲槽位、后台守护线程定期续期、网络闪断后原地自愈，并在应用停机时主动释放槽位（完美支持 Kubernetes Deployment 多副本、HPA 弹性扩缩容、滚动更新、灰度与金丝雀发布）。
+
+实现仍不会根据 IP、MAC、hostname、端口、进程号、随机值或哈希值无协调地推导机器 ID。
 
 ```yaml
 egon:
@@ -31,17 +35,30 @@ egon:
     component:
       id:
         enabled: true
-        machine-id: 17
+        # 方式一：显式指定（若配置则优先使用，不访问 Redis）
+        # machine-id: 17
         max-clock-backward: 5ms
+        # 方式二：未配置 machine-id 时自动使用 Redis 租约分配（按 env + app 隔离 0..1023 号池）
+        redis:
+          enabled: true
+          env: ${spring.profiles.active:default}
+          app: ${spring.application.name:}
+          lease-duration: 5m
+          renew-interval: 1m
 ```
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `egon.cola.component.id.enabled` | `boolean` | `true` | 是否绑定默认 Snowflake 引擎。 |
-| `egon.cola.component.id.machine-id` | `long` | 无 | 必填，节点 ID 范围为 `0..1023`。 |
+| `egon.cola.component.id.machine-id` | `Long` | 无 | 可选静态节点 ID，范围为 `0..1023`；配置后优先于 Redis 租约。 |
 | `egon.cola.component.id.max-clock-backward` | `Duration` | `5ms` | 允许短暂等待恢复的最大时钟回拨量。 |
+| `egon.cola.component.id.redis.enabled` | `boolean` | `true` | 未配置静态 `machine-id` 时是否启用 Redis 租约分配。 |
+| `egon.cola.component.id.redis.env` | `String` | 回退 `egon.cola.component.tianshu.env` / `spring.profiles.active` / `default` | Redis 机器号池的环境隔离标识。 |
+| `egon.cola.component.id.redis.app` | `String` | 回退 `egon.cola.component.tianshu.app-code` / `spring.application.name` | Redis 机器号池的应用隔离标识。 |
+| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | Redis 机器号槽位租约过期时间。 |
+| `egon.cola.component.id.redis.renew-interval` | `Duration` | `1m` | 后台心跳续期间隔（必须小于 `lease-duration`）。 |
 
-`machine-id` 缺失或越界会在 Spring 上下文启动阶段失败。`enabled=false` 时不绑定引擎。业务自定义 `IdGenerator` Bean（或 `LongIdGenerator` Bean，它是前者的子类型）后，默认自动配置会退让。
+未配置静态 `machine-id` 且无可用 `MachineIdProvider` / `RedissonClient`，或 `machine-id` 越界时，会在 Spring 上下文启动阶段快速失败。`enabled=false` 时不绑定引擎。业务自定义 `IdGenerator` Bean（或 `LongIdGenerator` Bean，它是前者的子类型）后，默认自动配置会退让。
 
 ## Spring 使用
 

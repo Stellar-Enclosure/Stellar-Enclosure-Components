@@ -23,7 +23,11 @@ Non-Spring applications use the same artifact and call `SnowflakeIdGenerator.ini
 
 ## Configuration
 
-`machine-id` is mandatory when the Starter is enabled. It is never inferred from an IP address, MAC address, hostname, port, process ID, random value, or hash.
+The Starter supports two ways to assign a `machine-id` (`0..1023`):
+1. **Explicit static configuration (takes precedence)**: set `egon.cola.component.id.machine-id` directly (suitable for isolated tests, non-Redis environments, or Kubernetes StatefulSets).
+2. **Redis lease allocation (isolated by `env + app`)**: when static `machine-id` is omitted and a `RedissonClient` (or custom `MachineIdProvider` bean) is present, the Starter automatically leases a free `0..1023` slot in Redis under `egon:cola:id:{<env>:<app>}:slot:<0..1023>` using a persistent ring cursor, renews the lease periodically in the background, self-heals in place after transient network blips, and releases the slot on shutdown (supporting Kubernetes Deployments, HPA autoscaling, rolling updates, and canary/grayscale releases).
+
+It is never inferred uncoordinatedly from an IP address, MAC address, hostname, port, process ID, random value, or hash.
 
 ```yaml
 egon:
@@ -31,17 +35,30 @@ egon:
     component:
       id:
         enabled: true
-        machine-id: 17
+        # Option 1: explicit static ID (takes precedence when set; Redis is not contacted)
+        # machine-id: 17
         max-clock-backward: 5ms
+        # Option 2: Redis lease allocation when machine-id is omitted (isolated by env + app)
+        redis:
+          enabled: true
+          env: ${spring.profiles.active:default}
+          app: ${spring.application.name:}
+          lease-duration: 5m
+          renew-interval: 1m
 ```
 
 | Property | Type | Default | Description |
 |---|---|---|---|
 | `egon.cola.component.id.enabled` | `boolean` | `true` | Enables the default Snowflake binding. |
-| `egon.cola.component.id.machine-id` | `long` | none | Required explicit node ID from `0` to `1023`. |
+| `egon.cola.component.id.machine-id` | `Long` | none | Optional explicit node ID from `0` to `1023`; overrides Redis lease allocation when set. |
 | `egon.cola.component.id.max-clock-backward` | `Duration` | `5ms` | Largest rollback that the process may briefly wait out. |
+| `egon.cola.component.id.redis.enabled` | `boolean` | `true` | Enables Redis lease allocation when static `machine-id` is absent. |
+| `egon.cola.component.id.redis.env` | `String` | falls back to `egon.cola.component.tianshu.env` / `spring.profiles.active` / `default` | Environment segment isolating the Redis machine-ID pool. |
+| `egon.cola.component.id.redis.app` | `String` | falls back to `egon.cola.component.tianshu.app-code` / `spring.application.name` | Application segment isolating the Redis machine-ID pool. |
+| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | TTL of the leased machine-ID slot in Redis. |
+| `egon.cola.component.id.redis.renew-interval` | `Duration` | `1m` | Background heartbeat renewal interval (must be smaller than `lease-duration`). |
 
-Missing or out-of-range `machine-id` values fail during application context startup. Setting `enabled=false` binds no engine. A custom `IdGenerator` or `LongIdGenerator` bean makes the default auto-configuration back off.
+Missing or out-of-range `machine-id` values (when no `MachineIdProvider` / `RedissonClient` is available) fail during application context startup. Setting `enabled=false` binds no engine. A custom `IdGenerator` or `LongIdGenerator` bean makes the default auto-configuration back off.
 
 ## Spring Usage
 
