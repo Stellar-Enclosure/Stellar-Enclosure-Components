@@ -7,6 +7,7 @@ import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
+import io.grpc.Status;
 import top.egon.cola.component.common.trace.TraceContext;
 import top.egon.cola.component.rpc.context.invocation.RpcInvocationMetadata;
 import top.egon.cola.component.rpc.context.invocation.RpcMetadataKeys;
@@ -25,19 +26,40 @@ public class RpcProviderServerInterceptor implements ServerInterceptor {
             ServerCall<ReqT, RespT> call,
             Metadata headers,
             ServerCallHandler<ReqT, RespT> next) {
-        String sourceApp = safe(headers.get(RpcMetadataKeys.SOURCE_APP));
-        String sourceInstance = safe(headers.get(RpcMetadataKeys.SOURCE_INSTANCE));
-        TraceContext traceContext = TraceContext.fromHeaders(
-                name -> traceHeader(headers, name),
-                false
-        ).withSource(sourceApp, sourceInstance);
-        RpcInvocationMetadata invocation = new RpcInvocationMetadata(
-                safe(headers.get(RpcMetadataKeys.SERVICE)),
-                safe(headers.get(RpcMetadataKeys.GROUP)),
-                safe(headers.get(RpcMetadataKeys.VERSION)),
-                safe(headers.get(RpcMetadataKeys.INVOCATION_ID)),
-                traceContext
-        );
+        RpcInvocationMetadata invocation;
+        try {
+            // Never let the proxy's expected-timeout hint replace the gRPC deadline.
+            headers.discardAll(RpcMetadataKeys.PROXY_EXPECTED_REQUEST_TIMEOUT);
+            RpcMetadataKeys.validateRequestHeaders(headers);
+            String sourceApp = optionalValue(headers, RpcMetadataKeys.SOURCE_APP);
+            String sourceInstance = optionalValue(headers, RpcMetadataKeys.SOURCE_INSTANCE);
+            String attempt = headers.get(RpcMetadataKeys.ATTEMPT);
+            String requestDigest = headers.get(RpcMetadataKeys.REQUEST_DIGEST);
+            if ((attempt == null) != (requestDigest == null)) {
+                throw new IllegalArgumentException("RPC attempt and request digest must be supplied together");
+            }
+            Integer parsedAttempt = null;
+            if (attempt != null) {
+                if (!attempt.equals("1") && !attempt.equals("2")) {
+                    throw new IllegalArgumentException("RPC attempt must be 1 or 2");
+                }
+                parsedAttempt = Integer.valueOf(attempt);
+            }
+            TraceContext traceContext = TraceContext.fromHeaders(
+                    name -> traceHeader(headers, name), false).withSource(sourceApp, sourceInstance);
+            invocation = new RpcInvocationMetadata(
+                    optionalValue(headers, RpcMetadataKeys.SERVICE),
+                    optionalValue(headers, RpcMetadataKeys.GROUP),
+                    optionalValue(headers, RpcMetadataKeys.VERSION),
+                    optionalValue(headers, RpcMetadataKeys.LOGICAL_CALL_ID),
+                    parsedAttempt,
+                    requestDigest,
+                    traceContext);
+        } catch (IllegalArgumentException invalidMetadata) {
+            call.close(Status.INVALID_ARGUMENT.withDescription("RPC request metadata is invalid"), new Metadata());
+            return new ServerCall.Listener<>() { };
+        }
+        TraceContext traceContext = invocation.traceContext();
         Context context = Context.current().withValue(
                 RpcInvocationMetadata.CONTEXT_KEY,
                 invocation
@@ -49,10 +71,12 @@ public class RpcProviderServerInterceptor implements ServerInterceptor {
         return new TraceServerCallListener<>(listener, traceContext);
     }
 
-    private String safe(String value) {
-        return value != null && SAFE_VALUE.matcher(value).matches()
-                ? value
-                : null;
+    private String optionalValue(Metadata headers, Metadata.Key<String> key) {
+        String value = headers.get(key);
+        if (value != null && (value.isBlank() || !SAFE_VALUE.matcher(value).matches())) {
+            throw new IllegalArgumentException("RPC request metadata value is invalid");
+        }
+        return value;
     }
 
     private String traceHeader(Metadata headers, String name) {

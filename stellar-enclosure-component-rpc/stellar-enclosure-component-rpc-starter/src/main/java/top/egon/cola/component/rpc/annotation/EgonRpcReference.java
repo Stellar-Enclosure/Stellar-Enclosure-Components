@@ -17,6 +17,6 @@ public @interface EgonRpcReference {
     String group() default "";
     /** Optional consistency pin; it cannot replace the native contract version. */
     String version() default "";
-    /** Zero additional attempts; nonzero values require the later explicit approval contract. */
-    int retries() default 0;
+    /** -1 inherits deployment approval; 0 opts out; 1 requires an explicit deployment grant. */
+    int retries() default -1;
 }

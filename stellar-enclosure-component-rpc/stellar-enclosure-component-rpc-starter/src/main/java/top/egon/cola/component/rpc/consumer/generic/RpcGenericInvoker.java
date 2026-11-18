@@ -16,6 +16,7 @@ import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationExecutor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationPlan;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferencePolicy;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
+import top.egon.cola.component.rpc.context.invocation.RpcInvocationMetadata;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -28,7 +29,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Executes canonical raw-Protobuf unary calls through the typed core. */
@@ -111,61 +111,43 @@ public final class RpcGenericInvoker {
                 entry.strategy(), byte[].class, rawInvoker(invocation, entry));
     }
 
-    private RpcInvocationPlan.UnaryInvoker rawInvoker(RpcGenericInvocation invocation, RpcGenericTargetCache.Entry entry) {
+    private RpcInvocationPlan.InvocationFactory rawInvoker(
+            RpcGenericInvocation invocation, RpcGenericTargetCache.Entry entry) {
         MethodDescriptor<byte[], byte[]> method = entry.method();
-        return (request, lease, timeout, invocationId) -> {
-            byte[] payload = Arrays.copyOf(
-                    (byte[]) request,
-                    ((byte[]) request).length
-            );
+        return (request, logicalCallId) -> {
+            byte[] payload = Arrays.copyOf((byte[]) request, ((byte[]) request).length);
             RpcClientInvocation context = RpcClientInvocation.generic(
-                    invocation,
-                    processIdentity,
-                    invocationId,
-                    entry.strategy().target()
-            );
-            List<ClientInterceptor> interceptors = new ArrayList<>();
-            interceptors.add(RpcConsumerClientInterceptor.forTarget(
-                    invocation.serviceName(),
-                    invocation.group(),
-                    invocation.version(),
-                    processIdentity,
-                    invocationId
-            ));
-            interceptorFactories.stream()
-                    .map(factory -> factory.create(context))
-                    .forEach(interceptors::add);
-            Channel invocationChannel = ClientInterceptors.interceptForward(
-                    lease.channel(),
-                    interceptors
-            );
-            long timeoutNanos = Math.max(1, timeout.toNanos());
-            CallOptions callOptions = CallOptions.DEFAULT.withDeadlineAfter(
-                    timeoutNanos,
-                    TimeUnit.NANOSECONDS
-            );
-            ListenableFuture<byte[]> future = ClientCalls.futureUnaryCall(
-                    invocationChannel.newCall(method, callOptions),
-                    payload
-            );
-            CompletableFuture<Object> completion = new CompletableFuture<>();
-            future.addListener(() -> {
-                try {
-                    completion.complete(future.get());
-                } catch (CancellationException exception) {
-                    completion.cancel(false);
-                } catch (ExecutionException exception) {
-                    completion.completeExceptionally(exception.getCause());
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    completion.completeExceptionally(exception);
-                }
-            }, Runnable::run);
-            return new RpcInvocationPlan.Attempt(
-                    completion,
-                    () -> future.cancel(true)
-            );
+                    invocation, processIdentity, logicalCallId, entry.strategy().target());
+            List<ClientInterceptor> extensions = interceptorFactories.stream().map(factory -> factory.create(context)).toList();
+            String requestDigest = RpcInvocationMetadata.requestDigest(payload);
+            return (ignored, lease, timeout, attempt) -> {
+                List<ClientInterceptor> interceptors = new ArrayList<>(extensions);
+                interceptors.add(RpcConsumerClientInterceptor.forTarget(
+                        invocation.serviceName(), invocation.group(), invocation.version(), processIdentity,
+                        logicalCallId, attempt.number(), requestDigest, attempt::markResponseCommitted));
+                Channel channel = ClientInterceptors.interceptForward(lease.channel(), interceptors);
+                CallOptions options = CallOptions.DEFAULT.withDeadline(attempt.deadline());
+                ListenableFuture<byte[]> future = ClientCalls.futureUnaryCall(channel.newCall(method, options), payload);
+                return new RpcInvocationPlan.Attempt(futureCompletion(future), () -> future.cancel(true));
+            };
         };
+    }
+
+    private static CompletableFuture<Object> futureCompletion(ListenableFuture<byte[]> future) {
+        CompletableFuture<Object> completion = new CompletableFuture<>();
+        future.addListener(() -> {
+            try {
+                completion.complete(future.get());
+            } catch (CancellationException exception) {
+                completion.cancel(false);
+            } catch (ExecutionException exception) {
+                completion.completeExceptionally(exception.getCause());
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                completion.completeExceptionally(exception);
+            }
+        }, Runnable::run);
+        return completion;
     }
 
     static MethodDescriptor<byte[], byte[]> rawMethod(String fullMethodName) {

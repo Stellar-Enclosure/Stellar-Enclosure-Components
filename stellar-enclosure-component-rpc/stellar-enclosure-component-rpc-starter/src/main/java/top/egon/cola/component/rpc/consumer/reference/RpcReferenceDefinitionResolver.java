@@ -40,6 +40,7 @@ public class RpcReferenceDefinitionResolver {
     @Qualifier("applicationContext")
     private final ApplicationContext applicationContext;
     private volatile Map<String, RpcServiceTargetVO> targets;
+    private Map<String, RpcReferencePolicy> retryApprovals;
     private long timeoutCeilingMs;
 
     public RpcReferenceDefinitionResolver(EgonRpcProperties properties) {
@@ -55,6 +56,9 @@ public class RpcReferenceDefinitionResolver {
         if (consumer == null || consumer.getBindings() == null || consumer.getDefaultTimeoutMs() <= 0) {
             throw invalid("RPC consumer bindings and a positive timeout are required");
         }
+        if (!consumer.isRetryApprovalConfigurationValid()) {
+            throw invalid("RPC deployment retry approval is invalid or unbound");
+        }
         Map<String, RpcServiceTargetVO> configured = new LinkedHashMap<>();
         for (var entry : consumer.getBindings().entrySet()) {
             var binding = entry.getValue();
@@ -68,7 +72,14 @@ public class RpcReferenceDefinitionResolver {
                 throw invalid("RPC reference deployment binding is invalid");
             }
         }
+        Map<String, RpcReferencePolicy> approved = new LinkedHashMap<>();
+        for (var entry : consumer.getRetryApprovals().entrySet()) {
+            var approval = entry.getValue();
+            approved.put(entry.getKey(), new RpcReferencePolicy(approval.getTotalTimeoutMs(),
+                    approval.getRetries(), approval.getAttemptTimeoutMs()));
+        }
         timeoutCeilingMs = consumer.getDefaultTimeoutMs();
+        retryApprovals = Map.copyOf(approved);
         targets = Map.copyOf(configured);
     }
 
@@ -93,7 +104,8 @@ public class RpcReferenceDefinitionResolver {
             throw invalid("RPC reference logical identity does not match its native contract");
         }
         RpcServiceIdentity identity = RpcServiceIdentity.from(descriptor);
-        Set<String> methods = descriptor.methods().stream().map(RpcMethodDescriptor::fullMethodName).collect(Collectors.toUnmodifiableSet());
+        Set<String> methods = descriptor.methods().stream()
+                .map(RpcMethodDescriptor::fullMethodName).collect(Collectors.toUnmodifiableSet());
         RpcServiceTargetVO target = resolve(annotationBindingId(reference.bindingId()), identity, methods).target();
         EgonRpcService service = descriptor.contractType().getAnnotation(EgonRpcService.class);
         EgonServiceMeta typeMeta = descriptor.contractType().getAnnotation(EgonServiceMeta.class);
@@ -101,12 +113,14 @@ public class RpcReferenceDefinitionResolver {
         for (RpcMethodDescriptor method : descriptor.methods()) {
             var methodMeta = method.javaMethod().getAnnotation(EgonServiceMeta.class);
             var rpcMethod = method.javaMethod().getAnnotation(EgonRpcMethod.class);
-            rejectRetries(reference.retries(), service == null ? 0 : service.retries(), typeMeta == null ? 0 : typeMeta.retries(),
+            validateRetryHints(reference.retries(), service == null ? 0 : service.retries(), typeMeta == null ? 0 : typeMeta.retries(),
                     methodMeta == null ? 0 : methodMeta.retries(), rpcMethod == null ? 0 : rpcMethod.retries());
-            policies.put(method.javaMethod(), new RpcReferencePolicy(timeout(
+            long timeoutMs = timeout(
                     defaultTimeoutMs(), reference.timeoutMs(), service == null ? -1 : service.timeoutMs(),
                     typeMeta == null ? -1 : typeMeta.timeoutMs(), methodMeta == null ? -1 : methodMeta.timeoutMs(),
-                    rpcMethod == null ? -1 : rpcMethod.timeoutMs())));
+                    rpcMethod == null ? -1 : rpcMethod.timeoutMs());
+            policies.put(method.javaMethod(), policy(method.fullMethodName(), timeoutMs, reference.retries(),
+                    rpcMethod == null ? -1 : rpcMethod.retries()));
         }
         return new RpcReferenceDefinition(target, identity, policies);
     }
@@ -169,10 +183,24 @@ public class RpcReferenceDefinitionResolver {
         return resolved;
     }
 
-    private static void rejectRetries(int... values) {
+    private RpcReferencePolicy policy(String fullMethodName, long timeoutMs, int requestedRetries, int methodRetryCap) {
+        RpcReferencePolicy approved = retryApprovals.get(fullMethodName);
+        int allowedRetries = approved == null ? 0 : approved.retries();
+        if (requestedRetries > allowedRetries) {
+            throw invalid("RPC reference retry exceeds its deployment approval");
+        }
+        if (approved == null) {
+            return new RpcReferencePolicy(timeoutMs);
+        }
+        long totalTimeoutMs = Math.min(timeoutMs, approved.timeoutMs());
+        return new RpcReferencePolicy(totalTimeoutMs, requestedRetries == 0 || methodRetryCap == 0 ? 0 : allowedRetries,
+                Math.min(totalTimeoutMs, approved.attemptTimeoutMs()));
+    }
+
+    private static void validateRetryHints(int... values) {
         for (int value : values) {
-            if (value != 0 && value != -1) {
-                throw invalid("RPC retries require explicit method approval");
+            if (value < -1 || value > 1) {
+                throw invalid("RPC retry hints must be -1, 0 or 1");
             }
         }
     }

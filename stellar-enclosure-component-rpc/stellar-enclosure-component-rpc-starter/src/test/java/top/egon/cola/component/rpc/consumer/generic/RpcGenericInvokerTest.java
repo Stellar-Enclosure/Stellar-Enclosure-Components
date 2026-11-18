@@ -2,9 +2,11 @@ package top.egon.cola.component.rpc.consumer.generic;
 
 import com.google.protobuf.StringValue;
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.netty.shaded.io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
+import io.grpc.stub.MetadataUtils;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -13,6 +15,7 @@ import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.config.EgonRpcProperties;
 import top.egon.cola.component.rpc.consumer.channel.RpcChannelLease;
+import top.egon.cola.component.rpc.consumer.interceptor.RpcClientInterceptorFactory;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationExecutor;
 import top.egon.cola.component.rpc.consumer.invocation.RpcInvocationPlan;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinitionResolver;
@@ -63,6 +66,19 @@ class RpcGenericInvokerTest {
             CompletionStage<byte[]> response = running.invoker.invokeAsync(invocation(StringValue.of("async"), 2000));
             assertThat(StringValue.parseFrom(response.toCompletableFuture().get(5, TimeUnit.SECONDS)))
                     .isEqualTo(StringValue.of("provider:async"));
+        }
+    }
+
+    @Test
+    void rejectsProxyControlMetadataAddedByAnExtensionBeforeTransport() throws Exception {
+        Metadata disallowed = new Metadata();
+        disallowed.put(Metadata.Key.of("x-envoy-retry-on", Metadata.ASCII_STRING_MARSHALLER), "unavailable");
+        RpcClientInterceptorFactory extension = invocation -> MetadataUtils.newAttachHeadersInterceptor(disallowed);
+
+        try (RunningServer running = server(List.of(extension))) {
+            assertThatThrownBy(() -> running.invoker.invokeBlocking(invocation(StringValue.of("blocked"), 2000)))
+                    .isInstanceOf(EgonRpcException.class)
+                    .hasRootCauseInstanceOf(IllegalArgumentException.class);
         }
     }
 
@@ -181,6 +197,10 @@ class RpcGenericInvokerTest {
     }
 
     private RunningServer server() throws Exception {
+        return server(List.of());
+    }
+
+    private RunningServer server(List<RpcClientInterceptorFactory> extensions) throws Exception {
         RpcContractDescriptor contract = new RpcContractValidator(VALIDATION_UTILS).validate(RpcProviderTestFixtures.EchoContract.class);
         RpcProviderBinding binding = new RpcProviderBinding(new RpcProviderTestFixtures.EchoProvider(), contract);
         RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
@@ -199,8 +219,9 @@ class RpcGenericInvokerTest {
             });
             return strategy;
         }, 4, Duration.ofSeconds(1), System::currentTimeMillis);
-        return new RunningServer(server, channel, cache,
-                new RpcGenericInvoker(cache, new RpcInvocationExecutor(new RpcStatusExceptionMapper()), identity(), List.of()));
+        RpcInvocationExecutor executor = new RpcInvocationExecutor(new RpcStatusExceptionMapper());
+        return new RunningServer(server, channel, cache, executor,
+                new RpcGenericInvoker(cache, executor, identity(), extensions));
     }
 
     private RpcProcessIdentity identity() {
@@ -208,8 +229,9 @@ class RpcGenericInvokerTest {
     }
 
     private record RunningServer(Server server, ManagedChannel channel, RpcGenericTargetCache cache,
-                                 RpcGenericInvoker invoker) implements AutoCloseable {
+                                 RpcInvocationExecutor executor, RpcGenericInvoker invoker) implements AutoCloseable {
         @Override public void close() throws Exception {
+            executor.close();
             cache.close();
             channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);

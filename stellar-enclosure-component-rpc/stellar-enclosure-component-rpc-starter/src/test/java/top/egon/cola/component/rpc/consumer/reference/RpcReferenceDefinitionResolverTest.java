@@ -6,16 +6,19 @@ import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationContext;
 import org.springframework.mock.env.MockEnvironment;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
+import top.egon.cola.component.rpc.annotation.EgonRpcMethod;
 import top.egon.cola.component.rpc.annotation.EgonRpcReference;
 import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.config.EgonRpcProperties;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
+import top.egon.cola.component.rpc.contract.descriptor.RpcMethodDescriptor;
 import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
 import top.egon.cola.component.rpc.contract.validation.RpcContractValidator;
 import top.egon.cola.component.rpc.support.RpcProviderTestFixtures.EchoContract;
 
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -129,6 +132,82 @@ class RpcReferenceDefinitionResolverTest {
     }
 
     @Test
+    void appliesOnlyTheDeployedExactReadApprovalAndLetsTheReferenceOptOut() throws Exception {
+        var approvedDescriptor = approvedDescriptor();
+        var properties = approvedProperties();
+        var resolver = new RpcReferenceDefinitionResolver(properties);
+        var method = EchoContract.class.getMethod("echo", StringValue.class);
+
+        var inherited = resolver.resolve(Holder.class.getDeclaredField("inherited"), approvedDescriptor).policyFor(method);
+        assertThat(inherited).isEqualTo(new RpcReferencePolicy(1500, 1, 600));
+        var explicit = resolver.resolve(Holder.class.getDeclaredField("retrying"), approvedDescriptor).policyFor(method);
+        assertThat(explicit).isEqualTo(inherited);
+        var optedOut = resolver.resolve(Holder.class.getDeclaredField("optedOut"), approvedDescriptor).policyFor(method);
+        assertThat(optedOut).isEqualTo(new RpcReferencePolicy(1500, 0, 600));
+        var narrowed = resolver.resolve(Holder.class.getDeclaredField("configured"), approvedDescriptor).policyFor(method);
+        assertThat(narrowed).isEqualTo(new RpcReferencePolicy(400, 1, 400));
+        assertThat(resolver.resolve("identity-directory", RpcServiceIdentity.from(approvedDescriptor),
+                Set.of(RpcReferencePolicy.APPROVED_READ_METHOD)).typedPolicies()).isEmpty();
+    }
+
+    @Test
+    void aReferenceCannotGrantRetryAndAnAbsentApprovalStaysSingleAttempt() throws Exception {
+        var properties = approvedProperties();
+        properties.getConsumer().getRetryApprovals().clear();
+        var resolver = new RpcReferenceDefinitionResolver(properties);
+        var approvedDescriptor = approvedDescriptor();
+        var method = EchoContract.class.getMethod("echo", StringValue.class);
+        assertThat(resolver.resolve(Holder.class.getDeclaredField("inherited"), approvedDescriptor)
+                .policyFor(method)).isEqualTo(new RpcReferencePolicy(2000));
+        assertInvalid(() -> resolver.resolve(Holder.class.getDeclaredField("retrying"), approvedDescriptor));
+
+        var disabled = approvedProperties();
+        disabled.getConsumer().getRetryApprovals().get(RpcReferencePolicy.APPROVED_READ_METHOD).setRetries(0);
+        assertInvalid(() -> new RpcReferenceDefinitionResolver(disabled)
+                .resolve(Holder.class.getDeclaredField("retrying"), approvedDescriptor));
+    }
+
+    @Test
+    void explicitMethodOptOutNarrowsTheDeployedGrant() throws Exception {
+        var method = MethodOptOutContract.class.getMethod("membership", StringValue.class);
+        var definition = new RpcReferenceDefinitionResolver(approvedProperties())
+                .resolve(Holder.class.getDeclaredField("methodOptedOut"),
+                        approvedDescriptor(MethodOptOutContract.class, method));
+        assertThat(definition.policyFor(method)).isEqualTo(new RpcReferencePolicy(1500, 0, 600));
+    }
+
+    @Test
+    void validatesEveryApprovalBeforePublishingAnImmutableResolutionSnapshot() throws Exception {
+        var properties = approvedProperties();
+        var resolver = new RpcReferenceDefinitionResolver(properties);
+        resolver.initialize();
+        properties.getConsumer().getRetryApprovals().get(RpcReferencePolicy.APPROVED_READ_METHOD)
+                .setRetries(0).setAttemptTimeoutMs(1).setTotalTimeoutMs(1);
+        properties.getConsumer().getRetryApprovals().clear();
+        assertThat(resolver.resolve(Holder.class.getDeclaredField("inherited"), approvedDescriptor())
+                .policyFor(EchoContract.class.getMethod("echo", StringValue.class)))
+                .isEqualTo(new RpcReferencePolicy(1500, 1, 600));
+
+        var unknown = approvedProperties();
+        unknown.getConsumer().getRetryApprovals().put(FULL_METHOD,
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 600, 1500));
+        assertInvalid(() -> new RpcReferenceDefinitionResolver(unknown).initialize());
+        var unbound = approvedProperties();
+        unbound.getConsumer().getBindings().get("identity-directory").setMethods(Set.of(FULL_METHOD));
+        assertInvalid(() -> new RpcReferenceDefinitionResolver(unbound).initialize());
+        for (var approval : List.of(
+                new EgonRpcProperties.RpcRetryApprovalConfig(2, 600, 1500),
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 601, 1500),
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 600, 1501),
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 0, 1500),
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 600, 500))) {
+            var invalid = approvedProperties();
+            invalid.getConsumer().getRetryApprovals().put(RpcReferencePolicy.APPROVED_READ_METHOD, approval);
+            assertInvalid(() -> new RpcReferenceDefinitionResolver(invalid).initialize());
+        }
+    }
+
+    @Test
     void rejectsAddressesVersionBackendsAndMalformedNativeMethods() {
         for (String service : Set.of("127.0.0.1", "10-0-0-1:30080", "https://identity", "identity.prod", "identity-stable",
                 "identity-canary", "stable", "canary", "Identity", "identity_name")) {
@@ -166,6 +245,29 @@ class RpcReferenceDefinitionResolverTest {
         return properties;
     }
 
+    private static EgonRpcProperties approvedProperties() {
+        var properties = properties();
+        properties.getConsumer().setDefaultTimeoutMs(2000);
+        properties.getConsumer().getBindings().get("identity-directory")
+                .setMethods(Set.of(RpcReferencePolicy.APPROVED_READ_METHOD));
+        properties.getConsumer().getRetryApprovals().put(RpcReferencePolicy.APPROVED_READ_METHOD,
+                new EgonRpcProperties.RpcRetryApprovalConfig(1, 600, 1500));
+        return properties;
+    }
+
+    private RpcContractDescriptor approvedDescriptor() {
+        return approvedDescriptor(EchoContract.class, descriptor.methods().getFirst().javaMethod());
+    }
+
+    private RpcContractDescriptor approvedDescriptor(Class<?> contractType, java.lang.reflect.Method javaMethod) {
+        var original = descriptor.methods().getFirst();
+        var method = new RpcMethodDescriptor(javaMethod, "GetTenantMembership",
+                RpcReferencePolicy.APPROVED_READ_METHOD, original.idempotent(), original.invocationMode(),
+                original.requestType(), original.responseType(), original.grpcMethod(), original.protoMethod());
+        return new RpcContractDescriptor(contractType,
+                "egon.tianquan.shoubing.v1.IdentityDirectoryService", descriptor.group(), descriptor.version(), List.of(method));
+    }
+
     private static void assertInvalid(org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {
         assertThatThrownBy(action).isInstanceOfSatisfying(EgonRpcException.class,
                 error -> assertThat(error.getRpcErrorCode()).isEqualTo(EgonRpcErrorCode.RPC_INVALID_CONTRACT));
@@ -181,5 +283,13 @@ class RpcReferenceDefinitionResolverTest {
         @EgonRpcReference(bindingId = "identity-directory", version = "2.0.0") private EchoContract wrongVersion;
         @EgonRpcReference(bindingId = "identity-directory", timeoutMs = 0) private EchoContract invalidTimeout;
         @EgonRpcReference(bindingId = "identity-directory", retries = 1) private EchoContract retrying;
+        @EgonRpcReference(bindingId = "identity-directory") private EchoContract inherited;
+        @EgonRpcReference(bindingId = "identity-directory", retries = 0) private EchoContract optedOut;
+        @EgonRpcReference(bindingId = "identity-directory") private MethodOptOutContract methodOptedOut;
+    }
+
+    interface MethodOptOutContract {
+        @EgonRpcMethod(name = "GetTenantMembership", retries = 0)
+        StringValue membership(StringValue request);
     }
 }

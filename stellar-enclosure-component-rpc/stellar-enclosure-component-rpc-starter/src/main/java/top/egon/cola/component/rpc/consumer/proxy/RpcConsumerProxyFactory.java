@@ -20,6 +20,7 @@ import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinition;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferencePolicy;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferenceStrategy;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
+import top.egon.cola.component.rpc.context.invocation.RpcInvocationMetadata;
 import top.egon.cola.component.rpc.contract.descriptor.RpcContractDescriptor;
 import top.egon.cola.component.rpc.contract.descriptor.RpcMethodDescriptor;
 
@@ -34,7 +35,6 @@ import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
 
 /** Builds a typed proxy whose method plans use one trusted Kubernetes Service binding. */
 public final class RpcConsumerProxyFactory {
@@ -75,25 +75,27 @@ public final class RpcConsumerProxyFactory {
                 strategy, method.responseType(), typedInvoker(contract, definition, method));
     }
 
-    private RpcInvocationPlan.UnaryInvoker typedInvoker(RpcContractDescriptor contract,
-                                                        RpcReferenceDefinition definition,
-                                                        RpcMethodDescriptor method) {
-        return (request, lease, timeout, invocationId) -> {
+    private RpcInvocationPlan.InvocationFactory typedInvoker(RpcContractDescriptor contract,
+                                                              RpcReferenceDefinition definition,
+                                                              RpcMethodDescriptor method) {
+        return (request, logicalCallId) -> {
             Message message = (Message) request;
             RpcClientInvocation context = RpcClientInvocation.typed(contract, method, message, processIdentity,
                     definition.serviceIdentity().group(), definition.serviceIdentity().version(),
-                    invocationId, definition.target());
-            List<ClientInterceptor> interceptors = new ArrayList<>();
-            interceptors.add(RpcConsumerClientInterceptor.forTarget(contract.serviceName(),
-                    definition.serviceIdentity().group(), definition.serviceIdentity().version(),
-                    processIdentity, invocationId));
-            interceptorFactories.stream().map(factory -> factory.create(context)).forEach(interceptors::add);
-            Channel channel = ClientInterceptors.interceptForward(lease.channel(), interceptors);
-            CallOptions options = CallOptions.DEFAULT.withDeadlineAfter(Math.max(1, timeout.toNanos()),
-                    TimeUnit.NANOSECONDS);
-            ListenableFuture<Message> future = ClientCalls.futureUnaryCall(
-                    channel.newCall(method.grpcMethod(), options), message);
-            return new RpcInvocationPlan.Attempt(futureCompletion(future), () -> future.cancel(true));
+                    logicalCallId, definition.target());
+            List<ClientInterceptor> extensions = interceptorFactories.stream().map(factory -> factory.create(context)).toList();
+            String requestDigest = RpcInvocationMetadata.canonicalRequestDigest(message);
+            return (ignored, lease, timeout, attempt) -> {
+                List<ClientInterceptor> interceptors = new ArrayList<>(extensions);
+                interceptors.add(RpcConsumerClientInterceptor.forTarget(contract.serviceName(),
+                        definition.serviceIdentity().group(), definition.serviceIdentity().version(),
+                        processIdentity, logicalCallId, attempt.number(), requestDigest, attempt::markResponseCommitted));
+                Channel channel = ClientInterceptors.interceptForward(lease.channel(), interceptors);
+                CallOptions options = CallOptions.DEFAULT.withDeadline(attempt.deadline());
+                ListenableFuture<Message> future = ClientCalls.futureUnaryCall(
+                        channel.newCall(method.grpcMethod(), options), message);
+                return new RpcInvocationPlan.Attempt(futureCompletion(future), () -> future.cancel(true));
+            };
         };
     }
 
