@@ -36,6 +36,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
 import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
 import top.egon.cola.component.common.mybatis.business.EgonColaUserIdProvider;
+import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 
@@ -109,6 +110,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
     @Override
     public void beforeQuery(Executor executor, MappedStatement statement, Object parameter, RowBounds bounds, ResultHandler handler, BoundSql sql) {
         SqlShapeBO shape = shape(sql.getSql());
+        validateTechnicalTables(statement, shape);
         com.baomidou.mybatisplus.core.toolkit.ParameterUtils.findPage(parameter).ifPresent(page -> {
             if (page.getSize() < 1 || page.getSize() > properties.getPagination().getMaxPageSize()) {
                 throw new IllegalStateException("PAGE_SIZE_INVALID");
@@ -139,6 +141,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
         var wrapped = PluginUtils.mpStatementHandler(handler);
         BoundSql sql = handler.getBoundSql();
         SqlShapeBO shape = shape(sql.getSql());
+        validateTechnicalTables(wrapped.mappedStatement(), shape);
         if (allIgnored(shape, properties)) {
             return;
         }
@@ -157,6 +160,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
 
     List<ScopedRouteQuery> validateFinal(MappedStatement statement, BoundSql sql, Map<String, EgonColaRoutingProfileBO> profiles) {
         SqlShapeBO shape = shape(sql.getSql());
+        validateTechnicalTables(statement, shape);
         if (allIgnored(shape, properties)) {
             return List.of();
         }
@@ -789,6 +793,17 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
             }, null);
         }
         return found[0];
+    }
+
+    private void validateTechnicalTables(MappedStatement statement, SqlShapeBO shape) {
+        boolean technical = EgonColaTechnicalTenantScope.requiresScope(statement);
+        for (TableScopeBO scope : shape.scopes()) {
+            if (technical || ignored(scope)) {
+                EgonColaTechnicalTenantScope.assertSqlTable(statement,
+                        scope.table().getSchemaName() == null ? null : identifier(scope.table().getSchemaName()),
+                        identifier(scope.table().getName()), ignored(scope));
+            }
+        }
     }
 
     private Long requireTenant() {

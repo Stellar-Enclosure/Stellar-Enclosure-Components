@@ -1,6 +1,12 @@
 package top.egon.cola.component.common.mybatis.integration;
 
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.annotation.TableName;
+import top.egon.cola.component.common.mybatis.extension.EgonColaExplicitTenantScopeMapper;
+import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
+import top.egon.cola.component.common.mybatis.extension.EgonColaMapper;
+import top.egon.cola.component.common.mybatis.model.EgonModel;
+import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import org.apache.ibatis.executor.Executor;
 import org.apache.ibatis.executor.statement.StatementHandler;
 import org.apache.ibatis.mapping.Environment;
@@ -232,6 +238,187 @@ class EgonColaLocalWriteGuardTest {
                     mock(Connection.class), null)).hasMessageContaining("SHARDING_KEY");
         }
     }
+
+    @Test
+    void fixedTechnicalTenantReadsUseTheRegisteredSingleTargetAtBeforePrepare() {
+        try (var validators = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            var source = mock(DataSource.class);
+            var configuration = configuration(source);
+            configuration.addMapper(TechnicalControlMapper.class);
+            var profile = new EgonColaRoutingProfileBO("technical_control_t0", EgonColaRoutingProfileBO.TableKindEnum.SINGLE,
+                    "single-v1", 1, 1, Map.of(), null, null, 0x9e3779b97f4a7c15L,
+                    Map.of(new EgonColaRoutingProfileBO.PartitionKeyBO(0, 0),
+                            List.of(new EgonColaPhysicalTargetBO("primary_a", "public", "technical_control_t0"))), 1, null);
+            var properties = new EgonColaMybatisPlusProperties();
+            var sqlGuard = new EgonColaTenantIdGuardInnerInterceptor(() -> "tester", properties);
+            var strategy = new top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy(
+                    new top.egon.cola.component.common.core.validation.ValidationUtils(validators.getValidator()));
+            var guard = new EgonColaLocalWriteGuardInnerInterceptor(query -> {
+                throw new AssertionError("Fixed technical scope must use its actual SINGLE address");
+            }, sqlGuard, strategy, Map.of(profile.logicalTable(), profile));
+            new TestTenantIdProvider().set(0L);
+            try {
+                EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                    assertThatCode(() -> guard.beforePrepare(handler(configuration,
+                            TechnicalControlMapper.class.getName() + ".find", SqlCommandType.SELECT,
+                            "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()),
+                            mock(Connection.class), null)).doesNotThrowAnyException();
+                    return null;
+                });
+            } finally { new TestTenantIdProvider().set(41L); }
+        }
+    }
+
+    @Test
+    void ordinaryLegacyScalarReadsRetainTheirSignedLongDomain() {
+        var guard = guard(query -> result("primary_a", query.logicalTable()));
+        var configuration = configuration(mock(DataSource.class));
+        try {
+            for (long tenant : new long[]{Long.MIN_VALUE, -1L, 0L, 1L, Long.MAX_VALUE}) {
+                new TestTenantIdProvider().set(tenant);
+                assertThatCode(() -> guard.beforePrepare(handler(configuration, "test.Mapper.find", SqlCommandType.SELECT,
+                        "SELECT id FROM legacy_records WHERE tenant_id=#{tenantId} AND deleted_at IS NULL",
+                        Map.of("tenantId", tenant)), mock(Connection.class), null)).doesNotThrowAnyException();
+            }
+        } finally { new TestTenantIdProvider().set(41L); }
+    }
+
+    @Test
+    void technicalSingleReadsRejectBareZeroUnregisteredAndDifferentMappers() {
+        var configuration = configuration(mock(DataSource.class));
+        configuration.addMapper(TechnicalControlMapper.class);
+        var profile = technicalProfile("primary_a", "public", EgonColaRoutingProfileBO.TableKindEnum.SINGLE);
+        var guard = technicalGuard(Map.of(profile.logicalTable(), profile), new EgonColaMybatisPlusProperties());
+        String read = "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL";
+        new TestTenantIdProvider().set(0L);
+        try {
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find",
+                    SqlCommandType.SELECT, read, Map.of()), mock(Connection.class), null))
+                    .hasMessageContaining("TECHNICAL_TENANT_SCOPE_REQUIRED");
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, "test.Mapper.find",
+                    SqlCommandType.SELECT, read, Map.of()), mock(Connection.class), null))
+                    .hasMessageContaining("TECHNICAL_TENANT_SCOPE_REQUIRED");
+            EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                assertThatThrownBy(() -> guard.beforePrepare(handler(configuration(mock(DataSource.class)),
+                        TechnicalControlMapper.class.getName() + ".find", SqlCommandType.SELECT, read, Map.of()),
+                        mock(Connection.class), null)).hasMessageContaining("TECHNICAL_TENANT_SCOPE_REQUIRED");
+                assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, "test.OtherMapper.find",
+                        SqlCommandType.SELECT, read, Map.of()), mock(Connection.class), null))
+                        .hasMessageContaining("TECHNICAL_TENANT_SCOPE_REQUIRED");
+                return null;
+            });
+        } finally { new TestTenantIdProvider().set(41L); }
+    }
+
+    @Test
+    void technicalRawSqlCannotChangeTablesOrSchemasEvenThroughIgnoredScopes() {
+        var configuration = configuration(mock(DataSource.class));
+        configuration.addMapper(TechnicalControlMapper.class);
+        var properties = new EgonColaMybatisPlusProperties();
+        properties.getTenantId().getIgnoredTables().add("foreign_table");
+        var profile = technicalProfile("primary_a", "public", EgonColaRoutingProfileBO.TableKindEnum.SINGLE);
+        var guard = technicalGuard(Map.of(profile.logicalTable(), profile), properties);
+        new TestTenantIdProvider().set(0L);
+        try {
+            EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                for (String table : List.of("public.foreign_table", "wrong_schema.technical_control_t0")) {
+                    assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find",
+                            SqlCommandType.SELECT, "SELECT id FROM " + table + " WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()),
+                            mock(Connection.class), null)).hasMessageContaining("TECHNICAL_TENANT_TABLE_MISMATCH");
+                }
+                return null;
+            });
+        } finally { new TestTenantIdProvider().set(41L); }
+    }
+
+    @Test
+    void technicalRoutingRequiresConfiguredSingleProfileAndExactPhysicalSchema() {
+        var configuration = configuration(mock(DataSource.class));
+        configuration.addMapper(TechnicalControlMapper.class);
+        String read = "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL";
+        new TestTenantIdProvider().set(0L);
+        try {
+            EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                for (Map<String, EgonColaRoutingProfileBO> profiles : List.of(Map.<String, EgonColaRoutingProfileBO>of(),
+                        Map.of("technical_control_t0", technicalProfile("primary_a", "public", EgonColaRoutingProfileBO.TableKindEnum.BROADCAST_READ_ONLY)),
+                        Map.of("technical_control_t0", technicalProfile("primary_a", "wrong_schema", EgonColaRoutingProfileBO.TableKindEnum.SINGLE)))) {
+                    var guard = technicalGuard(profiles, new EgonColaMybatisPlusProperties());
+                    assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find",
+                            SqlCommandType.SELECT, read, Map.of()), mock(Connection.class), null))
+                            .hasMessageContaining("TECHNICAL_TENANT_SINGLE_REQUIRED");
+                }
+                return null;
+            });
+        } finally { new TestTenantIdProvider().set(41L); }
+    }
+
+    @Test
+    void technicalReadsPinTheLocalPrimaryBeforeSubsequentPositiveTenantWrites() {
+        var source = mock(DataSource.class);
+        var connection = mock(Connection.class);
+        var configuration = configuration(source);
+        configuration.addMapper(TechnicalControlMapper.class);
+        var profile = technicalProfile("primary_a", "public", EgonColaRoutingProfileBO.TableKindEnum.SINGLE);
+        var guard = technicalGuard(Map.of(profile.logicalTable(), profile), new EgonColaMybatisPlusProperties());
+        ConnectionHolder holder = begin(source, connection);
+        try {
+            new TestTenantIdProvider().set(0L);
+            EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find", SqlCommandType.SELECT,
+                        "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()), connection, null);
+                return null;
+            });
+            new TestTenantIdProvider().set(41L);
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, "b", SqlCommandType.UPDATE), connection, null))
+                    .hasMessageContaining("LOCAL_WRITE_TARGET_MISMATCH");
+            assertThat(holder.isRollbackOnly()).isTrue();
+            verifyNoInteractions(connection);
+        } finally { new TestTenantIdProvider().set(41L); end(source); }
+    }
+
+    @Test
+    void ignoredTechnicalPlumbingRetainsOnlyItsExactQualifiedScope() {
+        var configuration = configuration(mock(DataSource.class));
+        configuration.addMapper(TechnicalControlMapper.class);
+        var properties = new EgonColaMybatisPlusProperties();
+        properties.getTenantId().getIgnoredTables().add("technical_control_t0");
+        var guard = technicalGuard(Map.of(), properties);
+        new TestTenantIdProvider().set(0L);
+        try {
+            EgonColaTechnicalTenantScope.execute(TechnicalControlMapper.class, () -> {
+                assertThatCode(() -> guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find",
+                        SqlCommandType.SELECT, "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()),
+                        mock(Connection.class), null)).doesNotThrowAnyException();
+                assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, TechnicalControlMapper.class.getName() + ".find",
+                        SqlCommandType.SELECT, "SELECT id FROM technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()),
+                        mock(Connection.class), null)).hasMessageContaining("TECHNICAL_TENANT_TABLE_MISMATCH");
+                return null;
+            });
+            assertThatThrownBy(() -> guard.beforePrepare(handler(configuration, "test.Mapper.find", SqlCommandType.SELECT,
+                    "SELECT id FROM public.technical_control_t0 WHERE tenant_id=0 AND deleted_at IS NULL", Map.of()),
+                    mock(Connection.class), null)).hasMessageContaining("TECHNICAL_TENANT_SCOPE_REQUIRED");
+        } finally { new TestTenantIdProvider().set(41L); }
+    }
+
+    private static EgonColaRoutingProfileBO technicalProfile(String group, String schema, EgonColaRoutingProfileBO.TableKindEnum kind) {
+        return new EgonColaRoutingProfileBO("technical_control_t0", kind, "single-v1", 1, 1, Map.of(), null, null,
+                0x9e3779b97f4a7c15L, Map.of(new EgonColaRoutingProfileBO.PartitionKeyBO(0, 0),
+                List.of(new EgonColaPhysicalTargetBO(group, schema, "technical_control_t0"))), 1, null);
+    }
+
+    private static EgonColaLocalWriteGuardInnerInterceptor technicalGuard(Map<String, EgonColaRoutingProfileBO> profiles,
+            EgonColaMybatisPlusProperties properties) {
+        var sqlGuard = new EgonColaTenantIdGuardInnerInterceptor(() -> "tester", properties);
+        return new EgonColaLocalWriteGuardInnerInterceptor(query -> result("primary_b", query.logicalTable()), sqlGuard,
+                mock(top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy.class), profiles);
+    }
+
+    @TableName(value = "technical_control_t0", schema = "public")
+    public static final class TechnicalControlModel extends EgonModel<TechnicalControlModel> { }
+
+    @EgonColaExplicitTenantScopeMapper(technicalModel = TechnicalControlModel.class,
+            technicalTable = "public.technical_control_t0")
+    interface TechnicalControlMapper extends EgonColaMapper<TechnicalControlModel> { }
 
     private static EgonColaLocalWriteGuardInnerInterceptor guard(EgonColaWriteTargetResolver resolver) {
         var properties = new EgonColaMybatisPlusProperties();

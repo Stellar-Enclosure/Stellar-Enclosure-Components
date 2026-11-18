@@ -114,9 +114,9 @@ class OutboxTechnicalTenantTransactionIT {
         MDC.put(actorKey, "system:outbox");
         try {
             assertThatThrownBy(() -> dao.insertMessage(forged)).isInstanceOf(RuntimeException.class)
-                    .hasStackTraceContaining("EgonColaModelValidationInterceptor");
+                    .hasRootCauseMessage("TECHNICAL_TENANT_SCOPE_REQUIRED");
             assertThatThrownBy(() -> dao.selectReplicaByMessageId("legitimate-zero"))
-                    .isInstanceOf(RuntimeException.class).hasStackTraceContaining("EgonColaModelValidationInterceptor");
+                    .isInstanceOf(RuntimeException.class).hasRootCauseMessage("TECHNICAL_TENANT_SCOPE_REQUIRED");
         } finally {
             MDC.put(tenantKey, BUSINESS_TENANT);
             MDC.put(actorKey, BUSINESS_ACTOR);
@@ -170,7 +170,7 @@ class OutboxTechnicalTenantTransactionIT {
         MDC.put(actorKey, "system:outbox");
         try {
             assertThatThrownBy(() -> dao.selectReplicaByMessageId("after-error"))
-                    .isInstanceOf(RuntimeException.class).hasStackTraceContaining("EgonColaModelValidationInterceptor");
+                    .isInstanceOf(RuntimeException.class).hasRootCauseMessage("TECHNICAL_TENANT_SCOPE_REQUIRED");
         } finally {
             MDC.put(tenantKey, BUSINESS_TENANT);
             MDC.put(actorKey, BUSINESS_ACTOR);

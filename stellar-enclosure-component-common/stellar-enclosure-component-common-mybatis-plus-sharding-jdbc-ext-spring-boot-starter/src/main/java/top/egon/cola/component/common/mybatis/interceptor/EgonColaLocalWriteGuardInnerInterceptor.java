@@ -11,6 +11,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.datasource.ConnectionHolder;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import top.egon.cola.component.common.mybatis.routing.EgonColaTwoLevelRouteStrategy;
+import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
+import top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteResult;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
@@ -52,6 +54,8 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
         boolean write = statement.getSqlCommandType() != SqlCommandType.SELECT;
         Set<String> groups = new LinkedHashSet<>();
         int targetCount = 0;
+        boolean technical = false;
+        boolean scopedTechnical = EgonColaTechnicalTenantScope.requiresScope(statement);
         try {
             for (EgonColaTenantIdGuardInnerInterceptor.ScopedRouteQuery scoped : queries) {
                 EgonColaRouteQuery query = scoped.query();
@@ -59,18 +63,28 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
                 if (write && profile != null && profile.kind() == EgonColaRoutingProfileBO.TableKindEnum.BROADCAST_READ_ONLY) {
                     throw new IllegalStateException("BROADCAST_READ_ONLY");
                 }
-                EgonColaRouteResult result = profile != null && profile.kind() != EgonColaRoutingProfileBO.TableKindEnum.TENANT_LEGACY
-                        ? strategy.route(profile, query) : resolver.resolve(query);
-                if (result == null || result.targets().isEmpty()) { throw new IllegalStateException("WRITE_TARGET_UNRESOLVED"); }
-                if (scoped.schema() != null && result.targets().stream().anyMatch(target -> !scoped.schema().equals(target.schema()))) {
+                List<EgonColaPhysicalTargetBO> targets;
+                if (scopedTechnical || query.tenantId() == 0L && profile != null
+                        && profile.kind() == EgonColaRoutingProfileBO.TableKindEnum.SINGLE) {
+                    technical = true;
+                    targets = List.of(EgonColaTechnicalTenantScope.resolveSingleTarget(statement,
+                            profile, scoped.schema(), query.logicalTable()));
+                } else {
+                    EgonColaRouteResult result = profile != null && profile.kind() != EgonColaRoutingProfileBO.TableKindEnum.TENANT_LEGACY
+                            ? strategy.route(profile, query) : resolver.resolve(query);
+                    if (result == null || result.targets().isEmpty()) { throw new IllegalStateException("WRITE_TARGET_UNRESOLVED"); }
+                    targets = result.targets();
+                }
+                if (scoped.schema() != null && targets.stream().anyMatch(target -> !scoped.schema().equals(target.schema()))) {
                     throw new IllegalStateException("SQL_SCHEMA_ROUTE_MISMATCH");
                 }
-                if (write) {
-                    if (!scoped.writeTarget() && result.targets().size() != 1) {
+                if (write || technical) {
+                    if (!scoped.writeTarget() && targets.size() != 1) {
                         throw new IllegalStateException("DML_SUBQUERY_FANOUT_FORBIDDEN");
                     }
-                    result.targets().forEach(target -> groups.add(target.group()));
-                    if (scoped.writeTarget()) { targetCount += result.targets().size(); }
+                    targets.forEach(target -> groups.add(target.group()));
+                    if (scoped.writeTarget()) { targetCount += targets.size(); }
+                    else if (!write && technical) { targetCount = 1; }
                 }
             }
             if (sqlGuard.requiresLifecycleTransaction(statement)
@@ -79,7 +93,7 @@ public final class EgonColaLocalWriteGuardInnerInterceptor implements InnerInter
                         || !(TransactionSynchronizationManager.getResource(factory.getEnvironment().getDataSource()) instanceof ConnectionHolder))) {
                 throw new IllegalStateException("PURGE_TRANSACTION_REQUIRED");
             }
-            if (!write || queries.isEmpty()) { return; }
+            if (!write && !technical || queries.isEmpty()) { return; }
             if (targetCount == 0) { throw new IllegalStateException("WRITE_TARGET_UNRESOLVED"); }
             if (groups.size() != 1) { throw new IllegalStateException("LOCAL_WRITE_TARGET_MISMATCH"); }
             boolean active = TransactionSynchronizationManager.isActualTransactionActive();

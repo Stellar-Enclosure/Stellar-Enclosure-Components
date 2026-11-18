@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import org.apache.ibatis.mapping.MappedStatement;
 import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
 import top.egon.cola.component.common.mybatis.model.EgonModel;
+import top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO;
+import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 
 import java.lang.reflect.Modifier;
 import java.util.Objects;
@@ -81,10 +83,72 @@ public final class EgonColaTechnicalTenantScope {
         }
     }
 
+    /** Distinguishes the explicit technical capability from legacy scalar tenant policy. */
+    public static boolean requiresScope(MappedStatement statement) {
+        return CURRENT.get() != null || statementDescriptor(statement) != null;
+    }
+
+    /** Checks every raw SQL table, including ignored tables which do not participate in normal routing. */
+    public static void assertSqlTable(MappedStatement statement, String schema, String table, boolean ignored) {
+        if (!requiresScope(statement)) {
+            if (ignored && zeroContext()) { throw scopeRequired(); }
+            return;
+        }
+        ScopeVO scope = registeredScope(statement);
+        String[] qualified = scope.table().split("\\.");
+        if (!qualified[1].equals(table) || schema != null && !qualified[0].equals(schema)
+                || ignored && schema == null) {
+            throw new IllegalStateException("TECHNICAL_TENANT_TABLE_MISMATCH");
+        }
+    }
+
+    /** Resolves only a declared fixed-zero SINGLE address, without weakening positive-tenant strategies. */
+    public static EgonColaPhysicalTargetBO resolveSingleTarget(MappedStatement statement,
+            EgonColaRoutingProfileBO profile, String schema, String table) {
+        ScopeVO scope = registeredScope(statement);
+        assertSqlTable(statement, schema, table, false);
+        if (profile == null || profile.kind() != EgonColaRoutingProfileBO.TableKindEnum.SINGLE
+                || !table.equals(profile.logicalTable()) || profile.tenantSlotCount() != 1
+                || profile.secondaryBucketCount() != 1 || profile.actualNodes().size() != 1) {
+            throw new IllegalStateException("TECHNICAL_TENANT_SINGLE_REQUIRED");
+        }
+        var nodes = profile.actualNodes().get(new EgonColaRoutingProfileBO.PartitionKeyBO(0, 0));
+        if (nodes == null || nodes.size() != 1
+                || !(nodes.getFirst().schema() + '.' + nodes.getFirst().table()).equals(scope.table())) {
+            throw new IllegalStateException("TECHNICAL_TENANT_SINGLE_REQUIRED");
+        }
+        return nodes.getFirst();
+    }
+
+    private static ScopeVO registeredScope(MappedStatement statement) {
+        ScopeVO scope = CURRENT.get();
+        if (scope == null || statement == null || statement.getConfiguration() == null
+                || !statement.getConfiguration().getMapperRegistry().hasMapper(scope.mapperType())
+                || !scope.equals(statementDescriptor(statement))) {
+            throw scopeRequired();
+        }
+        assertStatementScope(statement);
+        return scope;
+    }
+
+    private static boolean zeroContext() {
+        try { return EgonColaTenantIdProvider.currentTenantId() == 0L; }
+        catch (IllegalStateException absentOrMalformed) {
+            // Normal guards still validate non-ignored SQL; this preserves existing ignored plumbing without MDC.
+            return false;
+        }
+    }
+
     private static ScopeVO statementDescriptor(MappedStatement statement) {
         String namespace = namespace(statement);
         if (namespace == null) {
             return null;
+        }
+        ScopeVO current = CURRENT.get();
+        if (current != null && current.mapperType().getName().equals(namespace)
+                && statement.getConfiguration() != null
+                && statement.getConfiguration().getMapperRegistry().hasMapper(current.mapperType())) {
+            return current;
         }
         if (statement.getConfiguration() != null) {
             for (Class<?> mapperType : statement.getConfiguration().getMapperRegistry().getMappers()) {
