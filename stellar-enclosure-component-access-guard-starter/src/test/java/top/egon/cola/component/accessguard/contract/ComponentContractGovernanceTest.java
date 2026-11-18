@@ -23,6 +23,7 @@ import top.egon.cola.component.accessguard.execution.TimeLimitMode;
 import top.egon.cola.component.accessguard.execution.TimeLimiterType;
 import top.egon.cola.component.accessguard.policy.GuardPolicyType;
 import top.egon.cola.component.accessguard.policy.allow.AllowListMode;
+import top.egon.cola.component.accessguard.store.LogicalQuotaDecisionVO;
 import top.egon.cola.component.common.core.enums.ErrorStatus;
 import top.egon.cola.component.common.core.enums.EgonEnum;
 import top.egon.cola.component.common.core.enums.ResultCode;
@@ -197,7 +198,7 @@ class ComponentContractGovernanceTest {
     void handwrittenEnumsImplementTheCommonEnumContract() throws Exception {
         List<String> headers = enumHeaders(MAIN_SOURCES);
 
-        assertThat(headers).as("本模块手写 enum 清单").hasSize(19);
+        assertThat(headers).as("本模块手写 enum 清单，包含分布式逻辑配额结果").hasSize(20);
         List<String> missingContract = new ArrayList<>();
         for (String header : headers) {
             if (!header.contains(EgonEnum.class.getSimpleName())
@@ -220,6 +221,13 @@ class ComponentContractGovernanceTest {
         assertThat(invoke(GuardEntryType.class, GuardEntryType.AOP, "getMessage"))
                 .as("REQ-004 message 使用原常量名").isEqualTo("AOP");
         assertThat(GuardPolicyType.DENY_LIST.id()).as("原协议字符串 id 不变").isEqualTo("deny-list");
+        assertThat(LogicalQuotaDecisionVO.Reason.values()).extracting(Enum::name)
+                .containsExactly("ALLOWED", "REPLAY_ALLOWED", "EXHAUSTED", "REPLAY_DENIED", "CONFLICT",
+                        "WINDOW_EXPIRED", "ATTEMPT_REJECTED", "POLICY_MISMATCH");
+        assertThat(codes(LogicalQuotaDecisionVO.Reason.class)).containsExactly(0, 1, 2, 3, 4, 5, 6, 7);
+        assertThat(LogicalQuotaDecisionVO.Reason.values()).extracting(LogicalQuotaDecisionVO.Reason::getMessage)
+                .containsExactly("allowed", "replay-allowed", "exhausted", "replay-denied", "conflict",
+                        "window-expired", "attempt-rejected", "policy-mismatch");
     }
 
     // 算法第 4 行：validator 继承公共扩展合同，关系与协议检查保持，输入失败不触发业务副作用。

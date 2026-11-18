@@ -12,6 +12,7 @@ import org.springframework.core.env.Environment;
 import top.egon.cola.component.accessguard.store.AccessGuardStorageIntegration;
 import top.egon.cola.component.accessguard.store.AllowListStore;
 import top.egon.cola.component.accessguard.store.DenyListStore;
+import top.egon.cola.component.accessguard.store.LogicalQuotaBackend;
 import top.egon.cola.component.accessguard.store.PenaltyStore;
 import top.egon.cola.component.accessguard.store.RateLimitBackend;
 import top.egon.cola.component.accessguard.store.local.LocalAllowListStore;
@@ -21,6 +22,7 @@ import top.egon.cola.component.accessguard.store.local.LocalRateLimitBackend;
 import top.egon.cola.component.accessguard.store.redisson.AccessGuardRedisKeyFactory;
 import top.egon.cola.component.accessguard.store.redisson.RedissonAllowListStore;
 import top.egon.cola.component.accessguard.store.redisson.RedissonDenyListStore;
+import top.egon.cola.component.accessguard.store.redisson.RedissonLogicalQuotaBackend;
 import top.egon.cola.component.accessguard.store.redisson.RedissonPenaltyStore;
 import top.egon.cola.component.accessguard.store.redisson.RedissonRateLimitBackend;
 
@@ -99,6 +101,15 @@ public class AccessGuardRedissonAutoConfiguration {
     ) {
         return new RedissonRateLimitBackend(
                 selected.client(), keyFactory, properties.getLocal().getIdleTtl());
+    }
+
+    @Bean(name = "accessGuardLogicalQuotaBackend")
+    @ConditionalOnMissingBean(LogicalQuotaBackend.class)
+    RedissonLogicalQuotaBackend accessGuardLogicalQuotaBackend(
+            SelectedRedissonClient selected,
+            AccessGuardRedisKeyFactory keyFactory
+    ) {
+        return new RedissonLogicalQuotaBackend(selected.client(), keyFactory);
     }
 
     @Bean
