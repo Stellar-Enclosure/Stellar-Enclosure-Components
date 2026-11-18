@@ -1,6 +1,6 @@
 package top.egon.cola.component.rpc.test.fixture.provider;
 
-import org.springframework.context.annotation.Profile;
+import io.grpc.Context;
 import top.egon.cola.component.rpc.annotation.EgonRpcProvider;
 import top.egon.cola.component.rpc.context.invocation.RpcInvocationMetadata;
 import top.egon.cola.component.rpc.test.contract.AsyncEchoRpc;
@@ -11,45 +11,47 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Isolated controllable async Provider fixture; not part of the blocking app. */
+/** Controllable server work with independent observation of transport cancellation. */
 @EgonRpcProvider
-@Profile("rpc-async-fixture")
 public class AsyncEchoRpcTestProvider implements AsyncEchoRpc {
 
     private final AtomicInteger calls = new AtomicInteger();
+    private final AtomicInteger transportCancellations = new AtomicInteger();
 
-    private volatile CompletableFuture<EchoResponse> active;
+    private volatile PendingEchoVO active;
 
     @Override
     public CompletionStage<EchoResponse> echoAsync(EchoRequest request) {
-        calls.incrementAndGet();
         RpcInvocationMetadata invocation = RpcInvocationMetadata.current();
         String invocationId = invocation == null || invocation.invocationId() == null
                 ? ""
                 : invocation.invocationId();
-        CompletableFuture<EchoResponse> future = new CompletableFuture<>();
-        active = future;
-        return future.thenApply(ignored -> EchoResponse.newBuilder()
+        EchoResponse response = EchoResponse.newBuilder()
                 .setProviderId("async-provider")
                 .setMessage(request.getMessage())
                 .setInvocationId(invocationId)
                 .setTraceId(invocation == null || invocation.traceId() == null
                         ? ""
                         : invocation.traceId())
-                .build());
+                .build();
+        CompletableFuture<EchoResponse> result = new CompletableFuture<>();
+        active = new PendingEchoVO(result, response);
+        Context.current().addListener(ignored -> transportCancellations.incrementAndGet(), Runnable::run);
+        calls.incrementAndGet();
+        return result;
     }
 
     public void complete() {
-        CompletableFuture<EchoResponse> future = active;
-        if (future == null) {
+        PendingEchoVO pending = active;
+        if (pending == null) {
             throw new IllegalStateException("no async RPC is pending");
         }
-        future.complete(EchoResponse.getDefaultInstance());
+        pending.result().complete(pending.response());
     }
 
     public boolean cancelPending() {
-        CompletableFuture<EchoResponse> future = active;
-        return future != null && future.cancel(true);
+        PendingEchoVO pending = active;
+        return pending != null && pending.result().cancel(true);
     }
 
     public int calls() {
@@ -57,7 +59,13 @@ public class AsyncEchoRpcTestProvider implements AsyncEchoRpc {
     }
 
     public boolean pendingCancelled() {
-        CompletableFuture<EchoResponse> future = active;
-        return future != null && future.isCancelled();
+        PendingEchoVO pending = active;
+        return pending != null && pending.result().isCancelled();
     }
+
+    public int transportCancellations() {
+        return transportCancellations.get();
+    }
+
+    private record PendingEchoVO(CompletableFuture<EchoResponse> result, EchoResponse response) {}
 }
