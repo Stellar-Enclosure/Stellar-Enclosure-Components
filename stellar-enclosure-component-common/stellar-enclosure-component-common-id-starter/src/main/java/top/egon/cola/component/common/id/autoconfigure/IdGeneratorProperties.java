@@ -91,7 +91,7 @@ public class IdGeneratorProperties {
      */
     public static class Redis {
 
-        /** Default lease expiration duration in Redis. */
+        /** Default duration of the issuance lease recorded in Redis. */
         public static final Duration DEFAULT_LEASE_DURATION = Duration.ofMinutes(5);
 
         /** Default background heartbeat renewal interval. */
@@ -158,7 +158,7 @@ public class IdGeneratorProperties {
         }
 
         /**
-         * Returns the TTL of each leased machine-ID slot in Redis.
+         * Returns the duration of the issuance lease. The slot record remains persistent.
          *
          * @return positive lease duration
          */
@@ -167,7 +167,7 @@ public class IdGeneratorProperties {
         }
 
         /**
-         * Sets the TTL of each leased machine-ID slot in Redis.
+         * Sets the duration of the issuance lease. The slot record remains persistent.
          *
          * @param leaseDuration positive lease duration
          */

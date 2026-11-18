@@ -23,11 +23,9 @@
 
 ## 配置
 
-Starter 支持两种机器 ID（`0..1023`）分配方式：
-1. **显式静态配置（优先）**：直接配置 `egon.cola.component.id.machine-id`（适合本地单机测试、非 Redis 环境或 Kubernetes StatefulSet）。
-2. **Redis 租约动态分配（按 `env + app` 隔离）**：未配置静态 `machine-id` 且容器内存在 `RedissonClient`（或自定义 `MachineIdProvider` Bean）时，自动从 Redis 的 `egon:cola:id:{<env>:<app>}:slot:<0..1023>` 号池中通过环形游标抢占空闲槽位、后台守护线程定期续期、网络闪断后原地自愈，并在应用停机时主动释放槽位（完美支持 Kubernetes Deployment 多副本、HPA 弹性扩缩容、滚动更新、灰度与金丝雀发布）。
+Starter 优先使用显式配置的 `egon.cola.component.id.machine-id`（`0..1023`）。未配置静态值时，优先使用自定义 `MachineIdProvider` Bean。Redis 分配需要获准的 `RedissonClient` 和平台已准备好的 Redis Cluster 号池。
 
-实现仍不会根据 IP、MAC、hostname、端口、进程号、随机值或哈希值无协调地推导机器 ID。
+裸 ID 会写入同一数据库、事件流、审计记录或恢复环境的发号方，应配置相同的 `redis.env` 与 `redis.app`，包括不同应用及 stable、canary 版本。只为数据始终隔离的 ID 域分配不同号池。Starter 不从 Pod 名称、IP 或进程号推导机器号。
 
 ```yaml
 egon:
@@ -38,7 +36,7 @@ egon:
         # 方式一：显式指定（若配置则优先使用，不访问 Redis）
         # machine-id: 17
         max-clock-backward: 5ms
-        # 方式二：未配置 machine-id 时自动使用 Redis 租约分配（按 env + app 隔离 0..1023 号池）
+        # 未配置 machine-id 且无自定义 provider 时，使用受管 Redis 号池
         redis:
           enabled: true
           env: ${spring.profiles.active:default}
@@ -54,11 +52,17 @@ egon:
 | `egon.cola.component.id.max-clock-backward` | `Duration` | `5ms` | 允许短暂等待恢复的最大时钟回拨量。 |
 | `egon.cola.component.id.redis.enabled` | `boolean` | `true` | 未配置静态 `machine-id` 时是否启用 Redis 租约分配。 |
 | `egon.cola.component.id.redis.env` | `String` | 回退 `egon.cola.component.tianshu.env` / `spring.profiles.active` / `default` | Redis 机器号池的环境隔离标识。 |
-| `egon.cola.component.id.redis.app` | `String` | 回退 `egon.cola.component.tianshu.app-code` / `spring.application.name` | Redis 机器号池的应用隔离标识。 |
-| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | Redis 机器号槽位租约过期时间。 |
+| `egon.cola.component.id.redis.app` | `String` | 回退 `egon.cola.component.tianshu.app-code` / `spring.application.name` | Redis 机器号池的应用或共享 ID 域标识。 |
+| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | 发号授权时长。槽位台账持续保留。 |
 | `egon.cola.component.id.redis.renew-interval` | `Duration` | `1m` | 后台心跳续期间隔（必须小于 `lease-duration`）。 |
 
-未配置静态 `machine-id` 且无可用 `MachineIdProvider` / `RedissonClient`，或 `machine-id` 越界时，会在 Spring 上下文启动阶段快速失败。`enabled=false` 时不绑定引擎。业务自定义 `IdGenerator` Bean（或 `LongIdGenerator` Bean，它是前者的子类型）后，默认自动配置会退让。
+静态机器号无效或无法取得动态租约时，Spring 上下文启动失败。`enabled=false` 时不绑定引擎。业务自定义 `IdGenerator` 或 `LongIdGenerator` Bean 后，默认自动配置退让。
+
+### 受管 Redis 租约生命周期
+
+- 平台在 `egon:cola:id:{<env>:<app>}:` 下准备一个游标和 1,024 个持久槽位。游标绑定 Redis 进程 `run_id` 和当前主节点 `configEpoch`。槽位缺失、设置了键 TTL 或主节点身份不匹配均拒绝分配。
+- 发号限制在最近一次确认的租约及其允许的 UTC 时间范围内。续租被拒绝、无法确认或过期后，该 provider 停止发号。受管发号进程可在就绪检查及领取任务前调用 `IdGeneratorAutoConfiguration.assertIssuanceAvailable()` 检查发号权。检查不消耗 ID。
+- 正常退出先排空发号，再记录该槽位的预留 UTC 时间上界。复用必须严格跨过该水位。切主、切回、台账丢失或恢复后，平台须先隔离旧权威和旧发号方，核对各槽位水位，再登记新权威。
 
 ## Spring 使用
 

@@ -1,6 +1,7 @@
 package top.egon.cola.component.common.id.snowflake;
 
-import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
+import top.egon.cola.component.common.core.exception.CommonException;
+import top.egon.cola.component.common.id.provider.MachineIdProvider;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Timeout;
@@ -11,6 +12,10 @@ import top.egon.cola.component.common.id.exception.IdGenerationInterruptedExcept
 import top.egon.cola.component.common.id.exception.SnowflakeTimestampOutOfRangeException;
 import top.egon.cola.component.common.id.time.TimeSource;
 import java.time.Duration;
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -19,8 +24,11 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongSupplier;
+import java.util.function.LongUnaryOperator;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -40,6 +48,189 @@ class SnowflakeIdGeneratorTest {
 
     private static final long TEST_TIME = SnowflakeIdLayout.EPOCH_MILLIS + 1_000;
     private static final Duration WAIT_TIMEOUT = Duration.ofSeconds(3);
+
+    @Test
+    void bothStaticEntrancesUseTheBoundProviderAndDecodeTheActualEncodedTimestamp() throws Exception {
+        try (var isolated = new IsolatedSnowflake()) {
+            var provider = new FencedProvider();
+            isolated.initialize(17, provider);
+            long before = System.currentTimeMillis();
+            long first = isolated.nextLongId();
+            assertEquals(SnowflakeIdLayout.EPOCH_MILLIS + SnowflakeIdLayout.elapsedMillis(first), provider.decodedTimestamp.get());
+            assertTrue(provider.decodedTimestamp.get() >= before);
+            assertTrue(provider.decodedTimestamp.get() <= System.currentTimeMillis());
+            long second = Long.parseLong(isolated.nextId());
+            assertTrue(second > first);
+            assertEquals(17, SnowflakeIdLayout.machineId(second));
+            assertEquals(2, provider.issued.get());
+            isolated.initialize(17, provider);
+            assertEquals(2, provider.issued.get(), "rechecking an identical binding must not generate an ID");
+        }
+    }
+
+    @Test
+    void revocationAfterGenerationDiscardsTheIdAndFencesBothEntrances() throws Exception {
+        try (var isolated = new IsolatedSnowflake()) {
+            var provider = new FencedProvider();
+            isolated.initialize(17, provider);
+            provider.revokeAfterGeneration = true;
+            assertLeaseFailure(() -> isolated.nextLongId());
+            assertLeaseFailure(() -> isolated.nextId());
+            assertEquals(1, provider.issued.get(), "a fenced provider must not call the engine again");
+            assertLeaseFailure(() -> isolated.initialize(17, provider));
+        }
+    }
+
+    @Test
+    void anInitializationFailureDoesNotPublishAnUnusableBinding() throws Exception {
+        try (var isolated = new IsolatedSnowflake()) {
+            var rejected = new FencedProvider();
+            rejected.available.set(false);
+            assertLeaseFailure(() -> isolated.initialize(17, rejected));
+            assertInstanceOf(CommonException.class,
+                    assertThrows(InvocationTargetException.class, isolated::nextLongId).getCause());
+            var accepted = new FencedProvider();
+            isolated.initialize(17, accepted);
+            assertTrue(isolated.nextLongId() > 0);
+        }
+    }
+
+    @Test
+    void aLiveEngineCannotRebindAcrossProviderIdentityOrStaticAndDynamicModes() throws Exception {
+        try (var isolated = new IsolatedSnowflake()) {
+            var firstProvider = new FencedProvider();
+            isolated.initialize(17, firstProvider);
+            long first = isolated.nextLongId();
+            isolated.initialize(17, firstProvider);
+            assertTrue(isolated.nextLongId() > first);
+            var replacement = new FencedProvider();
+            assertEquals(firstProvider, replacement, "fixture equality must not imply the same lease owner");
+            assertInstanceOf(CommonException.class, assertThrows(InvocationTargetException.class,
+                    () -> isolated.initialize(17, replacement)).getCause());
+            assertInstanceOf(CommonException.class, assertThrows(InvocationTargetException.class,
+                    () -> isolated.initializeStatic(17)).getCause());
+        }
+        try (var isolated = new IsolatedSnowflake()) {
+            isolated.initializeStatic(17);
+            assertInstanceOf(CommonException.class, assertThrows(InvocationTargetException.class,
+                    () -> isolated.initialize(17, new FencedProvider())).getCause());
+        }
+    }
+
+    @Test
+    void functionalProvidersRemainCompatibleAndDefaultIssuanceRechecksAfterGeneratorWork() {
+        MachineIdProvider fixed = () -> 17;
+        assertEquals(17, fixed.getMachineId());
+        assertEquals(41, fixed.issue(() -> 41, id -> id));
+        fixed.assertIssuanceAvailable();
+        AtomicBoolean available = new AtomicBoolean(true);
+        AtomicInteger generated = new AtomicInteger();
+        MachineIdProvider guarded = new MachineIdProvider() {
+            @Override public long getMachineId() { return 17; }
+            @Override public void assertIssuanceAvailable() {
+                if (!available.get()) {
+                    throw new IllegalStateException("lease unavailable");
+                }
+            }
+        };
+        assertThrows(IllegalStateException.class, () -> guarded.issue(() -> {
+            generated.incrementAndGet();
+            available.set(false);
+            return 42;
+        }, id -> id));
+        assertThrows(IllegalStateException.class, () -> guarded.issue(() -> {
+            generated.incrementAndGet();
+            return 43;
+        }, id -> id));
+        assertEquals(1, generated.get());
+    }
+
+    private static void assertLeaseFailure(org.junit.jupiter.api.function.Executable action) {
+        assertInstanceOf(IllegalStateException.class, assertThrows(InvocationTargetException.class, action).getCause());
+    }
+
+    private static final class FencedProvider implements MachineIdProvider {
+        private final AtomicBoolean available = new AtomicBoolean(true);
+        private final AtomicInteger issued = new AtomicInteger();
+        private final AtomicLong decodedTimestamp = new AtomicLong();
+        private boolean revokeAfterGeneration;
+
+        @Override public long getMachineId() { return 17; }
+
+        @Override
+        public long issue(LongSupplier generator, LongUnaryOperator timestampDecoder) {
+            assertIssuanceAvailable();
+            long id = generator.getAsLong();
+            issued.incrementAndGet();
+            decodedTimestamp.set(timestampDecoder.applyAsLong(id));
+            if (revokeAfterGeneration) {
+                available.set(false);
+            }
+            assertIssuanceAvailable();
+            return id;
+        }
+
+        @Override
+        public void assertIssuanceAvailable() {
+            if (!available.get()) {
+                throw new IllegalStateException("lease unavailable");
+            }
+        }
+
+        @Override public boolean equals(Object other) { return other instanceof FencedProvider; }
+        @Override public int hashCode() { return 17; }
+    }
+
+    /** Isolates the one-time process binding without adding a production reset or mutating static state. */
+    private static final class IsolatedSnowflake implements AutoCloseable {
+        private final URLClassLoader loader;
+        private final Class<?> type;
+
+        private IsolatedSnowflake() throws ClassNotFoundException {
+            loader = new URLClassLoader(new URL[]{SnowflakeIdGenerator.class.getProtectionDomain().getCodeSource().getLocation()},
+                    SnowflakeIdGenerator.class.getClassLoader()) {
+                @Override
+                protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                    synchronized (getClassLoadingLock(name)) {
+                        if (name.startsWith("top.egon.cola.component.common.id.snowflake.")) {
+                            Class<?> loaded = findLoadedClass(name);
+                            if (loaded == null) {
+                                loaded = findClass(name);
+                            }
+                            if (resolve) {
+                                resolveClass(loaded);
+                            }
+                            return loaded;
+                        }
+                        return super.loadClass(name, resolve);
+                    }
+                }
+            };
+            type = loader.loadClass(SnowflakeIdGenerator.class.getName());
+        }
+
+        private void initialize(long machineId, MachineIdProvider provider) throws ReflectiveOperationException {
+            type.getMethod("initialize", Long.class, Duration.class, MachineIdProvider.class)
+                    .invoke(null, machineId, Duration.ofMillis(5), provider);
+        }
+
+        private void initializeStatic(long machineId) throws ReflectiveOperationException {
+            type.getMethod("initialize", Long.class, Duration.class).invoke(null, machineId, Duration.ofMillis(5));
+        }
+
+        private long nextLongId() throws ReflectiveOperationException {
+            return (Long) type.getMethod("nextLongId").invoke(null);
+        }
+
+        private String nextId() throws ReflectiveOperationException {
+            return (String) type.getMethod("nextId").invoke(null);
+        }
+
+        @Override
+        public void close() throws IOException {
+            loader.close();
+        }
+    }
 
     @Test
     void layoutComposesIdAndRoundTripsGeneratorState() {

@@ -3,10 +3,10 @@ package top.egon.cola.component.common.id.snowflake;
 import top.egon.cola.component.common.core.enums.ResultCode;
 import top.egon.cola.component.common.core.exception.CommonException;
 import top.egon.cola.component.common.id.generator.IdGenerator;
+import top.egon.cola.component.common.id.provider.MachineIdProvider;
 
 import java.time.Duration;
 import java.util.Objects;
-import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
 
 /**
  * Static entry point for Snowflake ID generation.
@@ -14,7 +14,7 @@ import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
  * <p>The class is an inconstructible utility: {@link #initialize(Long, Duration)} binds exactly one
  * {@link SnowflakeLongIdGenerator} state engine per process, and {@link #nextLongId()} and
  * {@link #nextId()} delegate to that same engine. Repeated initialization with an identical
- * configuration reuses the bound engine; a different configuration is rejected because it would
+ * configuration and provider identity reuses the bound engine; a different binding is rejected because it would
  * silently reseed the sequence of a live generator. There is no default machine identifier and no
  * production reset.</p>
  */
@@ -43,6 +43,11 @@ public final class SnowflakeIdGenerator {
      * @throws CommonException when the configuration is invalid or conflicts with the bound engine
      */
     public static void initialize(Long machineId, Duration maxClockBackward) {
+        initialize(machineId, maxClockBackward, null);
+    }
+
+    /** Binds the caller-resolved slot and its immutable issuance authority without allocating again. */
+    public static void initialize(Long machineId, Duration maxClockBackward, MachineIdProvider provider) {
         if (machineId == null) {
             throw configurationFailure(
                     "egon.cola.component.id.machine-id must be configured when enabled=true");
@@ -63,16 +68,23 @@ public final class SnowflakeIdGenerator {
         synchronized (BIND_MONITOR) {
             Binding current = binding;
             if (current != null) {
-                if (current.machineId() == machineId && current.maxClockBackward().equals(maxClockBackward)) {
+                if (current.machineId() == machineId && current.maxClockBackward().equals(maxClockBackward)
+                        && current.provider() == provider) {
+                    if (provider != null) {
+                        provider.assertIssuanceAvailable();
+                    }
                     return;
                 }
                 throw configurationFailure("Snowflake ID generation is already initialized with"
                         + " machineId=" + current.machineId() + ", maxClockBackward="
                         + current.maxClockBackward() + "; a live engine cannot be rebound to machineId="
-                        + machineId + ", maxClockBackward=" + maxClockBackward);
+                        + machineId + ", maxClockBackward=" + maxClockBackward + " or a different issuance authority");
             }
-            binding = new Binding(machineId, maxClockBackward,
-                    new SnowflakeLongIdGenerator(machineId, maxClockBackward));
+            SnowflakeLongIdGenerator engine = new SnowflakeLongIdGenerator(machineId, maxClockBackward);
+            if (provider != null) {
+                provider.assertIssuanceAvailable();
+            }
+            binding = new Binding(machineId, maxClockBackward, engine, provider);
         }
     }
 
@@ -83,7 +95,9 @@ public final class SnowflakeIdGenerator {
      * @throws CommonException when the engine has not been initialized
      */
     public static long nextLongId() {
-        return boundEngine().nextLongId();
+        Binding current = boundBinding();
+        return current.provider() == null ? current.engine().nextLongId()
+                : current.provider().issue(current.engine()::nextLongId, SnowflakeIdGenerator::timestampMillis);
     }
 
     /**
@@ -93,17 +107,24 @@ public final class SnowflakeIdGenerator {
      * @throws CommonException when the engine has not been initialized
      */
     public static String nextId() {
-        return boundEngine().nextId();
+        return Long.toString(nextLongId());
     }
 
-    private static SnowflakeLongIdGenerator boundEngine() {
+    private static long timestampMillis(long id) {
+        if (id <= 0) {
+            throw configurationFailure("Snowflake timestamp decoding requires a positive generated ID");
+        }
+        return SnowflakeIdLayout.EPOCH_MILLIS + SnowflakeIdLayout.elapsedMillis(id);
+    }
+
+    private static Binding boundBinding() {
         Binding current = binding;
         if (current == null) {
             throw configurationFailure("Snowflake ID generation is not initialized; configure"
                     + " egon.cola.component.id.machine-id or call SnowflakeIdGenerator.initialize"
                     + " before generating an " + IdGenerator.class.getSimpleName());
         }
-        return current.engine();
+        return current;
     }
 
     private static CommonException configurationFailure(String message) {
@@ -111,7 +132,8 @@ public final class SnowflakeIdGenerator {
                 message);
     }
 
-    private record Binding(long machineId, Duration maxClockBackward, SnowflakeLongIdGenerator engine) {
+    private record Binding(long machineId, Duration maxClockBackward, SnowflakeLongIdGenerator engine,
+                           MachineIdProvider provider) {
 
         private Binding {
             Objects.requireNonNull(engine, "engine must not be null");

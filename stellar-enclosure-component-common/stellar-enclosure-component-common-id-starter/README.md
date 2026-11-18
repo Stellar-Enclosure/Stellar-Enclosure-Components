@@ -23,11 +23,9 @@ Non-Spring applications use the same artifact and call `SnowflakeIdGenerator.ini
 
 ## Configuration
 
-The Starter supports two ways to assign a `machine-id` (`0..1023`):
-1. **Explicit static configuration (takes precedence)**: set `egon.cola.component.id.machine-id` directly (suitable for isolated tests, non-Redis environments, or Kubernetes StatefulSets).
-2. **Redis lease allocation (isolated by `env + app`)**: when static `machine-id` is omitted and a `RedissonClient` (or custom `MachineIdProvider` bean) is present, the Starter automatically leases a free `0..1023` slot in Redis under `egon:cola:id:{<env>:<app>}:slot:<0..1023>` using a persistent ring cursor, renews the lease periodically in the background, self-heals in place after transient network blips, and releases the slot on shutdown (supporting Kubernetes Deployments, HPA autoscaling, rolling updates, and canary/grayscale releases).
+The Starter first uses an explicitly configured `egon.cola.component.id.machine-id` (`0..1023`). Without a static ID it uses a custom `MachineIdProvider` bean when present. Otherwise Redis allocation requires an approved `RedissonClient` and a provisioned Redis Cluster pool.
 
-It is never inferred uncoordinatedly from an IP address, MAC address, hostname, port, process ID, random value, or hash.
+Configure the same `redis.env` and `redis.app` for every process whose bare IDs can enter the same database, event stream, audit log or restore. Include every application and every stable or canary revision in that ID domain. Use a separate pool only for domains whose IDs stay separate. The Starter does not derive machine IDs from pod names, IP addresses or process IDs.
 
 ```yaml
 egon:
@@ -38,7 +36,7 @@ egon:
         # Option 1: explicit static ID (takes precedence when set; Redis is not contacted)
         # machine-id: 17
         max-clock-backward: 5ms
-        # Option 2: Redis lease allocation when machine-id is omitted (isolated by env + app)
+        # Managed Redis allocation when machine-id and a custom provider are absent
         redis:
           enabled: true
           env: ${spring.profiles.active:default}
@@ -54,11 +52,17 @@ egon:
 | `egon.cola.component.id.max-clock-backward` | `Duration` | `5ms` | Largest rollback that the process may briefly wait out. |
 | `egon.cola.component.id.redis.enabled` | `boolean` | `true` | Enables Redis lease allocation when static `machine-id` is absent. |
 | `egon.cola.component.id.redis.env` | `String` | falls back to `egon.cola.component.tianshu.env` / `spring.profiles.active` / `default` | Environment segment isolating the Redis machine-ID pool. |
-| `egon.cola.component.id.redis.app` | `String` | falls back to `egon.cola.component.tianshu.app-code` / `spring.application.name` | Application segment isolating the Redis machine-ID pool. |
-| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | TTL of the leased machine-ID slot in Redis. |
+| `egon.cola.component.id.redis.app` | `String` | falls back to `egon.cola.component.tianshu.app-code` / `spring.application.name` | Application or shared ID domain segment of the Redis machine-ID pool. |
+| `egon.cola.component.id.redis.lease-duration` | `Duration` | `5m` | Duration of the issuance lease. The slot record remains persistent. |
 | `egon.cola.component.id.redis.renew-interval` | `Duration` | `1m` | Background heartbeat renewal interval (must be smaller than `lease-duration`). |
 
-Missing or out-of-range `machine-id` values (when no `MachineIdProvider` / `RedissonClient` is available) fail during application context startup. Setting `enabled=false` binds no engine. A custom `IdGenerator` or `LongIdGenerator` bean makes the default auto-configuration back off.
+An invalid static ID or failure to obtain a dynamic lease fails context startup. Setting `enabled=false` leaves the default engine unbound. A custom `IdGenerator` or `LongIdGenerator` bean makes the default auto-configuration back off.
+
+### Managed Redis lease lifecycle
+
+- The platform provisions one cursor and 1,024 persistent slot records under `egon:cola:id:{<env>:<app>}:`. The cursor pins the Redis process `run_id` and current primary `configEpoch`. The allocator rejects missing records, expiring keys and an unrecognized primary.
+- The process can issue IDs within its last confirmed lease and its permitted UTC timestamp range. A rejected, unconfirmed or expired renewal stops issuance for that provider. `IdGeneratorAutoConfiguration.assertIssuanceAvailable()` checks permission without issuing an ID. Wire it into readiness and work claiming for managed issuers.
+- A drained shutdown records the slot's reserved upper timestamp. Reuse starts strictly after that watermark. After failover, failback, loss of state or restore, the platform must fence the previous authority and its issuers and reconcile all slot watermarks before admitting a new authority.
 
 ## Spring Usage
 

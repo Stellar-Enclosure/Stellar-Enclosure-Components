@@ -37,6 +37,7 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
     private static final String REDISSON_CLIENT_BEAN_NAME = "redissonClient";
 
     private final AutoCloseable managedProvider;
+    private final MachineIdProvider issuanceProvider;
 
     /**
      * Validates the bound configuration and binds the process-wide engine exactly once.
@@ -52,11 +53,13 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
             BeanFactory beanFactory,
             Environment environment) {
         Long configuredMachineId = properties.getMachineId();
+        MachineIdProvider selectedProvider = null;
         AutoCloseable createdProvider = null;
         if (configuredMachineId == null) {
             MachineIdProvider customProvider = machineIdProviders.getIfAvailable();
             if (customProvider != null) {
                 configuredMachineId = customProvider.getMachineId();
+                selectedProvider = customProvider;
             } else if (properties.getRedis().isEnabled()
                     && ClassUtils.isPresent(REDISSON_CLIENT_CLASS, getClass().getClassLoader())) {
                 RedisMachineIdProvider redisProvider = RedissonMachineIdAllocator.createIfAvailable(
@@ -64,6 +67,7 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
                 if (redisProvider != null) {
                     try {
                         configuredMachineId = redisProvider.getMachineId();
+                        selectedProvider = redisProvider;
                         createdProvider = redisProvider;
                     } catch (RuntimeException exception) {
                         redisProvider.close();
@@ -73,8 +77,9 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
             }
         }
         this.managedProvider = createdProvider;
+        this.issuanceProvider = selectedProvider;
         try {
-            SnowflakeIdGenerator.initialize(configuredMachineId, properties.getMaxClockBackward());
+            SnowflakeIdGenerator.initialize(configuredMachineId, properties.getMaxClockBackward(), selectedProvider);
         } catch (RuntimeException exception) {
             closeManagedProvider();
             throw exception;
@@ -84,6 +89,13 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
     @Override
     public void destroy() {
         closeManagedProvider();
+    }
+
+    /** Checks a dynamic provider's current authority without generating or consuming an ID. */
+    public void assertIssuanceAvailable() {
+        if (issuanceProvider != null) {
+            issuanceProvider.assertIssuanceAvailable();
+        }
     }
 
     private void closeManagedProvider() {
@@ -126,8 +138,10 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
                 if (candidate instanceof RedissonClient client) {
                     return client;
                 }
+                throw new IllegalStateException("Bean '" + REDISSON_CLIENT_BEAN_NAME
+                        + "' must be a RedissonClient for Redis machine-id allocation");
             }
-            return beanFactory.getBeanProvider(RedissonClient.class).getIfUnique();
+            return beanFactory.getBeanProvider(RedissonClient.class).getIfAvailable();
         }
 
         private static String resolveEnv(String configuredEnv, Environment environment) {
