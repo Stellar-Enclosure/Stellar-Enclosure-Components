@@ -25,6 +25,7 @@ import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationGroup
 import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationUtils;
 import top.egon.cola.component.common.mybatis.model.EgonModel;
 import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
+import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Method;
@@ -68,15 +69,18 @@ public final class EgonColaModelValidationInterceptor implements Interceptor {
         if (target instanceof ParameterHandler parameterHandler
                 && "setParameters".equals(invocation.getMethod().getName())) {
             MappedStatement mappedStatement = mappedStatement(target);
+            EgonColaTechnicalTenantScope.assertStatementScope(mappedStatement);
             EgonColaModelValidationGroups.Operation operation = operation(mappedStatement);
-            visit(parameterHandler.getParameterObject(), operation,
+            visit(parameterHandler.getParameterObject(), operation, mappedStatement,
                     Collections.newSetFromMap(new IdentityHashMap<>()));
             return invocation.proceed();
         }
         if (target instanceof ResultSetHandler
                 && "handleResultSets".equals(invocation.getMethod().getName())) {
+            MappedStatement mappedStatement = mappedStatement(target);
+            EgonColaTechnicalTenantScope.assertStatementScope(mappedStatement);
             Object result = invocation.proceed();
-            visit(result, EgonColaModelValidationGroups.Operation.LOADED,
+            visit(result, EgonColaModelValidationGroups.Operation.LOADED, mappedStatement,
                     Collections.newSetFromMap(new IdentityHashMap<>()));
             return result;
         }
@@ -107,34 +111,35 @@ public final class EgonColaModelValidationInterceptor implements Interceptor {
 
     private void visit(Object value,
                        EgonColaModelValidationGroups.Operation operation,
+                       MappedStatement mappedStatement,
                        Set<Object> visited) {
         if (value == null || !visited.add(value)) {
             return;
         }
         if (value instanceof EgonModel<?> model) {
-            validateModel(model, operation);
+            validateModel(model, operation, mappedStatement);
             return;
         }
         if (value instanceof IPage<?> page) {
-            visit(page.getRecords(), operation, visited);
+            visit(page.getRecords(), operation, mappedStatement, visited);
             return;
         }
         if (value instanceof Optional<?> optional) {
-            optional.ifPresent(candidate -> visit(candidate, operation, visited));
+            optional.ifPresent(candidate -> visit(candidate, operation, mappedStatement, visited));
             return;
         }
         if (value instanceof Map<?, ?> map) {
-            map.values().forEach(candidate -> visit(candidate, operation, visited));
+            map.values().forEach(candidate -> visit(candidate, operation, mappedStatement, visited));
             return;
         }
         if (value instanceof Iterable<?> iterable) {
-            iterable.forEach(candidate -> visit(candidate, operation, visited));
+            iterable.forEach(candidate -> visit(candidate, operation, mappedStatement, visited));
             return;
         }
         if (value.getClass().isArray()) {
             int length = Array.getLength(value);
             for (int index = 0; index < length; index++) {
-                visit(Array.get(value, index), operation, visited);
+                visit(Array.get(value, index), operation, mappedStatement, visited);
             }
             return;
         }
@@ -142,7 +147,7 @@ public final class EgonColaModelValidationInterceptor implements Interceptor {
         if (getEntity != null) {
             try {
                 getEntity.setAccessible(true);
-                visit(getEntity.invoke(value), operation, visited);
+                visit(getEntity.invoke(value), operation, mappedStatement, visited);
             } catch (ReflectiveOperationException exception) {
                 throw new IllegalStateException("MODEL_PARAMETER_GRAPH_UNREADABLE", exception);
             }
@@ -150,8 +155,10 @@ public final class EgonColaModelValidationInterceptor implements Interceptor {
     }
 
     private void validateModel(EgonModel<?> model,
-                               EgonColaModelValidationGroups.Operation operation) {
+                               EgonColaModelValidationGroups.Operation operation,
+                               MappedStatement mappedStatement) {
         EgonColaModelValidationUtils.assertMetadataOwnership(model.getClass());
+        EgonColaTechnicalTenantScope.assertModelTenant(model.getClass(), model.getTenantId(), mappedStatement);
         Class<?>[] groups = switch (operation) {
             case INSERT -> new Class<?>[]{Default.class, EgonColaModelValidationGroups.Insert.class,
                     EgonColaModelValidationGroups.Persisted.class};

@@ -4,16 +4,19 @@ import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
+import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
+import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
 
 import java.util.function.Supplier;
 
 /** Applies the framework owner and actor only while synchronous MP operations validate and execute. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class OutboxTechnicalContextExecutor {
 
     private static final String TECHNICAL_TENANT_ID = "0";
@@ -46,7 +49,7 @@ public class OutboxTechnicalContextExecutor {
         try {
             MDC.put(tenantMdcKey, TECHNICAL_TENANT_ID);
             MDC.put(userIdMdcKey, userId);
-            return action.get();
+            return EgonColaTechnicalTenantScope.execute(OutboxMessageDAO.class, action);
         } finally {
             restore(userIdMdcKey, previousUserId);
             restore(tenantMdcKey, previousTenantId);

@@ -17,4 +17,10 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
 public @interface EgonColaExplicitTenantScopeMapper {
+
+    /** Exact fixed-zero model; Void retains the legacy explicit-SQL marker semantics. */
+    Class<?> technicalModel() default Void.class;
+
+    /** Fixed, explicitly qualified schema.table matching the technical model's TableName. */
+    String technicalTable() default "";
 }

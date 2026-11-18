@@ -22,7 +22,9 @@ import java.util.Collection;
 import java.util.List;
 
 /** Explicit persistence operations with fixed tenant predicates for the technical outbox table. */
-@EgonColaExplicitTenantScopeMapper
+@EgonColaExplicitTenantScopeMapper(
+        technicalModel = OutboxMessagePO.class,
+        technicalTable = "egon_outbox.egon_cola_outbox_message")
 @Mapper
 @Validated
 public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
