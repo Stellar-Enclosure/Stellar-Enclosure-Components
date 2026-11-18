@@ -13,6 +13,7 @@ import org.springframework.boot.validation.autoconfigure.ValidationAutoConfigura
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.env.Environment;
+import org.springframework.util.ClassUtils;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelFactory;
 import top.egon.cola.component.rpc.consumer.channel.RpcConsumerChannelPool;
@@ -37,6 +38,7 @@ import top.egon.cola.component.rpc.provider.binding.RpcProviderMethodRegistry;
 import top.egon.cola.component.rpc.provider.lifecycle.RpcProviderAvailabilityRegistry;
 import top.egon.cola.component.rpc.provider.lifecycle.RpcProviderLifecycle;
 import top.egon.cola.component.rpc.provider.server.RpcProviderExceptionMapper;
+import top.egon.cola.component.rpc.provider.server.RpcProviderAdmissionComponent;
 import top.egon.cola.component.rpc.provider.server.RpcProviderServerFactory;
 import top.egon.cola.component.rpc.provider.server.RpcProviderServerInterceptor;
 import top.egon.cola.component.rpc.provider.server.RpcServerServiceDefinitionFactory;
@@ -47,7 +49,10 @@ import java.util.List;
 
 @AutoConfiguration(
         after = ValidationAutoConfiguration.class,
-        afterName = "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration")
+        afterName = {
+                "top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusAutoConfiguration",
+                "top.egon.cola.component.rpc.config.RpcAccessGuardAutoConfiguration"
+        })
 @EnableConfigurationProperties(EgonRpcProperties.class)
 @ConditionalOnProperty(prefix = "egon.cola.component.rpc", name = "enabled", havingValue = "true")
 public class EgonRpcAutoConfig {
@@ -101,14 +106,30 @@ public class EgonRpcAutoConfig {
             RpcProviderMethodRegistry methodRegistry,
             EgonRpcProperties properties,
             ObjectProvider<ServerInterceptor> serverInterceptors,
-            ObjectProvider<RpcProviderExceptionMapper> exceptionMappers) {
+            ObjectProvider<RpcProviderExceptionMapper> exceptionMappers,
+            @Qualifier("rpcProviderAdmissionComponent") ObjectProvider<RpcProviderAdmissionComponent> admissions,
+            ApplicationContext applicationContext) {
+        boolean admissionEnabled = properties.getProvider().getAdmission().isEnabled();
+        if (admissionEnabled && (!ClassUtils.isPresent(
+                "top.egon.cola.component.accessguard.store.LogicalQuotaBackend", applicationContext.getClassLoader())
+                || !ClassUtils.isPresent("top.egon.cola.component.accessguard.store.RateLimitBackend",
+                applicationContext.getClassLoader()))) {
+            throw new IllegalStateException("RPC provider admission requires the Access Guard dependency");
+        }
+        RpcProviderAdmissionComponent admission = admissions.getIfAvailable();
+        if (admissionEnabled && admission == null) {
+            throw new IllegalStateException("RPC provider admission requires its trusted admission component");
+        }
+        if (!admissionEnabled && admission != null) {
+            throw new IllegalStateException("RPC provider admission component requires admission.enabled=true");
+        }
         RpcProviderAvailabilityRegistry availability = new RpcProviderAvailabilityRegistry();
         List<ServerInterceptor> interceptors = new ArrayList<>();
         interceptors.add(new RpcProviderServerInterceptor());
         serverInterceptors.orderedStream().forEach(interceptors::add);
         return new RpcProviderLifecycle(
                 methodRegistry,
-                new RpcServerServiceDefinitionFactory(availability, exceptionMappers.orderedStream().toList()),
+                new RpcServerServiceDefinitionFactory(availability, exceptionMappers.orderedStream().toList(), admission),
                 new RpcProviderServerFactory(properties.getProvider().getMaxInboundMessageSize()),
                 availability,
                 interceptors,

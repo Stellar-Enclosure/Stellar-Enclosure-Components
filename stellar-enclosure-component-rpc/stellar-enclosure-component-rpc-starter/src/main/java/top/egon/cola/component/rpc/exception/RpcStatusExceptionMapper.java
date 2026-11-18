@@ -15,6 +15,7 @@ public class RpcStatusExceptionMapper {
             case DEADLINE_EXCEEDED ->
                     EgonRpcErrorCode.RPC_DEADLINE_EXCEEDED;
             case CANCELLED -> EgonRpcErrorCode.RPC_CANCELLED;
+            case RESOURCE_EXHAUSTED -> EgonRpcErrorCode.RPC_RATE_LIMITED;
             case UNAVAILABLE -> unavailableCode(exception.getTrailers());
             case INVALID_ARGUMENT -> EgonRpcErrorCode.RPC_INVALID_REQUEST;
             case PERMISSION_DENIED -> EgonRpcErrorCode.RPC_PROVIDER_REJECTED;

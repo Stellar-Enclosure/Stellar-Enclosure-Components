@@ -265,10 +265,17 @@ class RpcInvocationExecutorTest {
         Metadata quota = new Metadata();
         RpcFailureStage.PROVIDER.put(quota);
         quota.put(RpcMetadataKeys.ERROR_TYPE, "rate-limit");
+        Metadata quotaStore = new Metadata();
+        RpcFailureStage.PROVIDER.put(quotaStore);
+        quotaStore.put(RpcMetadataKeys.ERROR_TYPE, RpcMetadataKeys.QUOTA_STORE_ERROR_TYPE);
+        Metadata authority = new Metadata();
+        RpcFailureStage.PROVIDER.put(authority);
+        authority.put(RpcMetadataKeys.ERROR_TYPE, "authentication");
         List<RuntimeException> failures = List.of(Status.PERMISSION_DENIED.asRuntimeException(),
                 Status.UNAUTHENTICATED.asRuntimeException(), Status.RESOURCE_EXHAUSTED.asRuntimeException(),
                 Status.FAILED_PRECONDITION.asRuntimeException(), Status.CANCELLED.asRuntimeException(),
-                Status.DEADLINE_EXCEEDED.asRuntimeException(), Status.UNAVAILABLE.asRuntimeException(quota));
+                Status.DEADLINE_EXCEEDED.asRuntimeException(), Status.UNAVAILABLE.asRuntimeException(quota),
+                Status.UNAVAILABLE.asRuntimeException(quotaStore), Status.UNAVAILABLE.asRuntimeException(authority));
         for (RuntimeException failure : failures) {
             RpcReferenceStrategy strategy = approvedStrategy();
             RpcChannelLease lease = mock(RpcChannelLease.class);

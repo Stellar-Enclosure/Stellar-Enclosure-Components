@@ -56,6 +56,8 @@ public final class RpcMetadataKeys {
     public static final Metadata.Key<String> ERROR_TYPE =
             ascii("x-egon-rpc-error-type");
 
+    public static final String QUOTA_STORE_ERROR_TYPE = "quota-store";
+
     private static final List<Metadata.Key<String>> RESERVED_REQUEST_HEADERS = List.of(
             SERVICE, GROUP, VERSION, INVOCATION_ID, ATTEMPT, REQUEST_DIGEST,
             SOURCE_APP, SOURCE_INSTANCE, REQUEST_ID, AUTHORIZATION, TRACEPARENT,

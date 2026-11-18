@@ -10,6 +10,7 @@ import top.egon.cola.component.rpc.common.enums.EgonRpcErrorCode;
 import top.egon.cola.component.rpc.common.exception.EgonRpcException;
 import top.egon.cola.component.rpc.consumer.channel.RpcChannelLease;
 import top.egon.cola.component.rpc.consumer.lifecycle.RpcConsumerLifecycleCoordinator;
+import top.egon.cola.component.rpc.context.invocation.RpcMetadataKeys;
 import top.egon.cola.component.rpc.consumer.reference.RpcReferencePolicy;
 import top.egon.cola.component.rpc.exception.RpcStatusExceptionMapper;
 
@@ -239,6 +240,8 @@ public final class RpcInvocationExecutor implements AutoCloseable {
                     && !state.attemptContext.responseCommitted()
                     && failure instanceof StatusRuntimeException status
                     && status.getStatus().getCode() == Status.Code.UNAVAILABLE
+                    && (status.getTrailers() == null
+                            || status.getTrailers().get(RpcMetadataKeys.ERROR_TYPE) == null)
                     && statusMapper.map(status).getRpcErrorCode() == EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE;
         }
 

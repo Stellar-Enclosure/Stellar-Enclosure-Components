@@ -20,6 +20,7 @@ class RpcStatusExceptionMapperTest {
         assertCode(Status.DEADLINE_EXCEEDED, EgonRpcErrorCode.RPC_DEADLINE_EXCEEDED);
         assertCode(Status.CANCELLED, EgonRpcErrorCode.RPC_CANCELLED);
         assertCode(Status.UNAVAILABLE, EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE);
+        assertCode(Status.RESOURCE_EXHAUSTED, EgonRpcErrorCode.RPC_RATE_LIMITED);
         assertCode(Status.INVALID_ARGUMENT, EgonRpcErrorCode.RPC_INVALID_REQUEST);
         assertCode(Status.UNIMPLEMENTED, EgonRpcErrorCode.RPC_METHOD_NOT_FOUND);
         assertCode(Status.INTERNAL, EgonRpcErrorCode.RPC_INTERNAL);
@@ -65,6 +66,36 @@ class RpcStatusExceptionMapperTest {
         RpcFailureStage.PROVIDER.put(trailers);
         trailers.put(RpcMetadataKeys.ERROR_TYPE, "rate-limit");
 
+        assertThat(mapper.map(Status.RESOURCE_EXHAUSTED.asRuntimeException(trailers)).getRpcErrorCode())
+                .isEqualTo(EgonRpcErrorCode.RPC_RATE_LIMITED);
+    }
+
+    @Test
+    void quotaExhaustionAndQuotaStoreFailureHaveDistinctStableCodesAndSafeMessages() {
+        Metadata exhausted = new Metadata();
+        RpcFailureStage.PROVIDER.put(exhausted);
+        exhausted.put(RpcMetadataKeys.ERROR_TYPE, "quota");
+        EgonRpcException quota = mapper.map(Status.RESOURCE_EXHAUSTED
+                .withDescription("secret tenant quota details").asRuntimeException(exhausted));
+        assertThat(quota.getRpcErrorCode()).isEqualTo(EgonRpcErrorCode.RPC_RATE_LIMITED);
+        assertThat(quota.getMessage()).isEqualTo("RPC request was rate limited");
+
+        Metadata unavailable = new Metadata();
+        RpcFailureStage.PROVIDER.put(unavailable);
+        unavailable.put(RpcMetadataKeys.ERROR_TYPE, RpcMetadataKeys.QUOTA_STORE_ERROR_TYPE);
+        var transport = Status.UNAVAILABLE.withDescription("secret Redis credentials").asRuntimeException(unavailable);
+        EgonRpcException store = mapper.map(transport);
+        assertThat(store.getRpcErrorCode()).isEqualTo(EgonRpcErrorCode.RPC_PROVIDER_UNAVAILABLE);
+        assertThat(store.getMessage()).isEqualTo("RPC Provider is unavailable");
+        assertThat(store.getCause()).isSameAs(transport);
+        assertThat(store.getMessage()).doesNotContain("secret", "Redis", "credentials");
+    }
+
+    @Test
+    void preservesTheLegacyProviderRateLimitClassificationDuringTheWireTransition() {
+        Metadata trailers = new Metadata();
+        RpcFailureStage.PROVIDER.put(trailers);
+        trailers.put(RpcMetadataKeys.ERROR_TYPE, "rate-limit");
         assertThat(mapper.map(Status.UNAVAILABLE.asRuntimeException(trailers)).getRpcErrorCode())
                 .isEqualTo(EgonRpcErrorCode.RPC_RATE_LIMITED);
     }
