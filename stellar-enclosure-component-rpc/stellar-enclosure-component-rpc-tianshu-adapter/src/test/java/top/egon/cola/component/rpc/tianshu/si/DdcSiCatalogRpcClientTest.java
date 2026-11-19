@@ -5,6 +5,7 @@ import io.grpc.ManagedChannelBuilder;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
+import io.grpc.ConnectivityState;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.junit.jupiter.api.AfterEach;
@@ -36,6 +37,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -118,7 +120,9 @@ class DdcSiCatalogRpcClientTest {
                 };
 
         server = NettyServerBuilder.forPort(0).addService(serviceImpl).build().start();
-        channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext().build();
+        channel = ManagedChannelBuilder.forAddress("127.0.0.1", server.getPort()).usePlaintext()
+                .disableRetry().disableServiceConfigLookUp().build();
+        awaitReady(channel);
         client = new DdcSiCatalogRpcClient(
                 DdcSiResourceGrpcServiceGrpc.newBlockingStub(channel),
                 mapper,
@@ -220,5 +224,20 @@ class DdcSiCatalogRpcClientTest {
                 .setPublishedEpochMillis(1_763_280_930_000L)
                 .setUpdatedEpochMillis(1_763_280_930_000L)
                 .build();
+    }
+
+    private static void awaitReady(ManagedChannel channel) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (true) {
+            ConnectivityState state = channel.getState(true);
+            if (state == ConnectivityState.READY) { return; }
+            long remaining = end - System.nanoTime();
+            if (remaining <= 0 || state == ConnectivityState.SHUTDOWN) {
+                throw new AssertionError("Local SI channel did not become ready");
+            }
+            var changed = new CompletableFuture<Void>();
+            channel.notifyWhenStateChanged(state, () -> changed.complete(null));
+            changed.get(remaining, TimeUnit.NANOSECONDS);
+        }
     }
 }

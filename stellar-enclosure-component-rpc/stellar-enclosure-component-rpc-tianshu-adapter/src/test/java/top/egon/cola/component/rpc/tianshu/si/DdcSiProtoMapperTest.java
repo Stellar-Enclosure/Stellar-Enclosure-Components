@@ -156,6 +156,14 @@ class DdcSiProtoMapperTest {
         assertThat(dto.getPublishedAt()).isNull();
         assertThat(dto.getUpdatedAt()).isNull();
         assertThat(dto.getActiveVersionNo()).isNull();
+        assertThat(dto.getOwnerAppCode()).isNull();
+        assertThat(dto.getResolvedVersionId()).isNull();
+        assertThat(dto.getResolvedVersionNo()).isNull();
+        assertThat(dto.getDependencyManifest()).isNull();
+        assertThatThrownBy(() -> mapper.fromProto(minimal.toBuilder().setOwnerAppCode("").build()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> mapper.fromProto(minimal.toBuilder().setResolvedVersionId(0).build()))
+                .isInstanceOf(IllegalArgumentException.class);
 
         SiResourceProto badEnum = minimal.toBuilder().setKind("INVALID_KIND").build();
         assertThatThrownBy(() -> mapper.fromProto(badEnum))

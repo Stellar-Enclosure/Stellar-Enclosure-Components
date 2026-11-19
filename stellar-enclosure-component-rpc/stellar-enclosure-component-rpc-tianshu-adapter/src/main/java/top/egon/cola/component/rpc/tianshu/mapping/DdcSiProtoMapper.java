@@ -12,6 +12,11 @@ import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SemanticSearchSiReq
 import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiReferenceProto;
 import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiResourceProto;
 import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiSearchHitProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiDependencyManifestProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiDependencyEdgeProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiDependencyEdgeListProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiVersionIdentityProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiVersionIdentityListProto;
 import top.egon.cola.component.tianshu.model.si.DdcSiCatalogQuery;
 import top.egon.cola.component.tianshu.model.si.DdcSiKindEnum;
 import top.egon.cola.component.tianshu.model.si.DdcSiLifecycleStatusEnum;
@@ -22,6 +27,7 @@ import top.egon.cola.component.tianshu.model.si.DdcSiSearchHit;
 import top.egon.cola.component.tianshu.model.si.DdcSiSelfRegistrationRequest;
 import top.egon.cola.component.tianshu.model.si.DdcSiSemanticSearchQuery;
 import top.egon.cola.component.tianshu.model.si.DdcSiSourceTypeEnum;
+import top.egon.cola.component.tianshu.model.si.DdcSiDependencyManifestVO;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -65,6 +71,10 @@ public interface DdcSiProtoMapper extends BaseConverter<DdcSiResourceDescriptor,
                 .setSpecJson(nullToEmpty(source.getSpecJson()))
                 .setPublishedEpochMillis(instantToEpochMillis(source.getPublishedAt()))
                 .setUpdatedEpochMillis(instantToEpochMillis(source.getUpdatedAt()));
+        if (source.getOwnerAppCode() != null) { builder.setOwnerAppCode(requireOwner(source.getOwnerAppCode())); }
+        if (source.getResolvedVersionId() != null) { builder.setResolvedVersionId(requirePositive(source.getResolvedVersionId())); }
+        if (source.getResolvedVersionNo() != null) { builder.setResolvedVersionNo(requirePositive(source.getResolvedVersionNo())); }
+        if (source.getDependencyManifest() != null) { builder.setDependencyManifest(toProto(source.getDependencyManifest())); }
         if (source.getLabels() != null && !source.getLabels().isEmpty()) {
             builder.putAllLabels(source.getLabels());
         }
@@ -92,7 +102,65 @@ public interface DdcSiProtoMapper extends BaseConverter<DdcSiResourceDescriptor,
     @Mapping(target = "specJson", source = "specJson", qualifiedByName = "emptyToNull")
     @Mapping(target = "publishedAt", source = "publishedEpochMillis", qualifiedByName = "epochMillisToInstant")
     @Mapping(target = "updatedAt", source = "updatedEpochMillis", qualifiedByName = "epochMillisToInstant")
+    @Mapping(target = "ownerAppCode", expression = "java(proto.hasOwnerAppCode() ? requireOwner(proto.getOwnerAppCode()) : null)")
+    @Mapping(target = "resolvedVersionId", expression = "java(proto.hasResolvedVersionId() ? requirePositive(proto.getResolvedVersionId()) : null)")
+    @Mapping(target = "resolvedVersionNo", expression = "java(proto.hasResolvedVersionNo() ? requirePositive(proto.getResolvedVersionNo()) : null)")
+    @Mapping(target = "dependencyManifest", expression = "java(proto.hasDependencyManifest() ? fromProto(proto.getDependencyManifest()) : null)")
     DdcSiResourceDescriptor fromProto(SiResourceProto proto);
+
+    default SiDependencyManifestProto toProto(DdcSiDependencyManifestVO source) {
+        if (source == null || source.canonicalBytes().length > 1_048_576) { throw invalidExecutionMaterial(); }
+        var nodes = SiVersionIdentityListProto.newBuilder();
+        source.nodes().forEach(node -> nodes.addItems(toProto(node)));
+        var edges = SiDependencyEdgeListProto.newBuilder();
+        source.edges().forEach(edge -> edges.addItems(SiDependencyEdgeProto.newBuilder()
+                .setFromVersionId(edge.fromVersionId()).setToVersionId(edge.toVersionId())));
+        var manifest = SiDependencyManifestProto.newBuilder().setSchemaVersion(source.schemaVersion())
+                .setRoot(toProto(source.root())).setNodes(nodes).setEdges(edges).setClosureDigest(source.closureDigest());
+        if (source.source() != null) { manifest.setSource(toProto(source.source())); }
+        return manifest.build();
+    }
+
+    default DdcSiDependencyManifestVO fromProto(SiDependencyManifestProto source) {
+        if (source == null || source.getSerializedSize() > 1_048_576 || !source.hasRoot()
+                || !source.hasNodes() || !source.hasEdges()) { throw invalidExecutionMaterial(); }
+        return new DdcSiDependencyManifestVO(source.getSchemaVersion(), fromProto(source.getRoot()),
+                source.hasSource() ? fromProto(source.getSource()) : null,
+                source.getNodes().getItemsList().stream().map(this::fromProto).toList(),
+                source.getEdges().getItemsList().stream().map(edge -> new DdcSiDependencyManifestVO.EdgeVO(
+                        edge.getFromVersionId(), edge.getToVersionId())).toList(), source.getClosureDigest());
+    }
+
+    default SiVersionIdentityProto toProto(DdcSiDependencyManifestVO.VersionIdentityVO source) {
+        return SiVersionIdentityProto.newBuilder().setTenantId(source.tenantId()).setResourceId(source.resourceId())
+                .setVersionId(source.versionId()).setVersionNo(source.versionNo()).setKind(source.kind().getCode())
+                .setEnvCode(source.envCode()).setDigestSha256(source.digestSha256()).build();
+    }
+
+    default DdcSiDependencyManifestVO.VersionIdentityVO fromProto(SiVersionIdentityProto source) {
+        return new DdcSiDependencyManifestVO.VersionIdentityVO(source.getTenantId(), source.getResourceId(),
+                source.getVersionId(), source.getVersionNo(), DdcSiKindEnum.fromCode(source.getKind()),
+                source.getEnvCode(), source.getDigestSha256());
+    }
+
+    @Named("nativeOwner")
+    default String requireOwner(String value) {
+        if (value == null || value.isBlank() || value.length() > 128
+                || !value.chars().allMatch(character -> character >= 0x21 && character <= 0x7e)) {
+            throw invalidExecutionMaterial();
+        }
+        return value;
+    }
+
+    @Named("nativePositiveVersion")
+    default long requirePositive(long value) {
+        if (value <= 0) { throw invalidExecutionMaterial(); }
+        return value;
+    }
+
+    private static IllegalArgumentException invalidExecutionMaterial() {
+        return new IllegalArgumentException("SI_PINNED_HISTORY_UNAVAILABLE");
+    }
 
     default SiReferenceProto toProto(DdcSiReferenceDescriptor source) {
         if (source == null) {

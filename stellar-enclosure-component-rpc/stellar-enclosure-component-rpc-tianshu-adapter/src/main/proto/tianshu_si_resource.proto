@@ -40,6 +40,38 @@ message SiResourceProto {
   string spec_json = 16;
   int64 published_epoch_millis = 17;
   int64 updated_epoch_millis = 18;
+  optional string owner_app_code = 19;
+  optional int64 resolved_version_id = 20;
+  optional int64 resolved_version_no = 21;
+  SiDependencyManifestProto dependency_manifest = 22;
+}
+
+message SiVersionIdentityProto {
+  string tenant_id = 1;
+  string resource_id = 2;
+  string version_id = 3;
+  string version_no = 4;
+  string kind = 5;
+  string env_code = 6;
+  string digest_sha256 = 7;
+}
+
+message SiDependencyEdgeProto {
+  string from_version_id = 1;
+  string to_version_id = 2;
+}
+
+// Message presence distinguishes verified empty arrays from omitted execution material.
+message SiVersionIdentityListProto { repeated SiVersionIdentityProto items = 1; }
+message SiDependencyEdgeListProto { repeated SiDependencyEdgeProto items = 1; }
+
+message SiDependencyManifestProto {
+  string schema_version = 1;
+  SiVersionIdentityProto root = 2;
+  SiVersionIdentityProto source = 3;
+  SiVersionIdentityListProto nodes = 4;
+  SiDependencyEdgeListProto edges = 5;
+  string closure_digest = 6;
 }
 
 message SiSearchHitProto {
@@ -78,11 +110,16 @@ message ResolveSiResourceRequest {
   string biz_code = 2;
   string namespace_code = 3;
   string env_code = 4;
-  string app_code = 5;
+  string app_code = 5 [deprecated = true];
   string kind = 6;
   string resource_key = 7;
-  int32 pinned_version_no = 8;
+  int32 pinned_version_no = 8 [deprecated = true];
   string request_id = 9;
+  optional string owner_app_code = 10;
+  string caller_app_code = 11;
+  optional int64 exact_version_no = 12;
+  // This discriminator requests strict proof; it never establishes caller authorization.
+  bool execution_required = 13;
 }
 
 message ResolveSiResourceResponse {
