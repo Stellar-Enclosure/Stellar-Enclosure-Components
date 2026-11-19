@@ -86,6 +86,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
     // Strategy dispatch keeps each SQL capability independent of the default active-row policy.
     private final Map<LifecycleScopeEnum, BiConsumer<LifecyclePolicySnapshotBO, LifecycleSqlContextBO>> policyChecks = Map.of(
             LifecycleScopeEnum.ID, this::validateHistoryPolicy,
+            LifecycleScopeEnum.ID_BATCH, this::validateIdBatchPolicy,
             LifecycleScopeEnum.PARENT, this::validateHistoryPolicy,
             LifecycleScopeEnum.ALL_PARENT, this::validateHistoryPolicy,
             LifecycleScopeEnum.PAGE, this::validatePagePolicy,
@@ -111,6 +112,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
     public void beforeQuery(Executor executor, MappedStatement statement, Object parameter, RowBounds bounds, ResultHandler handler, BoundSql sql) {
         SqlShapeBO shape = shape(sql.getSql());
         validateTechnicalTables(statement, shape);
+        requireIdBatchTableScope(statement, shape);
         com.baomidou.mybatisplus.core.toolkit.ParameterUtils.findPage(parameter).ifPresent(page -> {
             if (page.getSize() < 1 || page.getSize() > properties.getPagination().getMaxPageSize()) {
                 throw new IllegalStateException("PAGE_SIZE_INVALID");
@@ -161,6 +163,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
     List<ScopedRouteQuery> validateFinal(MappedStatement statement, BoundSql sql, Map<String, EgonColaRoutingProfileBO> profiles) {
         SqlShapeBO shape = shape(sql.getSql());
         validateTechnicalTables(statement, shape);
+        requireIdBatchTableScope(statement, shape);
         if (allIgnored(shape, properties)) {
             return List.of();
         }
@@ -290,6 +293,122 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
         if (deletedAt == null || !monotoneDeletion(update, context.statement(), context.sql(), deletedAt)) {
             throw new IllegalStateException("LOGIC_DELETE_TIMESTAMP_REQUIRED");
         }
+    }
+
+    /** Only this explicitly registered capability may read both live and archived rows by bounded IDs. */
+    private void requireIdBatchTableScope(MappedStatement statement, SqlShapeBO shape) {
+        var policy = lifecyclePolicies.get(statement.getId());
+        if (policy != null && policy.scope() == LifecycleScopeEnum.ID_BATCH
+                && (shape.scopes().size() != 1 || allIgnored(shape, properties)
+                    || !(shape.statement() instanceof net.sf.jsqlparser.statement.select.PlainSelect))) {
+            throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+        }
+    }
+
+    private void validateIdBatchPolicy(LifecyclePolicySnapshotBO policy, LifecycleSqlContextBO context) {
+        if (!"id".equals(policy.keyColumn())) throw new IllegalStateException("LIFECYCLE_STATEMENT_POLICY_INVALID");
+        var scope = context.shape().scopes().getFirst();
+        if (!(context.shape().statement() instanceof net.sf.jsqlparser.statement.select.PlainSelect select)
+                || select != scope.scopeId() || !(select.getFromItem() instanceof net.sf.jsqlparser.schema.Table table)
+                || !(unwrap(select.getWhere()) instanceof net.sf.jsqlparser.expression.operators.conditional.AndExpression and)
+                || select.getLimit() == null || select.getSelectItems() == null || select.getSelectItems().isEmpty()) {
+            throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+        }
+        int tenantPredicates = 0; boolean idsProven = false;
+        // The tenant plugin may append one duplicate exact owner predicate before final prepare.
+        var pending = new java.util.ArrayDeque<Expression>();
+        var terms = new ArrayList<Expression>();
+        pending.push(and);
+        while (!pending.isEmpty()) {
+            Expression term = unwrap(pending.pop());
+            if (term instanceof net.sf.jsqlparser.expression.operators.conditional.AndExpression conjunction) {
+                pending.push(conjunction.getRightExpression()); pending.push(conjunction.getLeftExpression());
+            } else { terms.add(term); }
+            if (pending.size() + terms.size() > 3) throw new IllegalStateException("LIFECYCLE_ID_BATCH_PREDICATE_REQUIRED");
+        }
+        for (Expression term : terms) {
+            if (term instanceof EqualsTo equality && tenantPredicates < 2) {
+                Expression tenant = matches(equality.getLeftExpression(), scope, "tenant_id") ? equality.getRightExpression()
+                        : matches(equality.getRightExpression(), scope, "tenant_id") ? equality.getLeftExpression() : null;
+                if (!Objects.equals(idBatchLong(tenant, context), requireTenant())) {
+                    throw new IllegalStateException("TENANT_CONTEXT_MISMATCH");
+                }
+                tenantPredicates++;
+            } else if (term instanceof InExpression in && !in.isNot() && matches(in.getLeftExpression(), scope, "id")
+                    && !idsProven && in.getRightExpression() instanceof ExpressionList<?> ids && !ids.isEmpty() && ids.size() <= 100) {
+                Set<Long> distinct = new HashSet<>();
+                for (Object candidate : ids) {
+                    if (!(candidate instanceof Expression expression) || !distinct.add(idBatchLong(expression, context))) {
+                        throw new IllegalStateException("LIFECYCLE_ID_BATCH_IDS_REQUIRED");
+                    }
+                }
+                idsProven = true;
+            } else {
+                throw new IllegalStateException("LIFECYCLE_ID_BATCH_PREDICATE_REQUIRED");
+            }
+        }
+        if (tenantPredicates == 0 || !idsProven) throw new IllegalStateException("LIFECYCLE_ID_BATCH_PREDICATE_REQUIRED");
+        Expression limit = unwrap(select.getLimit().getRowCount());
+        if (!(limit instanceof LongValue || limit instanceof JdbcParameter)) throw new IllegalStateException("LIFECYCLE_ID_BATCH_LIMIT_REQUIRED");
+        Object size = value(limit, context.sql(), context.statement().getConfiguration());
+        if (!(size instanceof Long || size instanceof Integer) || ((Number) size).longValue() < 1
+                || ((Number) size).longValue() > 100) throw new IllegalStateException("LIFECYCLE_ID_BATCH_LIMIT_REQUIRED");
+        for (var item : select.getSelectItems()) {
+            if (!idBatchProjection(item.getExpression(), scope)) throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+        }
+        if (select.getOrderByElements() != null) {
+            if (select.getOrderByElements().size() != 1
+                    || !matches(select.getOrderByElements().getFirst().getExpression(), scope, "id")
+                    || select.getOrderByElements().getFirst().getNullOrdering() != null) {
+                throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+            }
+        }
+        if (select.getOrderByElements() != null) {
+            var order = select.getOrderByElements().getFirst();
+            String approvedOrder = order.getExpression().toString()
+                    + (order.isAscDescPresent() ? order.isAsc() ? " ASC" : " DESC" : "");
+            if (!approvedOrder.equals(order.toString())) throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+        }
+        // Reconstruct only approved fields, including simple aliases; alias column lists can rename tenant/id authority.
+        String from = table.getFullyQualifiedName() + (table.getAlias() == null ? ""
+                : (table.getAlias().isUseAs() ? " AS " : " ") + table.getAlias().getName());
+        String canonical = "SELECT " + select.getSelectItems().stream().map(Object::toString)
+                .collect(java.util.stream.Collectors.joining(", ")) + " FROM " + from + " WHERE " + select.getWhere()
+                + (select.getOrderByElements() == null ? "" : " ORDER BY " + select.getOrderByElements().getFirst())
+                + " LIMIT " + select.getLimit().getRowCount();
+        if (!canonical.equals(select.toString())) throw new IllegalStateException("LIFECYCLE_ID_BATCH_SHAPE_REQUIRED");
+    }
+
+    private static long idBatchLong(Expression expression, LifecycleSqlContextBO context) {
+        Expression checked = unwrap(expression);
+        if (!(checked instanceof LongValue || checked instanceof JdbcParameter)) throw new IllegalStateException("LIFECYCLE_ID_BATCH_IDS_REQUIRED");
+        Object value = value(checked, context.sql(), context.statement().getConfiguration());
+        if (!(value instanceof Long id) || id <= 0) throw new IllegalStateException("LIFECYCLE_ID_BATCH_IDS_REQUIRED");
+        return id;
+    }
+
+    private static boolean idBatchProjection(Expression expression, TableScopeBO scope) {
+        if (expression instanceof Column column) return matches(column, scope, identifier(column.getColumnName()));
+        if (expression instanceof net.sf.jsqlparser.statement.select.AllTableColumns all) return all.toString().equals(scope.alias() + ".*");
+        if (expression instanceof net.sf.jsqlparser.statement.select.AllColumns all) return all.toString().equals("*");
+        if (expression instanceof net.sf.jsqlparser.expression.JsonExpression json && json.getExpression() instanceof Column column
+                && matches(column, scope, identifier(column.getColumnName())) && json.getIdentList() != null
+                && !json.getIdentList().isEmpty() && json.getIdentList().size() <= 8) {
+            return json.getIdentList().stream().allMatch(entry -> Set.of("->", "->>").contains(entry.getValue())
+                    && idBatchJsonPath(entry.getKey(), 0));
+        }
+        return false;
+    }
+
+    private static boolean idBatchJsonPath(Expression expression, int depth) {
+        if (depth > 8) return false;
+        if (expression instanceof net.sf.jsqlparser.expression.StringValue text) return text.getValue().length() <= 128;
+        if (expression instanceof net.sf.jsqlparser.expression.JsonExpression json && idBatchJsonPath(json.getExpression(), depth + 1)
+                && json.getIdentList() != null && !json.getIdentList().isEmpty() && json.getIdentList().size() <= 8) {
+            return json.getIdentList().stream().allMatch(entry -> Set.of("->", "->>").contains(entry.getValue())
+                    && idBatchJsonPath(entry.getKey(), depth + 1));
+        }
+        return false;
     }
 
     private void validateHistoryPolicy(LifecyclePolicySnapshotBO policy, LifecycleSqlContextBO context) {
@@ -426,7 +545,7 @@ public final class EgonColaTenantIdGuardInnerInterceptor implements InnerInterce
 
     private static boolean historyPolicy(LifecyclePolicySnapshotBO policy) {
         return Set.of(LifecycleScopeEnum.ID, LifecycleScopeEnum.PARENT, LifecycleScopeEnum.PAGE,
-                LifecycleScopeEnum.COUNT, LifecycleScopeEnum.ALL_PARENT).contains(policy.scope());
+                LifecycleScopeEnum.COUNT, LifecycleScopeEnum.ALL_PARENT, LifecycleScopeEnum.ID_BATCH).contains(policy.scope());
     }
 
     private static boolean purgePolicy(LifecyclePolicySnapshotBO policy) {

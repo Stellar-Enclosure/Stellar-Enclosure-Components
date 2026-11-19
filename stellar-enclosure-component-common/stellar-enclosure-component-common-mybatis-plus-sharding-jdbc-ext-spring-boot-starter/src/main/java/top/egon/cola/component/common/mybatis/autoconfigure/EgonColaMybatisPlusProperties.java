@@ -147,7 +147,8 @@ public class EgonColaMybatisPlusProperties {
         MONOTONE_DELETE(5, "MONOTONE_DELETE"),
         RESTORE(6, "RESTORE"),
         PURGE_ID(7, "PURGE_ID"),
-        PURGE_PARENT(8, "PURGE_PARENT");
+        PURGE_PARENT(8, "PURGE_PARENT"),
+        ID_BATCH(9, "ID_BATCH");
 
         private final int code;
         private final String message;

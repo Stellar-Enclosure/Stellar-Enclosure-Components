@@ -54,6 +54,74 @@ class EgonColaLifecyclePolicyTest {
     }
 
     @Test
+    void exactIdBatchHistoryUsesOneBoundedTenantAndIdSet() {
+        var guard = guard(LifecycleScopeEnum.valueOf("ID_BATCH"));
+        assertThat(prove(guard, SqlCommandType.SELECT,
+                "SELECT * FROM item WHERE tenant_id=? AND id IN (?,?) ORDER BY id ASC LIMIT 100",
+                "tenant", 41L, "first", 1L, "second", 2L)).hasSize(1);
+    }
+
+    @Test
+    void idBatchAcceptsOneHundredLiteralIdsAndTheNativeJsonProjection() {
+        var guard = guard(LifecycleScopeEnum.valueOf("ID_BATCH"));
+        String ids = java.util.stream.LongStream.rangeClosed(1, 100).mapToObj(Long::toString).collect(java.util.stream.Collectors.joining(","));
+        assertThat(prove(guard, SqlCommandType.SELECT, "SELECT id FROM item WHERE tenant_id=41 AND id IN (" + ids + ") LIMIT 100")).hasSize(1);
+        assertThat(prove(guard, SqlCommandType.SELECT,
+                "SELECT id FROM item WHERE (tenant_id=? AND id IN (?)) AND tenant_id=41 LIMIT 100",
+                "tenant", 41L, "id", 7L)).hasSize(1);
+        assertThat(prove(guard, SqlCommandType.SELECT,
+                "SELECT v.id, v.dependency_manifest_json -> 'root' ->> 'envCode' AS env_code FROM item v WHERE v.tenant_id=? AND v.id IN (?) ORDER BY v.id ASC LIMIT ?",
+                "tenant", 41L, "id", 7L, "limit", 100L)).hasSize(1);
+    }
+
+    @Test
+    void idBatchRejectsBroaderSqlShapesAndNeverBecomesAnUnregisteredHistoryBypass() {
+        var guard = guard(LifecycleScopeEnum.valueOf("ID_BATCH"));
+        for (String sql : java.util.List.of(
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1)",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 101",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 0",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 1 OFFSET 0",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1,1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (0) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (-1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id NOT IN (1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id BETWEEN 1 AND 100 LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 OR id IN (1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND (id IN (1) OR 1=1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (SELECT id FROM item) LIMIT 100",
+                "SELECT (SELECT 1) FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT COUNT(*) FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT pg_sleep(1) FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT * FROM item a JOIN item b ON a.id=b.id WHERE a.tenant_id=41 AND a.id IN (1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) UNION ALL SELECT * FROM item",
+                "WITH hidden AS (SELECT * FROM item) SELECT * FROM hidden WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT DISTINCT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT t.* FROM item AS t(tenant_id,id) WHERE t.tenant_id=41 AND t.id IN (1) LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) ORDER BY id NULLS FIRST LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) AND title='other' LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) AND tenant_id=41 AND tenant_id=41 LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) GROUP BY id LIMIT 100",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100 FOR UPDATE",
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) ORDER BY random() LIMIT 100",
+                "SELECT * FROM another_item WHERE tenant_id=41 AND id IN (1) LIMIT 100",
+                "SELECT 1")) {
+            assertThatThrownBy(() -> prove(guard, SqlCommandType.SELECT, sql)).as(sql).isInstanceOf(IllegalStateException.class);
+        }
+        String oversized = java.util.stream.LongStream.rangeClosed(1, 101).mapToObj(Long::toString).collect(java.util.stream.Collectors.joining(","));
+        assertThatThrownBy(() -> prove(guard, SqlCommandType.SELECT,
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (" + oversized + ") LIMIT 100")).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> prove(guard, SqlCommandType.SELECT,
+                "SELECT * FROM item WHERE tenant_id=? AND id IN (?) LIMIT 100", "tenant", 42L, "id", 1L)).hasMessage("TENANT_CONTEXT_MISMATCH");
+        assertThatThrownBy(() -> prove(guard, SqlCommandType.SELECT,
+                "SELECT * FROM item WHERE tenant_id=? AND id IN (?) LIMIT 100", "tenant", 41L, "id", 1)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> proveWithId("test.OtherMapper.operation", guard, SqlCommandType.SELECT,
+                "SELECT * FROM item WHERE tenant_id=41 AND id IN (1) LIMIT 100")).hasMessage("ACTIVE_PREDICATE_REQUIRED");
+        assertThatThrownBy(() -> prove(guard, SqlCommandType.UPDATE,
+                "UPDATE item SET title='changed' WHERE tenant_id=41 AND id IN (1) LIMIT 100")).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void historyRequiresExactPolicyAndBoundKeyAndDoesNotEnableRuntimeMutations() {
         var guard = guard(LifecycleScopeEnum.ID);
         assertThat(prove(guard, SqlCommandType.SELECT, "SELECT * FROM item WHERE tenant_id=? AND id=? AND deleted_at IS NOT NULL", "tenant", 41L, "id", 1L)).hasSize(1);
@@ -188,6 +256,9 @@ class EgonColaLifecyclePolicyTest {
         }
         var source = new StaticSqlSource(configuration, text, mappings);
         var statement = new MappedStatement.Builder(configuration, id, source, command).resource("policy.xml").build();
+        if (command == SqlCommandType.SELECT) {
+            guard.beforeQuery(null, statement, values, org.apache.ibatis.session.RowBounds.DEFAULT, null, source.getBoundSql(values));
+        }
         return guard.validateFinal(statement, source.getBoundSql(values), Map.of());
     }
 }

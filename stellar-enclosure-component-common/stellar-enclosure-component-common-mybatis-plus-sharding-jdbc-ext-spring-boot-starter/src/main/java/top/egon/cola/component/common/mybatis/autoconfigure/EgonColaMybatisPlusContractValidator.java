@@ -273,7 +273,7 @@ public final class EgonColaMybatisPlusContractValidator implements SmartInitiali
                     || (mode != EgonColaMybatisPlusProperties.LifecycleScopeEnum.RESTORE && !policy.getRestoreNullColumns().isEmpty())
                     || (mode == EgonColaMybatisPlusProperties.LifecycleScopeEnum.MONOTONE_DELETE && !id.endsWith(".deleteVersionedById"))
                     || (mode == EgonColaMybatisPlusProperties.LifecycleScopeEnum.PURGE_PARENT && !identifier(policy.getParentTable()))
-                    || (Set.of(EgonColaMybatisPlusProperties.LifecycleScopeEnum.ID, EgonColaMybatisPlusProperties.LifecycleScopeEnum.PURGE_ID).contains(mode) && !"id".equals(policy.getKeyColumn()))
+                    || (Set.of(EgonColaMybatisPlusProperties.LifecycleScopeEnum.ID, EgonColaMybatisPlusProperties.LifecycleScopeEnum.ID_BATCH, EgonColaMybatisPlusProperties.LifecycleScopeEnum.PURGE_ID).contains(mode) && !"id".equals(policy.getKeyColumn()))
                     || (Set.of(EgonColaMybatisPlusProperties.LifecycleScopeEnum.PARENT, EgonColaMybatisPlusProperties.LifecycleScopeEnum.ALL_PARENT,
                             EgonColaMybatisPlusProperties.LifecycleScopeEnum.PURGE_PARENT).contains(mode) && protectedColumns.contains(policy.getKeyColumn()))
                     || lifecycle.getHistoryReadStatements().contains(id)) {
@@ -296,6 +296,7 @@ public final class EgonColaMybatisPlusContractValidator implements SmartInitiali
     private static SqlCommandType policyCommand(EgonColaMybatisPlusProperties.LifecycleScopeEnum mode) {
         return Map.of(
                 EgonColaMybatisPlusProperties.LifecycleScopeEnum.ID, SqlCommandType.SELECT,
+                EgonColaMybatisPlusProperties.LifecycleScopeEnum.ID_BATCH, SqlCommandType.SELECT,
                 EgonColaMybatisPlusProperties.LifecycleScopeEnum.PARENT, SqlCommandType.SELECT,
                 EgonColaMybatisPlusProperties.LifecycleScopeEnum.PAGE, SqlCommandType.SELECT,
                 EgonColaMybatisPlusProperties.LifecycleScopeEnum.COUNT, SqlCommandType.SELECT,

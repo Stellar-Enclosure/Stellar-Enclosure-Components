@@ -93,6 +93,38 @@ class EgonColaLifecycleContractTest {
     }
 
     @Test
+    void explicitIdBatchStartsThroughTheRealContractAndReadsActiveAndArchivedRowsTogether() {
+        String id = MAPPER + ".selectHistoryIdBatch";
+        contextRunner.withPropertyValues(
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].scope=ID_BATCH",
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].table=test_business_record",
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].key-column=id")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    context.getBean(TestTenantIdProvider.class).set(41L);
+                    context.getBean(TestUserIdProvider.class).set("history-reader");
+                    var repository = context.getBean(TestBusinessRepository.class);
+                    var archived = createDeleted(repository, "archived-batch");
+                    var active = new TestBusinessModel().businessValues("active-batch", "payload");
+                    assertThat(repository.save(active)).isTrue();
+                    var sql = context.getBean(SqlSessionTemplate.class);
+                    java.util.List<TestBusinessModel> rows = sql.selectList(id,
+                            Map.of("tenantId", 41L, "ids", java.util.List.of(active.getId(), archived.getId())));
+                    assertThat(rows).extracting(TestBusinessModel::getId).containsExactlyInAnyOrder(active.getId(), archived.getId());
+                    assertThat(rows.stream().filter(row -> row.getId().equals(archived.getId())).findFirst().orElseThrow().getDeletedAt()).isNotNull();
+                    assertThatThrownBy(() -> sql.selectList(id, Map.of("tenantId", 42L, "ids", java.util.List.of(active.getId()))))
+                            .hasRootCauseMessage("TENANT_CONTEXT_MISMATCH");
+                    assertThatThrownBy(() -> sql.selectList(id, Map.of("tenantId", 41L, "ids", java.util.List.of(active.getId(), active.getId()))))
+                            .hasRootCauseMessage("LIFECYCLE_ID_BATCH_IDS_REQUIRED");
+                });
+        contextRunner.withPropertyValues(
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].scope=ID_BATCH",
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].table=test_business_record",
+                EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.statement-policies[" + id + "].key-column=tenant_id")
+                .run(context -> assertThat(context.getStartupFailure()).hasStackTraceContaining("LIFECYCLE_STATEMENT_POLICY_INVALID"));
+    }
+
+    @Test
     void historyAndRestoreRequireExactMapperAllowlistAndPreserveAllGuards() {
         contextRunner.withPropertyValues(
                         EgonColaMybatisPlusProperties.PREFIX + ".lifecycle.history-read-statements[0]=" + HISTORY,
@@ -354,6 +386,13 @@ class EgonColaLifecycleContractTest {
                 <?xml version="1.0" encoding="UTF-8"?>
                 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
                 <mapper namespace="%s">
+                  <select id="selectHistoryIdBatch" resultType="top.egon.cola.component.common.mybatis.support.TestBusinessModel">
+                    SELECT id, tenant_id, create_user_id, create_time, update_user_id, update_time,
+                           deleted_at, version, title, payload FROM test_business_record
+                    WHERE tenant_id=#{tenantId} AND id IN
+                    <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+                    ORDER BY id ASC LIMIT 100
+                  </select>
                   <select id="selectIncludingDeletedById" resultType="%s">
                     SELECT id, tenant_id, create_user_id, create_time, update_user_id, update_time,
                            deleted_at, version, title, payload
