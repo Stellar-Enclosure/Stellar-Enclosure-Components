@@ -30,6 +30,19 @@ class DdcSiProtoMapperTest {
 
     private final DdcSiProtoMapper mapper = Mappers.getMapper(DdcSiProtoMapper.class);
 
+    @Test void executionBundlePreservesVerifiedEmptyPresenceAndRejectsMissingMaterial() throws Exception {
+        var digest=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var root=new top.egon.cola.component.tianshu.model.si.DdcSiDependencyManifestVO.VersionIdentityVO("7","1","2","3",DdcSiKindEnum.AGENT,"test",digest);
+        var bundle=new top.egon.cola.component.tianshu.model.si.DdcSiExecutionBundleVO(
+                new top.egon.cola.component.tianshu.model.si.DdcSiExecutionBundleVO.MaterialVO(root,"biz","ns",null,"agent","{}"),
+                top.egon.cola.component.tianshu.model.si.DdcSiDependencyManifestVO.create(root,null,List.of(),List.of()),List.of());
+        var wire=mapper.toProto(bundle);
+        assertThat(wire.hasNodes()).isTrue();assertThat(wire.getRoot().hasOwnerAppCode()).isFalse();
+        assertThat(mapper.fromProto(wire)).isEqualTo(bundle);
+        assertThatThrownBy(()->mapper.fromProto(wire.toBuilder().clearNodes().build())).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(()->mapper.fromProto(wire.toBuilder().setRoot(wire.getRoot().toBuilder().setSpecJson("{\"changed\":1}")).build())).isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void roundTripsResourceSearchHitCatalogQueryAndRegistration() {
         Instant publishedAt = Instant.ofEpochMilli(1_763_280_930_123L);

@@ -29,6 +29,10 @@ import top.egon.cola.component.tianshu.model.si.DdcSiSemanticSearchQuery;
 import top.egon.cola.component.tianshu.model.si.DdcSiSourceTypeEnum;
 import top.egon.cola.component.tianshu.model.si.DdcSiDependencyManifestVO;
 
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiExecutionBundleProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiExecutionMaterialProto;
+import top.egon.cola.component.rpc.tianshu.contract.proto.v1.SiExecutionMaterialListProto;
+import top.egon.cola.component.tianshu.model.si.DdcSiExecutionBundleVO;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
@@ -107,6 +111,38 @@ public interface DdcSiProtoMapper extends BaseConverter<DdcSiResourceDescriptor,
     @Mapping(target = "resolvedVersionNo", expression = "java(proto.hasResolvedVersionNo() ? requirePositive(proto.getResolvedVersionNo()) : null)")
     @Mapping(target = "dependencyManifest", expression = "java(proto.hasDependencyManifest() ? fromProto(proto.getDependencyManifest()) : null)")
     DdcSiResourceDescriptor fromProto(SiResourceProto proto);
+
+    default SiExecutionBundleProto toProto(DdcSiExecutionBundleVO source) {
+        if (source == null) throw invalidExecutionMaterial();
+        var nodes = SiExecutionMaterialListProto.newBuilder();
+        source.nodes().forEach(node -> nodes.addItems(toProto(node)));
+        var result = SiExecutionBundleProto.newBuilder().setRoot(toProto(source.root()))
+                .setManifest(toProto(source.manifest())).setNodes(nodes).build();
+        if (result.getSerializedSize() > DdcSiExecutionBundleVO.MAX_BUNDLE_BYTES) throw invalidExecutionMaterial();
+        return result;
+    }
+
+    default DdcSiExecutionBundleVO fromProto(SiExecutionBundleProto source) {
+        if (source == null || !source.hasRoot() || !source.hasManifest() || !source.hasNodes()
+                || source.getSerializedSize() > DdcSiExecutionBundleVO.MAX_BUNDLE_BYTES) throw invalidExecutionMaterial();
+        return new DdcSiExecutionBundleVO(fromProto(source.getRoot()), fromProto(source.getManifest()),
+                source.getNodes().getItemsList().stream().map(this::fromProto).toList());
+    }
+
+    default SiExecutionMaterialProto toProto(DdcSiExecutionBundleVO.MaterialVO source) {
+        var value = SiExecutionMaterialProto.newBuilder().setIdentity(toProto(source.identity()))
+                .setBizCode(source.bizCode()).setNamespaceCode(source.namespaceCode())
+                .setResourceKey(source.resourceKey()).setSpecJson(source.specJson());
+        if (source.ownerAppCode() != null) value.setOwnerAppCode(source.ownerAppCode());
+        return value.build();
+    }
+
+    default DdcSiExecutionBundleVO.MaterialVO fromProto(SiExecutionMaterialProto source) {
+        if (source == null || !source.hasIdentity()) throw invalidExecutionMaterial();
+        return new DdcSiExecutionBundleVO.MaterialVO(fromProto(source.getIdentity()), source.getBizCode(),
+                source.getNamespaceCode(), source.hasOwnerAppCode() ? requireOwner(source.getOwnerAppCode()) : null,
+                source.getResourceKey(), source.getSpecJson());
+    }
 
     default SiDependencyManifestProto toProto(DdcSiDependencyManifestVO source) {
         if (source == null || source.canonicalBytes().length > 1_048_576) { throw invalidExecutionMaterial(); }

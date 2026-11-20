@@ -13,7 +13,7 @@
 
     <artifactId>stellar-enclosure-component-rpc-tianshu-adapter</artifactId>
     <name>stellar-enclosure-component-rpc-tianshu-adapter</name>
-    <description>Direct RPC transport adapter for the Tianshu platform.</description>
+    <description>Protected native SI wire and catalog adapter for the Tianshu platform.</description>
 
     <properties>
         <stellar-enclosure.tianquan-shoubing.version>0.0.1</stellar-enclosure.tianquan-shoubing.version>

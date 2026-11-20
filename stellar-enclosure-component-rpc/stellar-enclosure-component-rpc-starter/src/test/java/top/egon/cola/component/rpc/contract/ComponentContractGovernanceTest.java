@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.fail;
  * （REQ-002、REQ-003、REQ-004、REQ-005、REQ-006、REQ-007、REQ-027）。
  *
  * <p>云原生迁移 Step 5 删除物理目录、客户端选址与旧引用模式后，本文件继续固定保留类型的编码、校验与异常合同，
- * 并验证旧实现没有回流。相邻天枢适配器的源码合同保留到计划 Step 34；其现存协议编码不因当前模块删实现而改号。</p>
+ * 并验证旧实现没有回流。天枢适配器在 Step 34 迁移到通用 Native RPC 运行时，只保留 SI 协议合同。</p>
  */
 class ComponentContractGovernanceTest {
 
@@ -70,9 +70,6 @@ class ComponentContractGovernanceTest {
     private static final String ENUM_PACKAGE = RPC_PACKAGE + ".common.enums";
 
     private static final String LEGACY_EXCEPTION_PACKAGE = RPC_PACKAGE + ".exception";
-
-    /** 相邻模块的 enum 不在本模块测试类路径上，固定编码改由源码解析。 */
-    private static final String TIANSHU_PACKAGE = RPC_PACKAGE + ".tianshu";
 
     private static final String CANONICAL_FACADE_BEAN = "egonColaValidationUtils";
 
@@ -294,9 +291,7 @@ class ComponentContractGovernanceTest {
         assertThat(text(MAIN_SOURCES) + text(TIANSHU_SOURCES)).doesNotContain("ordinal()");
 
         for (Map.Entry<String, List<String>> entry : ENUM_CODES.entrySet()) {
-            List<String> assignments = entry.getKey().startsWith(TIANSHU_PACKAGE)
-                    ? sourceCodeAssignments(TIANSHU_SOURCES, enumSimpleName(entry.getKey()))
-                    : codeAssignments(Class.forName(entry.getKey()));
+            List<String> assignments = codeAssignments(Class.forName(entry.getKey()));
             assertThat(assignments)
                     .as("REQ-004 %s 的固定编码与顺序保持", simpleName(entry.getKey()))
                     .containsExactlyElementsOf(entry.getValue());
@@ -310,10 +305,6 @@ class ComponentContractGovernanceTest {
         assertThat(RpcConsumerRuntimeState.DRAINING.accepting()).isFalse();
         assertThat(RpcProviderRuntimeState.DEGRADED.servingNewCalls()).isTrue();
         assertThat(RpcProviderRuntimeState.FAILED.servingNewCalls()).isFalse();
-        assertThat(read(TIANSHU_SECURITY_ENUM))
-                .as("REQ-004 管理面判定语义保持，不改成按 code 分支")
-                .contains("public boolean management()")
-                .contains("name().startsWith(\"MANAGEMENT_\")");
         assertThat(RpcInvocationMode.values()).containsExactly(
                 RpcInvocationMode.BLOCKING, RpcInvocationMode.ASYNC);
         assertThat(RpcType.values()).containsExactly(RpcType.UNARY);
@@ -331,6 +322,18 @@ class ComponentContractGovernanceTest {
                     .as("Step 5 starter 不得再依赖已退役的类型 %s", type)
                     .doesNotContain(type);
         }
+    }
+
+    @Test
+    void siAdapterUsesNativeRpcWithoutLegacyOperationOrValidationBeans() throws Exception {
+        assertThat(TIANSHU_SECURITY_ENUM)
+                .as("Step 34 legacy DDC operation enum must remain retired")
+                .doesNotExist();
+        String configuration = read(TIANSHU_SOURCES.resolve(
+                "top/egon/cola/component/rpc/tianshu/autoconfigure/DdcRpcAutoConfiguration.java"));
+        assertThat(configuration)
+                .contains("@Qualifier(\"rpcGenericInvoker\")", "RpcGenericInvoker invoker", "@Bean(\"ddcSiCatalogRpcClient\")")
+                .doesNotContain(CANONICAL_FACADE_BEAN, "ValidationUtils", "ValidatorFactory", "DdcRpcOperation");
     }
 
     @Test
@@ -366,9 +369,7 @@ class ComponentContractGovernanceTest {
         for (Path configuration : List.of(
                 MAIN_SOURCES.resolve("top/egon/cola/component/rpc/config/EgonRpcAutoConfig.java"),
                 MAIN_SOURCES.resolve(
-                        "top/egon/cola/component/rpc/config/RpcAccessGuardAutoConfiguration.java"),
-                TIANSHU_SOURCES.resolve(
-                        "top/egon/cola/component/rpc/tianshu/autoconfigure/DdcRpcAutoConfiguration.java"))) {
+                        "top/egon/cola/component/rpc/config/RpcAccessGuardAutoConfiguration.java"))) {
             String content = read(configuration);
             assertThat(content)
                     .as("REQ-007 %s 必须用公共规范 Bean 名发布门面", configuration)
@@ -528,13 +529,6 @@ class ComponentContractGovernanceTest {
         codes.put(RPC_PACKAGE + ".contract.descriptor.RpcType", List.of("UNARY=0"));
         codes.put(RPC_PACKAGE + ".provider.lifecycle.RpcProviderRuntimeState",
                 List.of("NEW=0", "STARTING=1", "READY=2", "DEGRADED=3", "DRAINING=4", "FAILED=5", "STOPPED=6"));
-        codes.put(TIANSHU_PACKAGE + ".security.DdcRpcOperation",
-                List.of("SDK_REGISTER=0", "SDK_HEARTBEAT=1", "SDK_OFFLINE=2", "CONFIG_PULL=3", "PUBLISH_ACK=4",
-                        "REGISTRY_REGISTER=5", "REGISTRY_HEARTBEAT=6", "REGISTRY_DEREGISTER=7", "REGISTRY_READ=8",
-                        "MANAGEMENT_CONFIG_READ=9", "MANAGEMENT_CONFIG_WRITE=10", "MANAGEMENT_PUBLISH=11",
-                        "MANAGEMENT_TASK_READ=12", "MANAGEMENT_TASK_RETRY=13", "MANAGEMENT_INSTANCE_READ=14",
-                        "MANAGEMENT_ADMISSION_REVOKE=15", "MANAGEMENT_SCOPE_READ=16", "MANAGEMENT_REGISTRY_READ=17",
-                        "MANAGEMENT_CATALOG_READ=18", "AI_READ=19", "AI_REPORT=20", "AI_WRITE=21", "AI_PUBLISH=22"));
         return Map.copyOf(codes);
     }
 
@@ -583,32 +577,6 @@ class ComponentContractGovernanceTest {
             rendered.add(constant.name() + "=" + getCode.invoke(constant));
         }
         return rendered;
-    }
-
-    /** 跨模块 enum 不在本模块类路径上，按源码字面量固定同一份编码合同。 */
-    private static List<String> sourceCodeAssignments(Path root, String enumName) throws IOException {
-        Pattern constant = Pattern.compile(
-                "([A-Z][A-Z0-9_]*)\\s*\\(\\s*(\\d+)\\s*,\\s*\"([^\"]*)\"\\s*\\)");
-        List<String> rendered = new ArrayList<>();
-        for (Path file : sources(root)) {
-            String body = Files.readString(file);
-            int declaration = body.indexOf("enum " + enumName);
-            if (declaration < 0) {
-                continue;
-            }
-            int constants = body.indexOf('{', declaration);
-            int end = body.indexOf(';', constants);
-            assertThat(end).as("%s 的常量列表必须以分号结束", enumName).isPositive();
-            Matcher matcher = constant.matcher(body.substring(constants, end));
-            while (matcher.find()) {
-                assertThat(matcher.group(3))
-                        .as("REQ-004 %s.%s 的 message 必须保持常量名", enumName, matcher.group(1))
-                        .isEqualTo(matcher.group(1));
-                rendered.add(matcher.group(1) + "=" + matcher.group(2));
-            }
-            return rendered;
-        }
-        return fail("REQ-004 未找到 " + enumName + " 的源码声明");
     }
 
     private static ValidationUtils realValidationUtils() {

@@ -1,428 +1,105 @@
 package top.egon.cola.component.rpc.tianshu.autoconfigure;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import jakarta.validation.Validation;
-import jakarta.validation.Validator;
-import org.redisson.api.RedissonClient;
 import org.mapstruct.factory.Mappers;
-import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.DependsOn;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.Environment;
-import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.tianshu.api.client.DdcConfigClient;
-import top.egon.cola.component.tianshu.api.client.DdcAiFeedbackClient;
-import top.egon.cola.component.tianshu.api.client.DdcAiSyncClient;
-import top.egon.cola.component.tianshu.api.client.DdcPromptClient;
-import top.egon.cola.component.tianshu.api.client.DdcSkillClient;
-import top.egon.cola.component.tianshu.api.client.DdcServiceRegistryClient;
-import top.egon.cola.component.tianshu.api.client.DdcSiCatalogClient;
-import top.egon.cola.component.tianshu.autoconfigure.DdcAutoConfiguration;
-import top.egon.cola.component.tianshu.autoconfigure.DdcRedisAutoConfiguration;
-import top.egon.cola.component.tianshu.autoconfigure.DdcRegistryAutoConfiguration;
-import top.egon.cola.component.tianshu.autoconfigure.DdcAiResourceAutoConfiguration;
-import top.egon.cola.component.tianshu.autoconfigure.properties.DdcProperties;
-import top.egon.cola.component.tianshu.autoconfigure.properties.DdcTenantProperties;
-import top.egon.cola.component.common.core.validation.ValidationUtils;
-import top.egon.cola.component.tianshu.listener.registry.DdcRegistrySubscriptionCoordinator;
-import top.egon.cola.component.tianshu.model.instance.DdcInstanceIdentity;
-import top.egon.cola.component.tianshu.service.registry.DdcRegistrySnapshotLoader;
 import top.egon.cola.component.rpc.config.EgonRpcAutoConfig;
-import top.egon.cola.component.rpc.consumer.gateway.RpcGatewayDirectory;
-import top.egon.cola.component.rpc.consumer.provider.RpcProviderDirectory;
+import top.egon.cola.component.rpc.config.EgonRpcProperties;
+import top.egon.cola.component.rpc.consumer.generic.RpcGenericInvoker;
+import top.egon.cola.component.rpc.consumer.reference.RpcReferenceDefinitionResolver;
 import top.egon.cola.component.rpc.context.identity.RpcProcessIdentity;
-import top.egon.cola.component.rpc.context.identity.RpcProcessIdentityProvider;
-import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientFactory;
-import top.egon.cola.component.rpc.tianshu.client.DdcRpcClientHandle;
-import top.egon.cola.component.rpc.tianshu.client.ai.DdcAiProtoConverter;
-import top.egon.cola.component.rpc.tianshu.client.registry.RpcDdcServiceRegistryClient;
+import top.egon.cola.component.rpc.contract.identity.RpcServiceIdentity;
 import top.egon.cola.component.rpc.tianshu.client.si.DdcSiCatalogRpcClient;
-import top.egon.cola.component.rpc.tianshu.contract.proto.v1.DdcSiResourceGrpcServiceGrpc;
 import top.egon.cola.component.rpc.tianshu.mapping.DdcSiProtoMapper;
-import top.egon.cola.component.rpc.tianshu.registry.*;
-import top.egon.cola.component.rpc.provider.registration.RpcProviderRegistry;
-import top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterAutoConfiguration;
+import top.egon.cola.platform.tianquan.shoubing.contract.ServiceTokenContext;
 import top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterProperties;
-import top.egon.cola.platform.tianquan.shoubing.starter.client.IdpServiceOAuth2Client;
+import top.egon.cola.platform.tianquan.shoubing.starter.security.rpc.IdpRpcClientCredentialInterceptorFactory;
 
-import java.net.InetAddress;
+import java.util.Locale;
+import java.util.Set;
 
-/**
- * 在业务 Tianshu 自动装配之前提供 Direct RPC Port 适配器。
- * / Supplies Direct RPC Port adapters before the business Tianshu auto-configurations.
- */
-@AutoConfiguration(
-        after = {
-                ValidationAutoConfiguration.class,
-                DdcRedisAutoConfiguration.class,
-                IdpStarterAutoConfiguration.class
-        },
-        afterName = "top.egon.cola.component.common.mybatis.autoconfigure"
-                + ".EgonColaMybatisPlusAutoConfiguration",
-        before = {
-                DdcAutoConfiguration.class,
-                DdcRegistryAutoConfiguration.class,
-                DdcAiResourceAutoConfiguration.class,
-                EgonRpcAutoConfig.class
-        }
-)
-@EnableConfigurationProperties({
-        DdcRpcProperties.class,
-        DdcProperties.class,
-        DdcTenantProperties.class,
-        IdpStarterProperties.class
-})
+/** SI-only assembly; the host's native runtime owns channels, credentials, attempts and shutdown. */
+@AutoConfiguration(after = EgonRpcAutoConfig.class,
+        afterName = "top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterAutoConfiguration")
+@EnableConfigurationProperties(DdcRpcProperties.class)
 public class DdcRpcAutoConfiguration {
+    private static final String LEGACY_PREFIX = "egon.cola.component.tianshu.rpc";
 
-    /** Retains the SDK mapper qualifier with Boot 4's Jackson 2 compatibility module. */
-    @Bean
-    public static BeanFactoryPostProcessor ddcRpcJacksonObjectMapperAlias() {
-        return beanFactory -> {
-            if (beanFactory.containsBean("jackson2ObjectMapper") && !beanFactory.containsBean("jacksonObjectMapper")) {
-                beanFactory.registerAlias("jackson2ObjectMapper", "jacksonObjectMapper");
+    @Bean("ddcSiNativeBootstrapGuard")
+    public InitializingBean ddcSiNativeBootstrapGuard(Environment environment) {
+        return () -> {
+            if (environment instanceof ConfigurableEnvironment configurable) {
+                for (var source : configurable.getPropertySources()) {
+                    if (source instanceof EnumerablePropertySource<?> enumerable) {
+                        for (String name : enumerable.getPropertyNames()) {
+                            String normalized = name.toLowerCase(Locale.ROOT).replace('_', '.');
+                            if (normalized.equals(LEGACY_PREFIX) || normalized.startsWith(LEGACY_PREFIX + ".")) {
+                                throw retired();
+                            }
+                        }
+                    }
+                }
+            }
+            for (String key : Set.of("target", "connect-timeout", "default-timeout", "load-balancing-policy",
+                    "max-inbound-message-size", "shutdown-timeout", "tls.enabled", "auth.runtime.credential-id")) {
+                if (environment.containsProperty(LEGACY_PREFIX + "." + key)) { throw retired(); }
             }
         };
     }
 
-    @Bean(name = "egonColaValidationUtils")
-    @ConditionalOnMissingBean(name = "egonColaValidationUtils")
-    public ValidationUtils egonColaValidationUtils(ObjectProvider<Validator> validators) {
-        return new ValidationUtils(validators.getIfAvailable(
-                () -> Validation.buildDefaultValidatorFactory().getValidator()));
-    }
-
-    @Bean("ddcAiProtoConverterImpl")
-    @ConditionalOnMissingBean(DdcAiProtoConverter.class)
-    public DdcAiProtoConverter ddcAiProtoConverter() {
-        return Mappers.getMapper(DdcAiProtoConverter.class);
-    }
-
-    @Bean("ddcRpcClientFactory")
-    @ConditionalOnMissingBean
-    public DdcRpcClientFactory ddcRpcClientFactory(
-            @Qualifier("egon.cola.component.tianshu.rpc-top.egon.cola.component.rpc.tianshu.autoconfigure.DdcRpcProperties")
-            DdcRpcProperties rpcProperties,
-            @Qualifier("egon.cola.component.tianshu-top.egon.cola.component.tianshu.autoconfigure.properties.DdcProperties")
-            DdcProperties ddcProperties,
-            @Qualifier("egon.cola.component.tianshu-top.egon.cola.component.tianshu.autoconfigure.properties.DdcTenantProperties")
-            DdcTenantProperties tenantProperties,
-            @Qualifier("ddcAiProtoConverterImpl") DdcAiProtoConverter aiProtoConverter,
-            Environment environment) {
-        return new DdcRpcClientFactory(
-                rpcProperties,
-                ddcProperties,
-                tenantProperties,
-                directIdentity(ddcProperties, environment),
-                aiProtoConverter
-        );
-    }
-
-    @Bean
-    @Primary
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.registry",
-            name = "enabled",
-            havingValue = "true"
-    )
-    public RpcProcessIdentityProvider ddcRpcProcessIdentityProvider(
-            ObjectProvider<DdcInstanceIdentity> identity,
-            DdcProperties properties,
-            Environment environment) {
-        return new DdcRpcProcessIdentityProvider(identity, properties, environment);
-    }
-
-    @Bean(destroyMethod = "close")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu",
-            name = "enabled",
-            havingValue = "true"
-    )
-    @ConditionalOnMissingBean(
-            value = DdcConfigClient.class,
-            name = "ddcConfigRpcClientHandle"
-    )
-    public DdcRpcClientHandle<DdcConfigClient> ddcConfigRpcClientHandle(
-            DdcRpcClientFactory factory) {
-        return factory.configClient();
-    }
-
-    @Bean({"ddcConfigClient", "ddcRpcConfigClient"})
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu",
-            name = "enabled",
-            havingValue = "true"
-    )
-    @ConditionalOnMissingBean(DdcConfigClient.class)
-    public DdcConfigClient ddcRpcConfigClient(
-            @Qualifier("ddcConfigRpcClientHandle")
-            DdcRpcClientHandle<DdcConfigClient> handle) {
-        return handle.client();
-    }
-
-    @Bean(name = "ddcAiPromptRpcClientHandle", destroyMethod = "close")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.prompt",
-            name = "enabled",
-            havingValue = "true")
-    @ConditionalOnMissingBean(DdcPromptClient.class)
-    public DdcRpcClientHandle<DdcPromptClient> ddcAiPromptRpcClientHandle(
-            DdcRpcClientFactory factory) {
-        return factory.promptClient();
-    }
-
-    @Bean("ddcAiPromptRpcClient")
-    @ConditionalOnBean(name = "ddcAiPromptRpcClientHandle")
-    @ConditionalOnMissingBean(DdcPromptClient.class)
-    public DdcPromptClient ddcAiPromptRpcClient(
-            @Qualifier("ddcAiPromptRpcClientHandle") DdcRpcClientHandle<DdcPromptClient> handle) {
-        return handle.client();
-    }
-
-    @Bean(name = "ddcAiSkillRpcClientHandle", destroyMethod = "close")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.skill",
-            name = "enabled",
-            havingValue = "true")
-    @ConditionalOnMissingBean(DdcSkillClient.class)
-    public DdcRpcClientHandle<DdcSkillClient> ddcAiSkillRpcClientHandle(
-            DdcRpcClientFactory factory) {
-        return factory.skillClient();
-    }
-
-    @Bean("ddcAiSkillRpcClient")
-    @ConditionalOnBean(name = "ddcAiSkillRpcClientHandle")
-    @ConditionalOnMissingBean(DdcSkillClient.class)
-    public DdcSkillClient ddcAiSkillRpcClient(
-            @Qualifier("ddcAiSkillRpcClientHandle") DdcRpcClientHandle<DdcSkillClient> handle) {
-        return handle.client();
-    }
-
-    @Bean(name = "ddcAiFeedbackRpcClientHandle", destroyMethod = "close")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.ai.feedback",
-            name = "enabled",
-            havingValue = "true")
-    @ConditionalOnMissingBean(DdcAiFeedbackClient.class)
-    public DdcRpcClientHandle<DdcAiFeedbackClient> ddcAiFeedbackRpcClientHandle(
-            DdcRpcClientFactory factory) {
-        return factory.feedbackClient();
-    }
-
-    @Bean("ddcAiFeedbackRpcClient")
-    @ConditionalOnBean(name = "ddcAiFeedbackRpcClientHandle")
-    @ConditionalOnMissingBean(DdcAiFeedbackClient.class)
-    public DdcAiFeedbackClient ddcAiFeedbackRpcClient(
-            @Qualifier("ddcAiFeedbackRpcClientHandle") DdcRpcClientHandle<DdcAiFeedbackClient> handle) {
-        return handle.client();
-    }
-
-    @Bean(name = "ddcAiSyncRpcClientHandle", destroyMethod = "close")
-    @ConditionalOnExpression(
-            "${egon.cola.component.tianshu.ai.skill.workspace.enabled:false} || "
-                    + "${egon.cola.component.tianshu.ai.skill.authoring.enabled:false}")
-    @ConditionalOnMissingBean(DdcAiSyncClient.class)
-    public DdcRpcClientHandle<DdcAiSyncClient> ddcAiSyncRpcClientHandle(
-            DdcRpcClientFactory factory) {
-        return factory.syncClient();
-    }
-
-    @Bean("ddcAiSyncRpcClient")
-    @ConditionalOnBean(name = "ddcAiSyncRpcClientHandle")
-    @ConditionalOnMissingBean(DdcAiSyncClient.class)
-    public DdcAiSyncClient ddcAiSyncRpcClient(
-            @Qualifier("ddcAiSyncRpcClientHandle") DdcRpcClientHandle<DdcAiSyncClient> handle) {
-        return handle.client();
-    }
-
-    @Bean(destroyMethod = "close")
-    @ConditionalOnBean(name = "ddcRedissonClient")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.registry",
-            name = "enabled",
-            havingValue = "true"
-    )
-    @ConditionalOnMissingBean(
-            value = DdcServiceRegistryClient.class,
-            name = "ddcRegistryRpcClientHandle"
-    )
-    public DdcRpcClientHandle<DdcServiceRegistryClient>
-            ddcRegistryRpcClientHandle(DdcRpcClientFactory factory) {
-        return factory.registryClient();
-    }
-
-    @Bean
-    @ConditionalOnBean(name = "ddcRegistryRpcClientHandle")
-    @ConditionalOnMissingBean(DdcRegistrySnapshotLoader.class)
-    public RpcDdcRegistrySnapshotLoader rpcDdcRegistrySnapshotLoader(
-            @Qualifier("ddcRegistryRpcClientHandle")
-            DdcRpcClientHandle<DdcServiceRegistryClient> handle) {
-        return new RpcDdcRegistrySnapshotLoader(
-                (RpcDdcServiceRegistryClient) handle.client()
-        );
-    }
-
-    @Bean(name = "ddcRpcRegistrySubscriptions", destroyMethod = "close")
-    @ConditionalOnBean({RpcDdcRegistrySnapshotLoader.class, RedissonClient.class})
-    public DdcRegistrySubscriptionCoordinator ddcRpcRegistrySubscriptions(
-            @Qualifier("rpcDdcRegistrySnapshotLoader") RpcDdcRegistrySnapshotLoader loader,
-            @Qualifier("ddcRedissonClient") RedissonClient redissonClient,
-            @Qualifier("egon.cola.component.tianshu-top.egon.cola.component.tianshu.autoconfigure.properties.DdcProperties")
-            DdcProperties properties,
-            @Qualifier("egon.cola.component.tianshu-top.egon.cola.component.tianshu.autoconfigure.properties.DdcTenantProperties")
-            DdcTenantProperties tenantProperties,
-            @Qualifier("jacksonObjectMapper") ObjectMapper objectMapper,
-            @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils) {
-        return new DdcRegistrySubscriptionCoordinator(
-                loader,
-                redissonClient,
-                tenantProperties.requireTenantId(),
-                objectMapper,
-                validationUtils,
-                properties.getRegistry().getReconcileIntervalSeconds()
-        );
-    }
-
-    @Bean
-    @ConditionalOnBean(DdcRegistrySubscriptionCoordinator.class)
-    @ConditionalOnMissingBean(DdcServiceRegistryClient.class)
-    public DdcServiceRegistryClient ddcRpcServiceRegistryClient(
-            @Qualifier("ddcRegistryRpcClientHandle")
-            DdcRpcClientHandle<DdcServiceRegistryClient> handle,
-            DdcRegistrySubscriptionCoordinator subscriptions) {
-        RpcDdcServiceRegistryClient client =
-                (RpcDdcServiceRegistryClient) handle.client();
-        client.subscriptions(new RpcDdcServiceRegistryClient.RegistrySubscriptions() {
-            @Override
-            public top.egon.cola.component.tianshu.api.registry.DdcRegistrySubscription subscribe(
-                    top.egon.cola.component.tianshu.model.registry.DdcServiceKey key,
-                    java.util.function.Consumer<top.egon.cola.component.tianshu.model.registry.DdcServiceSnapshot> listener) {
-                return subscriptions.subscribe(key, listener);
-            }
-
-            @Override
-            public top.egon.cola.component.tianshu.api.registry.DdcRegistrySubscription subscribeServices(
-                    top.egon.cola.component.tianshu.model.registry.DdcServiceQuery query,
-                    java.util.function.Consumer<top.egon.cola.component.tianshu.model.registry.DdcServiceCatalogSnapshot> listener) {
-                return subscriptions.subscribeServices(query, listener);
-            }
-        });
-        return client;
-    }
-
-    /**
-     * 创建携带 Tianquan-Shoubing PLATFORM SERVICE Token 的 RPC Provider 注册端口。
-     * / Creates the RPC Provider registry port that carries an Tianquan-Shoubing PLATFORM SERVICE token.
-     *
-     * @param client Tianshu 服务注册客户端 / Tianshu service-registry client
-     * @param properties Tianshu 物理作用域配置 / Tianshu physical-scope configuration
-     * @param serviceClient Tianquan-Shoubing OAuth2 Client facade / Tianquan-Shoubing OAuth2 Client facade
-     * @param idpProperties Tianquan-Shoubing client settings / Tianquan-Shoubing client settings
-     * @return RPC Provider 注册端口 / RPC Provider registry port
-     */
-    @Bean
-    @ConditionalOnBean({DdcServiceRegistryClient.class, IdpServiceOAuth2Client.class})
-    @ConditionalOnMissingBean(RpcProviderRegistry.class)
-    public RpcProviderRegistry ddcRpcProviderRegistry(
-            DdcServiceRegistryClient client,
-            DdcProperties properties,
-            IdpServiceOAuth2Client serviceClient,
-            @Qualifier("egon.cola.platform.tianquan.shoubing-top.egon.cola.platform.tianquan.shoubing.starter.autoconfigure.IdpStarterProperties")
-            IdpStarterProperties idpProperties) {
-        return new DdcRpcProviderRegistry(
-                client,
-                properties.getBizCode(),
-                properties.getAppCode(),
-                properties.getRegistrationResourceUri(),
-                serviceClient,
-                idpProperties);
-    }
-
-    @Bean
-    @ConditionalOnBean(DdcServiceRegistryClient.class)
-    @ConditionalOnMissingBean(RpcGatewayDirectory.class)
-    public RpcGatewayDirectory ddcRpcGatewayDirectory(
-            DdcServiceRegistryClient client,
-            DdcProperties properties) {
-        return new DdcRpcGatewayDirectory(
-                client, properties.getBizCode(), properties.getAppCode());
-    }
-
-    @Bean
-    @ConditionalOnBean(DdcServiceRegistryClient.class)
-    @ConditionalOnMissingBean(RpcProviderDirectory.class)
-    public RpcProviderDirectory ddcRpcProviderDirectory(
-            DdcServiceRegistryClient client) {
-        return new DdcRpcProviderDirectory(client);
-    }
-
     @Bean("ddcSiProtoMapperImpl")
-    @ConditionalOnMissingBean(DdcSiProtoMapper.class)
-    public DdcSiProtoMapper ddcSiProtoMapper() {
-        return Mappers.getMapper(DdcSiProtoMapper.class);
-    }
-
-    @Bean(name = "ddcSiResourceChannel", destroyMethod = "shutdownNow")
-    @ConditionalOnProperty(
-            prefix = "egon.cola.component.tianshu.si.rpc",
-            name = "enabled",
-            havingValue = "true"
-    )
-    @ConditionalOnMissingBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
-    public io.grpc.ManagedChannel ddcSiResourceChannel(
-            @Qualifier("egon.cola.component.tianshu.rpc-top.egon.cola.component.rpc.tianshu.autoconfigure.DdcRpcProperties")
-            DdcRpcProperties rpcProperties) {
-        return io.grpc.ManagedChannelBuilder.forTarget(rpcProperties.requireTarget())
-                .usePlaintext()
-                .build();
-    }
-
-    @Bean("ddcSiResourceBlockingStub")
-    @ConditionalOnBean(name = "ddcSiResourceChannel")
-    @ConditionalOnMissingBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
-    public DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub ddcSiResourceBlockingStub(
-            @Qualifier("ddcSiResourceChannel") io.grpc.ManagedChannel channel) {
-        return DdcSiResourceGrpcServiceGrpc.newBlockingStub(channel);
-    }
+    @ConditionalOnMissingBean(name = "ddcSiProtoMapperImpl")
+    public DdcSiProtoMapper ddcSiProtoMapper() { return Mappers.getMapper(DdcSiProtoMapper.class); }
 
     @Bean("ddcSiCatalogRpcClient")
-    @ConditionalOnBean(DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub.class)
-    @ConditionalOnMissingBean(DdcSiCatalogClient.class)
-    public DdcSiCatalogClient ddcSiCatalogRpcClient(
-            @Qualifier("ddcSiResourceBlockingStub")
-            DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceBlockingStub stub,
-            @Qualifier("ddcSiProtoMapperImpl") DdcSiProtoMapper protoMapper,
-            @Qualifier("egon.cola.component.tianshu.rpc-top.egon.cola.component.rpc.tianshu.autoconfigure.DdcRpcProperties")
-            DdcRpcProperties rpcProperties) {
-        return new DdcSiCatalogRpcClient(stub, protoMapper, rpcProperties.getDefaultTimeout());
+    @DependsOn("ddcSiNativeBootstrapGuard")
+    @ConditionalOnProperty(prefix = DdcRpcProperties.PREFIX, name = "enabled", havingValue = "true")
+    public DdcSiCatalogRpcClient ddcSiCatalogRpcClient(
+            @Qualifier("rpcGenericInvoker") RpcGenericInvoker invoker,
+            @Qualifier("ddcSiProtoMapperImpl") DdcSiProtoMapper mapper,
+            @Qualifier(DdcRpcProperties.BEAN_NAME) DdcRpcProperties properties,
+            @Qualifier("rpcReferenceDefinitionResolver") RpcReferenceDefinitionResolver definitions,
+            @Qualifier("egon.cola.component.rpc-top.egon.cola.component.rpc.config.EgonRpcProperties") EgonRpcProperties nativeProperties,
+            @Qualifier("rpcProcessIdentity") RpcProcessIdentity process,
+            @Qualifier("idpStarterProperties") IdpStarterProperties identity,
+            @Qualifier("idpRpcClientCredentialInterceptorFactory") IdpRpcClientCredentialInterceptorFactory credentials) {
+        credentials.validateConfiguration();
+        var configured = nativeProperties.getConsumer().getBindings().get(properties.getBindingId());
+        if (configured == null || configured.getMethods() == null || configured.getMethods().isEmpty()) { throw invalid(); }
+        Set<String> approvedMethods = Set.copyOf(configured.getMethods());
+        var target = definitions.resolve(properties.getBindingId(), new RpcServiceIdentity(DdcSiCatalogRpcClient.SERVICE,
+                DdcSiCatalogRpcClient.GROUP, DdcSiCatalogRpcClient.VERSION), approvedMethods).target();
+        if (!target.methods().equals(approvedMethods) || target.version() != properties.getBindingVersion()
+                || !DdcSiCatalogRpcClient.METHODS.containsAll(target.methods())
+                || !identity.getRpc().isEnabled() || !identity.getRpc().getConsumer().isEnabled()) { throw invalid(); }
+        for (String method : target.methods()) {
+            var matches = identity.getRpc().getConsumer().getBindings().values().stream().filter(binding ->
+                    DdcSiCatalogRpcClient.SERVICE.equals(binding.getServiceName()) && DdcSiCatalogRpcClient.GROUP.equals(binding.getGroup())
+                            && DdcSiCatalogRpcClient.VERSION.equals(binding.getVersion()) && method.equals(binding.getFullMethodName())
+                            && binding.getProcessIdentity() != null
+                            && process.applicationName().equals(binding.getProcessIdentity().get("applicationName"))
+                            && process.env().equals(binding.getProcessIdentity().get("env"))).toList();
+            if (matches.size() != 1) { throw invalid(); }
+            var binding = matches.getFirst();
+            if (binding.getMode() != IdpStarterProperties.RpcConsumerModeEnum.SERVICE
+                    || binding.getScopeContext() != ServiceTokenContext.TENANT
+                    || !target.bindingId().equals(binding.getTransportBindingId())
+                    || !Long.valueOf(target.version()).equals(binding.getTransportBindingVersion())
+                    || binding.getResourceUri() == null || binding.getScopes() == null || binding.getScopes().isEmpty()
+                    || binding.getTenantRegistrationIds() == null || binding.getTenantRegistrationIds().isEmpty()) { throw invalid(); }
+        }
+        return new DdcSiCatalogRpcClient(invoker, mapper, target, properties.getDefaultTimeout());
     }
 
-    private RpcProcessIdentity directIdentity(
-            DdcProperties properties,
-            Environment environment) {
-        String application = environment.getProperty(
-                "spring.application.name", properties.getAppCode());
-        String host = environment.getProperty(
-                "egon.cola.component.rpc.identity.host", localHost());
-        long pid = ProcessHandle.current().pid();
-        String instanceId = environment.getProperty(
-                "egon.cola.component.rpc.identity.instance-id",
-                application + "-" + host + "-" + pid
-        );
-        return new RpcProcessIdentity(
-                application, properties.getEnv(), host, pid, instanceId);
-    }
-
-    private String localHost() {
-        try { return InetAddress.getLocalHost().getHostAddress(); }
-        catch (Exception ignored) { return "127.0.0.1"; }
-    }
+    private static IllegalStateException retired() { return new IllegalStateException("DDC_LEGACY_RPC_CONFIGURATION_RETIRED"); }
+    private static IllegalStateException invalid() { return new IllegalStateException("SI_NATIVE_SERVICE_CREDENTIAL_BINDING_REQUIRED"); }
 }

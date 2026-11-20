@@ -120,10 +120,27 @@ message ResolveSiResourceRequest {
   optional int64 exact_version_no = 12;
   // This discriminator requests strict proof; it never establishes caller authorization.
   bool execution_required = 13;
+  // Requires the same authenticated execution authority; AGENT roots only.
+  bool include_execution_material = 14;
 }
 
+message SiExecutionMaterialProto {
+  SiVersionIdentityProto identity = 1;
+  string biz_code = 2;
+  string namespace_code = 3;
+  optional string owner_app_code = 4;
+  string resource_key = 5;
+  string spec_json = 6;
+}
+message SiExecutionMaterialListProto { repeated SiExecutionMaterialProto items = 1; }
+message SiExecutionBundleProto {
+  SiExecutionMaterialProto root = 1;
+  SiDependencyManifestProto manifest = 2;
+  SiExecutionMaterialListProto nodes = 3;
+}
 message ResolveSiResourceResponse {
   SiResourceProto resource = 1;
+  SiExecutionBundleProto execution_bundle = 2;
 }
 
 message SemanticSearchSiRequest {

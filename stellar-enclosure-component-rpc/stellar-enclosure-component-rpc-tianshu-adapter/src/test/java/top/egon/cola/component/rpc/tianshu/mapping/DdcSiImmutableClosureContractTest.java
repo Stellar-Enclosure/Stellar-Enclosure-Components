@@ -3,7 +3,8 @@ package top.egon.cola.component.rpc.tianshu.mapping;
 import io.grpc.ConnectivityState;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
-import io.grpc.ManagedChannelBuilder;
+import top.egon.cola.component.rpc.tianshu.si.DdcSiCatalogRpcClientTest.NativeRuntime;
+import java.util.Set;
 import io.grpc.Server;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -178,9 +179,12 @@ class DdcSiImmutableClosureContractTest {
     @Test void strictCallPreservesAnExistingShortDeadlineAndCancelsTheRealServerCallOnce() throws Exception {
         var cancelled=new CountDownLatch(1);
         try(var fixture=new Fixture((request,observer)->((ServerCallStreamObserver<?>)observer).setOnCancelHandler(cancelled::countDown))) {
-            var client=new DdcSiCatalogRpcClient(DdcSiResourceGrpcServiceGrpc.newBlockingStub(fixture.channel)
-                    .withDeadlineAfter(250,TimeUnit.MILLISECONDS),MAPPER,Duration.ofSeconds(2));
-            var failure=catchThrowable(() -> client.resolveExecutionResource(101,"reader","core","test","owner-app","caller-app",DdcSiKindEnum.AGENT,"planner",1L));
+            var client=fixture.client();
+            Throwable failure;
+            try(var timer=Executors.newSingleThreadScheduledExecutor();
+                    var context=Context.current().withDeadlineAfter(250,TimeUnit.MILLISECONDS,timer)) {
+                failure=catchThrowable(() -> context.call(() -> client.resolveExecutionResource(101,"reader","core","test","owner-app","caller-app",DdcSiKindEnum.AGENT,"planner",1L)));
+            }
             assertThat(failure).isInstanceOfSatisfying(StatusRuntimeException.class,
                     actual->assertThat(actual.getStatus().getCode()).isEqualTo(Status.Code.DEADLINE_EXCEEDED));
             assertThat(cancelled.await(3,TimeUnit.SECONDS)).isTrue();
@@ -252,7 +256,7 @@ class DdcSiImmutableClosureContractTest {
         final AtomicLong observedDeadlineMillis=new AtomicLong(Long.MIN_VALUE);
         final CountDownLatch arrived=new CountDownLatch(1);
         final Server server;
-        final ManagedChannel channel;
+        final NativeRuntime runtime;
         Fixture(BiConsumer<ResolveSiResourceRequest,StreamObserver<ResolveSiResourceResponse>> response) throws Exception {
             server=NettyServerBuilder.forPort(0).addService(new DdcSiResourceGrpcServiceGrpc.DdcSiResourceGrpcServiceImplBase(){
                 @Override public void resolveSiResource(ResolveSiResourceRequest input,StreamObserver<ResolveSiResourceResponse> observer){
@@ -261,14 +265,13 @@ class DdcSiImmutableClosureContractTest {
                     arrived.countDown();response.accept(input,observer);
                 }
             }).build().start();
-            channel=ManagedChannelBuilder.forAddress("127.0.0.1",server.getPort()).usePlaintext().disableRetry().disableServiceConfigLookUp().build();
-            awaitReady(channel);
+            runtime=new NativeRuntime(server,Set.of(DdcSiCatalogRpcClient.RESOLVE));
         }
         static Fixture responding(SiResourceProto resource) throws Exception {
             return new Fixture((request,observer)->{observer.onNext(ResolveSiResourceResponse.newBuilder().setResource(resource).build());observer.onCompleted();});
         }
-        DdcSiCatalogRpcClient client(){return new DdcSiCatalogRpcClient(DdcSiResourceGrpcServiceGrpc.newBlockingStub(channel),MAPPER,Duration.ofSeconds(2));}
-        @Override public void close() throws Exception {channel.shutdownNow().awaitTermination(5,TimeUnit.SECONDS);server.shutdownNow().awaitTermination(5,TimeUnit.SECONDS);}
+        DdcSiCatalogRpcClient client(){return runtime.client(Duration.ofSeconds(2));}
+        @Override public void close() throws Exception {runtime.close();server.shutdownNow().awaitTermination(5,TimeUnit.SECONDS);}
     }
     static void awaitReady(ManagedChannel channel) throws Exception {
         long end=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
