@@ -5,9 +5,14 @@ import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 import org.springframework.util.ClassUtils;
 import top.egon.cola.component.common.id.generator.IdGenerator;
@@ -53,28 +58,42 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
             BeanFactory beanFactory,
             Environment environment) {
         Long configuredMachineId = properties.getMachineId();
+        IdGeneratorProperties.Redis redis = properties.getRedis();
+        boolean requireLease = redis.isRequireLease();
+        if (requireLease && (configuredMachineId != null || !redis.isEnabled())) {
+            throw new IllegalStateException("Managed ID issuance requires a Redis lease");
+        }
+        if (requireLease && (!RedissonMachineIdAllocator.hasText(redis.getEnv())
+                || !RedissonMachineIdAllocator.hasText(redis.getApp()))) {
+            throw new IllegalStateException("Managed ID issuance requires an explicit Redis scope");
+        }
         MachineIdProvider selectedProvider = null;
         AutoCloseable createdProvider = null;
         if (configuredMachineId == null) {
             MachineIdProvider customProvider = machineIdProviders.getIfAvailable();
             if (customProvider != null) {
+                if (requireLease) {
+                    throw new IllegalStateException("Managed ID issuance requires the starter-owned Redis lease provider");
+                }
                 configuredMachineId = customProvider.getMachineId();
                 selectedProvider = customProvider;
             } else if (properties.getRedis().isEnabled()
                     && ClassUtils.isPresent(REDISSON_CLIENT_CLASS, getClass().getClassLoader())) {
-                RedisMachineIdProvider redisProvider = RedissonMachineIdAllocator.createIfAvailable(
-                        properties, beanFactory, environment);
-                if (redisProvider != null) {
+                RedisAllocation allocation = RedissonMachineIdAllocator.createIfAvailable(properties, beanFactory, environment);
+                if (allocation != null) {
                     try {
-                        configuredMachineId = redisProvider.getMachineId();
-                        selectedProvider = redisProvider;
-                        createdProvider = redisProvider;
-                    } catch (RuntimeException exception) {
-                        redisProvider.close();
-                        throw exception;
+                        configuredMachineId = allocation.provider().getMachineId();
+                        selectedProvider = allocation.provider();
+                        createdProvider = allocation;
+                    } catch (RuntimeException | Error failure) {
+                        allocation.close();
+                        throw failure;
                     }
                 }
             }
+        }
+        if (requireLease && createdProvider == null) {
+            throw new IllegalStateException("Managed ID issuance requires an available Redis client");
         }
         this.managedProvider = createdProvider;
         this.issuanceProvider = selectedProvider;
@@ -98,6 +117,31 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
         }
     }
 
+    /** Checks the starter-owned Redis lease without generating an ID or contacting Redis. */
+    public void assertRedisLeaseAvailable() {
+        if (!(issuanceProvider instanceof RedisMachineIdProvider provider)) {
+            throw new IllegalStateException("Managed Redis ID lease is unavailable");
+        }
+        provider.assertIssuanceAvailable();
+    }
+
+    @Configuration(value = "commonIdLeaseHealthConfiguration", proxyBeanMethods = false)
+    @ConditionalOnClass(HealthIndicator.class)
+    @ConditionalOnProperty(prefix = IdGeneratorProperties.PREFIX + ".redis", name = "require-lease", havingValue = "true")
+    static class LeaseHealthConfiguration {
+        @Bean("commonIdLease")
+        HealthIndicator commonIdLease(IdGeneratorAutoConfiguration generator) {
+            return () -> {
+                try {
+                    generator.assertRedisLeaseAvailable();
+                    return Health.up().build();
+                } catch (RuntimeException unavailable) {
+                    return Health.down().build();
+                }
+            };
+        }
+    }
+
     private void closeManagedProvider() {
         if (managedProvider != null) {
             try {
@@ -108,28 +152,48 @@ public class IdGeneratorAutoConfiguration implements DisposableBean {
         }
     }
 
+    private record RedisAllocation(RedisMachineIdProvider provider, RedissonClient ownedClient) implements AutoCloseable {
+        @Override
+        public void close() {
+            try {
+                provider.close();
+            } finally {
+                if (ownedClient != null) {
+                    ownedClient.shutdown();
+                }
+            }
+        }
+    }
+
     private static final class RedissonMachineIdAllocator {
 
         private RedissonMachineIdAllocator() {
         }
 
-        static RedisMachineIdProvider createIfAvailable(
+        static RedisAllocation createIfAvailable(
                 IdGeneratorProperties properties,
                 BeanFactory beanFactory,
                 Environment environment) {
-            RedissonClient redissonClient = resolveRedissonClient(beanFactory);
-            if (redissonClient == null) {
+            IdGeneratorProperties.Redis redis = properties.getRedis();
+            boolean owned = redis.isRequireLease();
+            RedissonClient client = owned
+                    ? RedisLeaseAuthority.open(environment.getProperty(RedisLeaseAuthority.CONFIG_FILE),
+                            environment.getProperty(RedisLeaseAuthority.REGISTERED_NODES))
+                    : resolveRedissonClient(beanFactory);
+            if (client == null) {
                 return null;
             }
-            IdGeneratorProperties.Redis redis = properties.getRedis();
-            String env = resolveEnv(redis.getEnv(), environment);
-            String app = resolveApp(redis.getApp(), environment);
-            return new RedisMachineIdProvider(
-                    redissonClient,
-                    env,
-                    app,
-                    redis.getLeaseDuration(),
-                    redis.getRenewInterval());
+            try {
+                String env = resolveEnv(redis.getEnv(), environment);
+                String app = resolveApp(redis.getApp(), environment);
+                var provider = new RedisMachineIdProvider(client, env, app, redis.getLeaseDuration(), redis.getRenewInterval());
+                return new RedisAllocation(provider, owned ? client : null);
+            } catch (RuntimeException | Error failure) {
+                if (owned) {
+                    client.shutdown();
+                }
+                throw failure;
+            }
         }
 
         private static RedissonClient resolveRedissonClient(BeanFactory beanFactory) {

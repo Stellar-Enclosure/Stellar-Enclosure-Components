@@ -1,16 +1,25 @@
 package top.egon.cola.component.common.id.autoconfigure;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.redisson.Redisson;
 import org.redisson.api.RScript;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.Codec;
+import org.redisson.config.Config;
+import org.redisson.config.ReadMode;
+import org.redisson.config.SslVerificationMode;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.annotation.ImportCandidates;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.health.contributor.HealthIndicator;
+import org.springframework.boot.health.contributor.Status;
+import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
 import top.egon.cola.component.common.id.generator.IdGenerator;
 import top.egon.cola.component.common.id.generator.LongIdGenerator;
 import top.egon.cola.component.common.id.provider.MachineIdProvider;
@@ -19,8 +28,13 @@ import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,13 +50,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class IdGeneratorAutoConfigurationTest {
 
     private static final String BOUND_MACHINE_ID = "0";
+    private static final String AUTHORITY_NODES = "rediss://redis-one.staging.internal:6379,rediss://redis-two.staging.internal:6379";
+
+    @TempDir
+    private Path authorityDirectory;
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(IdGeneratorAutoConfiguration.class));
@@ -334,6 +355,140 @@ class IdGeneratorAutoConfigurationTest {
     }
 
     @Test
+    void managedIssuanceRejectsStaticIdAndImplicitPoolScope() {
+        String requireLease = "egon.cola.component.id.redis.require-lease=true";
+        bindingContextRunner.withPropertyValues(requireLease, "egon.cola.component.id.redis.env=staging",
+                        "egon.cola.component.id.redis.app=orders")
+                .run(context -> assertThat(context.getStartupFailure()).hasRootCauseMessage("Managed ID issuance requires a Redis lease"));
+        FakeRedisLeaseEval redis = new FakeRedisLeaseEval();
+        isolatedEngine().runner().withBean("redissonClient", RedissonClient.class, redis::client)
+                .withPropertyValues(requireLease, "spring.application.name=orders")
+                .run(context -> assertThat(context.getStartupFailure()).hasRootCauseMessage("Managed ID issuance requires an explicit Redis scope"));
+    }
+
+    @Test
+    void managedIssuanceRequiresTheProjectedAuthorityEvenIfAnApplicationRedisBeanExists() {
+        RedissonClient applicationRedis = new FakeRedisLeaseEval().client();
+        isolatedEngine().runner().withBean("redissonClient", RedissonClient.class, () -> applicationRedis)
+                .withPropertyValues("egon.cola.component.id.redis.require-lease=true",
+                        "egon.cola.component.id.redis.env=staging", "egon.cola.component.id.redis.app=orders")
+                .run(context -> {
+                    assertThat(context.getStartupFailure()).hasRootCauseMessage("Managed Redis ID authority configuration is invalid");
+                    verifyNoInteractions(applicationRedis);
+                });
+    }
+
+    @Test
+    void managedRedisAvailabilityDrivesTheSameReadinessContributorAfterLeaseCloses() throws Exception {
+        FakeRedisLeaseEval redis = new FakeRedisLeaseEval();
+        RedissonClient ownedClient = redis.client();
+        RedissonClient applicationRedis = mock(RedissonClient.class);
+        AtomicReference<HealthIndicator> health = new AtomicReference<>();
+        Path authority = projectedAuthority(AUTHORITY_NODES);
+        doAnswer(invocation -> {
+            assertThat(redis.releases.get()).isOne();
+            assertThat(health.get().health().getStatus()).isEqualTo(Status.DOWN);
+            return null;
+        }).when(ownedClient).shutdown();
+
+        try (var redisson = mockStatic(Redisson.class)) {
+            redisson.when(() -> Redisson.create(any(Config.class))).thenAnswer(invocation -> {
+                Config config = invocation.getArgument(0);
+                var server = config.useClusterServers();
+                assertThat(server.getNodeAddresses()).containsExactly(AUTHORITY_NODES.split(","));
+                assertThat(server.getSslTrustManagerFactory()).isNotNull();
+                assertThat(server.getSslVerificationMode()).isEqualTo(SslVerificationMode.STRICT);
+                assertThat(server.getReadMode()).isEqualTo(ReadMode.MASTER);
+                assertThat(server.getRetryAttempts()).isZero();
+                assertThat(server.getUsername()).isEqualTo("id-authority");
+                assertThat(server.getPassword()).isEqualTo("fixture-password");
+                return ownedClient;
+            });
+            isolatedEngine().runner().withBean("redissonClient", RedissonClient.class, () -> applicationRedis)
+                    .withInitializer(context -> context.getEnvironment().getPropertySources().addFirst(
+                            new SystemEnvironmentPropertySource("managedWorkload-systemEnvironment", Map.of(
+                                    "EGON_COLA_COMPONENT_ID_REDIS_REQUIRELEASE", "true",
+                                    "EGON_COLA_COMPONENT_ID_REDIS_ENV", "staging",
+                                    "EGON_COLA_COMPONENT_ID_REDIS_APP", "orders",
+                                    "STELLAR_SHARED_ID_AUTHORITY_CONFIG_FILE", authority.toString(),
+                                    "STELLAR_SHARED_ID_REDIS_ENDPOINTS", AUTHORITY_NODES))))
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        assertThat(context).hasBean("commonIdLease");
+                        health.set(context.getBean("commonIdLease", HealthIndicator.class));
+                        assertThat(health.get().health().getStatus()).isEqualTo(Status.UP);
+                        assertThat(context.getBean("redissonClient")).isSameAs(applicationRedis);
+                    });
+            redisson.verify(() -> Redisson.create(any(Config.class)));
+        }
+        assertThat(health.get().health().getStatus()).isEqualTo(Status.DOWN);
+        verify(ownedClient).shutdown();
+        verifyNoInteractions(applicationRedis);
+    }
+
+    @Test
+    void managedAuthorityRejectsPlaintextUnregisteredEndpointsAndMissingCaBeforeConnecting() throws Exception {
+        Path authority = projectedAuthority(AUTHORITY_NODES.replace("rediss://", "redis://"));
+        try (var redisson = mockStatic(Redisson.class)) {
+            assertAuthorityRefused(authority, AUTHORITY_NODES);
+            projectedAuthority(AUTHORITY_NODES.replace("redis-two", "unregistered"));
+            assertAuthorityRefused(authority, AUTHORITY_NODES);
+            projectedAuthority(AUTHORITY_NODES);
+            Files.delete(authorityDirectory.resolve("ca.crt"));
+            assertAuthorityRefused(authority, AUTHORITY_NODES);
+            redisson.verifyNoInteractions();
+        }
+    }
+
+    private void assertAuthorityRefused(Path authority, String nodes) {
+        isolatedEngine().runner().withBean("redissonClient", RedissonClient.class, new FakeRedisLeaseEval()::client)
+                .withPropertyValues("egon.cola.component.id.redis.require-lease=true",
+                        "egon.cola.component.id.redis.env=staging", "egon.cola.component.id.redis.app=orders",
+                        "STELLAR_SHARED_ID_AUTHORITY_CONFIG_FILE=" + authority,
+                        "STELLAR_SHARED_ID_REDIS_ENDPOINTS=" + nodes)
+                .run(context -> {
+                    assertThat(context.getStartupFailure()).hasRootCauseMessage("Managed Redis ID authority configuration is invalid");
+                    assertThat(context.getStartupFailure()).hasMessageNotContaining("fixture-password");
+                });
+    }
+
+    private Path projectedAuthority(String nodes) throws Exception {
+        Path authority = authorityDirectory.resolve("client.yml");
+        String addresses = String.join("\n", Arrays.stream(nodes.split(",")).map(node -> "    - " + node).toList());
+        Files.writeString(authority, "username: id-authority\npassword: fixture-password\nclusterServersConfig:\n"
+                + "  connectTimeout: 1500\n  timeout: 1500\n  nodeAddresses:\n" + addresses + "\n");
+        var trust = KeyStore.getInstance("JKS");
+        try (var input = Files.newInputStream(Path.of(System.getProperty("java.home"), "lib/security/cacerts"))) {
+            trust.load(input, null);
+        }
+        var aliases = trust.aliases();
+        while (aliases.hasMoreElements()) {
+            if (trust.getCertificate(aliases.nextElement()) instanceof X509Certificate certificate
+                    && certificate.getBasicConstraints() >= 0) {
+                try {
+                    certificate.checkValidity();
+                } catch (java.security.cert.CertificateException expired) {
+                    continue;
+                }
+                Files.writeString(authorityDirectory.resolve("ca.crt"), "-----BEGIN CERTIFICATE-----\n"
+                        + Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(certificate.getEncoded())
+                        + "\n-----END CERTIFICATE-----\n");
+                return authority;
+            }
+        }
+        throw new IllegalStateException("the JDK trust store lacks a current public CA fixture");
+    }
+
+    @Test
+    void compatibilityStartsWithoutTheOptionalHealthModule() {
+        bindingContextRunner.withClassLoader(new FilteredClassLoader("org.springframework.boot.health"))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean("commonIdLease");
+                });
+    }
+
+    @Test
     void releaseTransportFailureStillRevokesTheClosedEnginesIssuance() {
         IsolatedEngine engine = isolatedEngine();
         AtomicReference<Object> configuration = new AtomicReference<>();
@@ -441,7 +596,7 @@ class IdGeneratorAutoConfigurationTest {
             @Override
             protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
                 if (!name.equals(configurationName) && !name.startsWith(configurationName + "$")
-                        && !name.startsWith(snowflakePackage)) {
+                        && !name.equals(RedisLeaseAuthority.class.getName()) && !name.startsWith(snowflakePackage)) {
                     return super.loadClass(name, resolve);
                 }
                 synchronized (getClassLoadingLock(name)) {

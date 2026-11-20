@@ -13,13 +13,17 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.env.Environment;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
+import top.egon.cola.component.common.id.autoconfigure.IdGeneratorAutoConfiguration;
+import top.egon.cola.component.common.id.autoconfigure.IdGeneratorProperties;
 import top.egon.cola.component.outbox.aop.OutboxMessageExpressionResolver;
 import top.egon.cola.component.outbox.aop.TransactionalMessageAop;
 import top.egon.cola.component.outbox.aop.TransactionalMessageMethodValidator;
@@ -236,9 +240,19 @@ public class TransactionalOutboxAutoConfiguration {
         );
     }
 
-    @Bean
+    @Bean("outboxWorkerIdentity")
     @ConditionalOnMissingBean
-    OutboxWorkerIdentity outboxWorkerIdentity(TransactionalOutboxProperties properties) {
+    OutboxWorkerIdentity outboxWorkerIdentity(
+            @Qualifier("outboxStateMachineOutboxProperties") TransactionalOutboxProperties properties,
+            Environment environment,
+            @Qualifier("top.egon.cola.component.common.id.autoconfigure.IdGeneratorAutoConfiguration")
+            ObjectProvider<IdGeneratorAutoConfiguration> idAuthority
+    ) {
+        boolean leaseRequired = Binder.get(environment)
+                .bind(IdGeneratorProperties.PREFIX + ".redis.require-lease", Boolean.class).orElse(false);
+        if (leaseRequired) {
+            return new OutboxWorkerIdentity(properties.getNodeId(), () -> idAuthority.getObject().assertRedisLeaseAvailable());
+        }
         return new OutboxWorkerIdentity(properties.getNodeId());
     }
 

@@ -1,0 +1,38 @@
+#!/bin/sh
+set -f
+
+state_file='/var/run/stellar/probe/state'
+proc_root=/proc
+
+[ "$#" -eq 1 ] || exit 1
+mode=$1
+case "$mode" in
+    startup|liveness|readiness) ;;
+    *) exit 1 ;;
+esac
+
+IFS=' ' read -r version pid start_tick sample live ready extra 2>/dev/null < "$state_file" || exit 1
+[ "$version" = v1 ] && [ -z "$extra" ] && [ "$live" = 1 ] || exit 1
+case "$ready" in
+    0|1) ;;
+    *) exit 1 ;;
+esac
+for number in "$pid" "$start_tick" "$sample"; do
+    case "$number" in
+        ''|*[!0-9]*) exit 1 ;;
+    esac
+    [ "${#number}" -le 18 ] || exit 1
+done
+
+IFS=' ' read -r uptime idle 2>/dev/null < "$proc_root/uptime" || exit 1
+now=${uptime%%.*}
+[ "$now" -ge "$sample" ] && [ "$now" -le "$((sample + 4))" ] || exit 1
+
+IFS= read -r stat 2>/dev/null < "$proc_root/$pid/stat" || exit 1
+# Fields after the last closing parenthesis begin at proc stat field 3.
+set -- ${stat##*) }
+[ "$#" -ge 20 ] && [ "${20}" = "$start_tick" ] || exit 1
+case "$1" in
+    X|x|Z) exit 1 ;;
+esac
+[ "$mode" != readiness ] || [ "$ready" = 1 ]

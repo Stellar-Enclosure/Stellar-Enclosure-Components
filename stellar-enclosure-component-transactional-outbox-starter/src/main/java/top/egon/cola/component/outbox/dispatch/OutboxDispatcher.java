@@ -155,6 +155,9 @@ public class OutboxDispatcher {
 
     void dispatchDue() {
         if (properties.getRetry().isRecoverExhausted()) {
+            if (!workerIdentity.canClaim()) {
+                return;
+            }
             try {
                 store.recoverExhausted(properties.getPolling().getBatchSize(), properties.getRetry().getExhaustedRetryDelay());
             } catch (RuntimeException failure) {
@@ -234,6 +237,9 @@ public class OutboxDispatcher {
     }
 
     private void dispatch(ClaimOperation claimOperation) {
+        if (!workerIdentity.canClaim()) {
+            return;
+        }
         int reservedPermits = reservePermits();
         if (reservedPermits == 0) {
             return;

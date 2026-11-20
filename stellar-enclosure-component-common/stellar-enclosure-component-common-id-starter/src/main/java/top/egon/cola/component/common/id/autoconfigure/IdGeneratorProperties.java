@@ -98,6 +98,7 @@ public class IdGeneratorProperties {
         public static final Duration DEFAULT_RENEW_INTERVAL = Duration.ofMinutes(1);
 
         private boolean enabled = true;
+        private boolean requireLease;
         private String env;
         private String app;
         private Duration leaseDuration = DEFAULT_LEASE_DURATION;
@@ -119,6 +120,16 @@ public class IdGeneratorProperties {
          */
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        /** Returns whether this runtime must obtain a Redis lease from an explicit ID scope. */
+        public boolean isRequireLease() {
+            return requireLease;
+        }
+
+        /** Selects the managed lease path for a registered workload. */
+        public void setRequireLease(boolean requireLease) {
+            this.requireLease = requireLease;
         }
 
         /**
