@@ -69,6 +69,26 @@ class EgonColaShardingAutoConfigurationTest {
     }
 
     @Test
+    void fingerprintRequestedBeforeSingletonInitializationBootstrapsTheDataSource() {
+        runner()
+                .withUserConfiguration(MockLogicalDataSourceConfiguration.class)
+                .withPropertyValues(strategyProperties(
+                        "tables.routing_metadata.type=SINGLE",
+                        "tables.routing_metadata.data-source=master_data"))
+                .withInitializer(context -> context.addBeanFactoryPostProcessor(factory -> {
+                    for (String name : factory.getBeanDefinitionNames()) {
+                        factory.getBeanDefinition(name).setLazyInit(true);
+                    }
+                }))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean("egonColaShardingRouteFingerprint", String.class))
+                            .matches("[0-9a-f]{64}");
+                    assertThat(context.getBean("dataSource", DataSource.class)).isNotNull();
+                });
+    }
+
+    @Test
     void creates_primary_datasource_with_valid_yaml() {
         runner()
                 .withUserConfiguration(MockLogicalDataSourceConfiguration.class)

@@ -75,7 +75,9 @@ class TransactionalOutboxAutoConfigurationTest {
                     assertThat(context).hasNotFailed().hasSingleBean(OutboxDispatcher.class)
                             .hasSingleBean(top.egon.cola.component.outbox.observability.OutboxMetrics.class);
                     assertThat(context.getBean(top.egon.cola.component.outbox.observability.OutboxMetrics.class))
-                            .isInstanceOf(top.egon.cola.component.outbox.observability.MicrometerOutboxMetrics.class);
+                            .isInstanceOf(top.egon.cola.component.outbox.observability.MicrometerOutboxMetrics.class)
+                            .isSameAs(context.getBean("outboxMetrics"))
+                            .isSameAs(context.getBean("micrometerOutboxMetrics"));
                 });
     }
 

@@ -23,7 +23,7 @@ import javax.sql.DataSource;
 )
 public class OutboxMetricsAutoConfiguration {
 
-    @Bean
+    @Bean({"micrometerOutboxMetrics", "outboxMetrics"})
     @ConditionalOnMissingBean(OutboxMetrics.class)
     MicrometerOutboxMetrics micrometerOutboxMetrics(MeterRegistry meterRegistry) {
         return new MicrometerOutboxMetrics(meterRegistry);

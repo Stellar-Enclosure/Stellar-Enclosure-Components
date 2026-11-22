@@ -115,6 +115,7 @@ public class EgonColaShardingAutoConfiguration {
 
     @Bean("egonColaShardingRouteFingerprint")
     public String egonColaShardingRouteFingerprint(
+            @Qualifier("dataSource") DataSource dataSource,
             @Qualifier("egonColaShardingDataSourceBootstrapper") EgonColaShardingDataSourceBootstrapper bootstrapper) {
         return bootstrapper.fingerprint();
     }
