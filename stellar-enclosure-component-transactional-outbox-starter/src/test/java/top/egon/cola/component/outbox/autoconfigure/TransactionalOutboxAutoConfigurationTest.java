@@ -2,15 +2,25 @@ package top.egon.cola.component.outbox.autoconfigure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.PriorityOrdered;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
 import org.springframework.core.task.SyncTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.annotation.Transactional;
 import top.egon.cola.component.common.id.autoconfigure.IdGeneratorAutoConfiguration;
 import top.egon.cola.component.outbox.aop.TransactionalMessageAop;
 import top.egon.cola.component.outbox.api.TransactionalOutbox;
 import top.egon.cola.component.outbox.delivery.DeliveryHandler;
+import top.egon.cola.component.outbox.delivery.DeliveryContext;
+import top.egon.cola.component.outbox.delivery.DeliveryHandlerRegistry;
+import top.egon.cola.component.outbox.delivery.DeliveryResult;
 import top.egon.cola.component.outbox.dispatch.OutboxDispatcher;
 import top.egon.cola.component.outbox.dispatch.OutboxPoller;
 import top.egon.cola.component.outbox.store.OutboxStore;
@@ -79,6 +89,54 @@ class TransactionalOutboxAutoConfigurationTest {
                             .isSameAs(context.getBean("outboxMetrics"))
                             .isSameAs(context.getBean("micrometerOutboxMetrics"));
                 });
+    }
+
+    @Test
+    void preservesTransactionAdviceOnDeliveryHandlersWhenAnInfrastructureConsumerCreatesTheAspectEarly() {
+        configuredContext().withUserConfiguration(EarlyAspectConsumerConfiguration.class).run(context -> {
+            assertThat(context).hasNotFailed();
+            var registered = context.getBean(DeliveryHandlerRegistry.class).required("early-registration");
+            assertThat(registered).isSameAs(context.getBean(DeliveryHandler.class));
+            assertThat(AopUtils.isAopProxy(registered)).isTrue();
+        });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableTransactionManagement
+    static class EarlyAspectConsumerConfiguration {
+        @Bean
+        static EarlyAspectConsumer earlyAspectConsumer(TransactionalMessageAop aspect) {
+            return new EarlyAspectConsumer();
+        }
+
+        @Bean
+        DeliveryHandler earlyRegistrationHandler() {
+            return new TransactionalDeliveryHandler();
+        }
+    }
+
+    static class EarlyAspectConsumer implements BeanPostProcessor, PriorityOrdered {
+        @Override
+        public int getOrder() {
+            return HIGHEST_PRECEDENCE;
+        }
+    }
+
+    static class TransactionalDeliveryHandler implements DeliveryHandler {
+        @Override
+        public String channel() {
+            return "early-registration";
+        }
+
+        @Override
+        public void validateDestination(String destination) {
+        }
+
+        @Override
+        @Transactional
+        public DeliveryResult deliver(DeliveryContext context) {
+            return DeliveryResult.success();
+        }
     }
 
     @Test

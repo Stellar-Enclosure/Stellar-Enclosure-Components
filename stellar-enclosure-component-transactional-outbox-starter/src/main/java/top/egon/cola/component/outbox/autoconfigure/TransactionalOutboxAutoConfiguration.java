@@ -16,6 +16,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.env.Environment;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.scheduling.TaskScheduler;
@@ -386,7 +387,7 @@ public class TransactionalOutboxAutoConfiguration {
             matchIfMissing = true
     )
     TransactionalMessageAop transactionalMessageAop(
-            TransactionalOutbox transactionalOutbox,
+            @Lazy TransactionalOutbox transactionalOutbox,
             OutboxInfrastructure infrastructure,
             OutboxMessageExpressionResolver expressionResolver,
             TransactionalMessageMethodValidator methodValidator,
