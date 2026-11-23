@@ -17,20 +17,29 @@ import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.util.TablesNamesFinder;
 import top.egon.cola.component.outbox.persistence.OutboxShardContext;
+import top.egon.cola.component.outbox.persistence.OutboxShardRouting;
 
 import java.sql.SQLException;
 import java.util.Locale;
+import java.util.Set;
 
 /** Rejects outbox statements that could fan out or change the shard key. */
 final class OutboxShardSqlGuard {
 
-    private static final String TABLE = "egon_cola_outbox_message";
+    private static final Set<String> TABLES = Set.of("egon_cola_outbox_message",
+            OutboxShardRouting.QUEUE_MEMBER_TABLE, OutboxShardRouting.QUEUE_LEASE_TABLE);
 
     private OutboxShardSqlGuard() {
     }
 
+    static boolean referencesCoordinationTable(String sql) {
+        String lower = sql.toLowerCase(Locale.ROOT);
+        return lower.contains(OutboxShardRouting.QUEUE_MEMBER_TABLE)
+                || lower.contains(OutboxShardRouting.QUEUE_LEASE_TABLE);
+    }
+
     static void validate(String sql) throws SQLException {
-        if (!sql.toLowerCase(Locale.ROOT).contains(TABLE)) {
+        if (TABLES.stream().noneMatch(sql.toLowerCase(Locale.ROOT)::contains)) {
             return;
         }
         try {
@@ -38,8 +47,8 @@ final class OutboxShardSqlGuard {
             if (statements.size() != 1) { throw invalid(); }
             var statement = statements.get(0);
             var tables = new TablesNamesFinder<Void>().getTables(statement);
-            boolean outbox = tables.stream().anyMatch(name -> name.replace("\"", "").toLowerCase(Locale.ROOT)
-                    .matches("(?:[a-z_][a-z0-9_]*\\.)?" + TABLE));
+            boolean outbox = tables.stream().map(name -> name.replace("\"", "").toLowerCase(Locale.ROOT))
+                    .anyMatch(name -> TABLES.contains(name.substring(name.lastIndexOf('.') + 1)));
             if (!outbox) { return; }
             if (!OutboxShardContext.isActive()) { throw invalid(); }
             if (tables.size() != 1) { throw invalid(); }
@@ -93,7 +102,7 @@ final class OutboxShardSqlGuard {
         }
         var expressions = values.getExpressions();
         if (slotIndex < 0 || expressions == null || expressions.size() != insert.getColumns().size()
-                || !(expressions.get(slotIndex) instanceof JdbcParameter || expressions.get(slotIndex) instanceof LongValue)) {
+                || !scalar(expressions.get(slotIndex))) {
             throw invalid();
         }
     }
@@ -119,7 +128,8 @@ final class OutboxShardSqlGuard {
     }
 
     private static boolean scalar(Expression expression) {
-        return expression instanceof JdbcParameter || expression instanceof LongValue value && value.getValue() >= 0;
+        return expression instanceof JdbcParameter
+                || expression instanceof LongValue value && value.getValue() == OutboxShardContext.currentSlot();
     }
 
     private static SQLException invalid() {

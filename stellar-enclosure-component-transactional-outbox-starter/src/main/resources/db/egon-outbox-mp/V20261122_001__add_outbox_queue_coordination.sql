@@ -1,0 +1,36 @@
+CREATE TABLE egon_cola_outbox_queue_member (
+    id bigint NOT NULL,
+    shard_slot integer NOT NULL CHECK (shard_slot >= 0),
+    instance_id varchar(128) NOT NULL CHECK (btrim(instance_id) <> ''),
+    capabilities_json text NOT NULL CHECK (octet_length(capabilities_json) <= 32768),
+    last_seen_at timestamptz(6) NOT NULL,
+    expires_at timestamptz(6) NOT NULL,
+    CONSTRAINT ck_outbox_queue_member_expiry CHECK (expires_at >= last_seen_at),
+    tenant_id bigint NOT NULL CHECK (tenant_id = 0),
+    create_user_id varchar(128) NOT NULL,
+    create_time timestamptz(6) NOT NULL,
+    update_user_id varchar(128) NOT NULL,
+    update_time timestamptz(6) NOT NULL,
+    deleted_at timestamp(6) without time zone CHECK (deleted_at IS NULL),
+    version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
+    CONSTRAINT pk_outbox_queue_member PRIMARY KEY (id),
+    CONSTRAINT uk_outbox_queue_member_slot_instance UNIQUE (shard_slot, instance_id)
+);
+
+CREATE TABLE egon_cola_outbox_queue_lease (
+    id bigint NOT NULL,
+    shard_slot integer NOT NULL CHECK (shard_slot >= 0),
+    channel varchar(64) NOT NULL CHECK (btrim(channel) <> ''),
+    owner_instance_id varchar(128) NOT NULL CHECK (btrim(owner_instance_id) <> ''),
+    epoch bigint NOT NULL CHECK (epoch > 0),
+    expires_at timestamptz(6) NOT NULL,
+    tenant_id bigint NOT NULL CHECK (tenant_id = 0),
+    create_user_id varchar(128) NOT NULL,
+    create_time timestamptz(6) NOT NULL,
+    update_user_id varchar(128) NOT NULL,
+    update_time timestamptz(6) NOT NULL,
+    deleted_at timestamp(6) without time zone CHECK (deleted_at IS NULL),
+    version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
+    CONSTRAINT pk_outbox_queue_lease PRIMARY KEY (id),
+    CONSTRAINT uk_outbox_queue_lease_slot_channel UNIQUE (shard_slot, channel)
+);

@@ -43,15 +43,10 @@ abstract class PostgresqlOutboxTestSupport {
         String password;
         PGSimpleDataSource physicalDataSource;
         if (localUrl != null && !localUrl.isBlank()) {
-            if (!localUrl.matches("jdbc:postgresql://127\\.0\\.0\\.1:[0-9]{1,5}/outbox_it_[a-z0-9_]{1,40}")) {
-                throw new IllegalArgumentException("PostgreSQL tests require an explicit loopback outbox_it_ database");
-            }
             jdbcUrl = localUrl;
             username = System.getProperty("user.name");
             password = "";
-            physicalDataSource = new PGSimpleDataSource();
-            physicalDataSource.setURL(jdbcUrl);
-            physicalDataSource.setUser(username);
+            physicalDataSource = localDataSource(localUrl);
             Integer existing = new JdbcTemplate(physicalDataSource).queryForObject(
                     "SELECT count(*) FROM pg_namespace WHERE nspname='egon_outbox'", Integer.class);
             if (existing != 0 && !localUrl.equals(ownedLocalTestUrl)) {
@@ -79,6 +74,8 @@ abstract class PostgresqlOutboxTestSupport {
                   - !SINGLE
                     tables:
                       - primary.egon_outbox.egon_cola_outbox_message
+                      - primary.egon_outbox.egon_cola_outbox_queue_member
+                      - primary.egon_outbox.egon_cola_outbox_queue_lease
                       - primary.egon_outbox.ddl_history
                       - primary.public.outbox_test_order
                 transaction:
@@ -149,6 +146,8 @@ abstract class PostgresqlOutboxTestSupport {
 
     @BeforeEach
     void cleanOutboxTables() {
+        physicalJdbcTemplate.execute("TRUNCATE TABLE egon_outbox.egon_cola_outbox_queue_member");
+        physicalJdbcTemplate.execute("TRUNCATE TABLE egon_outbox.egon_cola_outbox_queue_lease");
         jdbcTemplate.execute("TRUNCATE TABLE egon_outbox.egon_cola_outbox_message");
         jdbcTemplate.execute("TRUNCATE TABLE public.outbox_test_order");
     }
@@ -172,6 +171,17 @@ abstract class PostgresqlOutboxTestSupport {
         source.setURL(postgresql.getJdbcUrl());
         source.setUser(postgresql.getUsername());
         source.setPassword(postgresql.getPassword());
+        return source;
+    }
+
+    static PGSimpleDataSource localDataSource(String jdbcUrl) {
+        if (!jdbcUrl.matches("jdbc:postgresql://127\\.0\\.0\\.1:[0-9]{1,5}/outbox_it_[a-z0-9_]{1,40}")) {
+            throw new IllegalArgumentException("PostgreSQL tests require an explicit loopback outbox_it_ database");
+        }
+        PGSimpleDataSource source = new PGSimpleDataSource();
+        source.setURL(jdbcUrl);
+        source.setUser(System.getProperty("user.name"));
+        source.setPassword("");
         return source;
     }
 

@@ -35,7 +35,7 @@ public class OutboxLogicalDataSourceFactory implements LogicalDataSourceFactory 
 
     @Override
     public void validateLogicalSql(String sql) throws java.sql.SQLException {
-        if (ddlInitializer.isMultiGroupMode()) {
+        if (ddlInitializer.isMultiGroupMode() || OutboxShardSqlGuard.referencesCoordinationTable(sql)) {
             OutboxShardSqlGuard.validate(sql);
         }
     }

@@ -15,6 +15,8 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaPostgreDdlRunner;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlManifestBO;
+import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ConfigStyleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
@@ -43,6 +45,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
@@ -91,7 +94,9 @@ class OutboxPostgresqlMultishardIntegrationTest {
             var history = new TableProperties("SINGLE", "group_a", null, null, null, "egon_outbox");
             var properties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
                     .configStyle(ConfigStyleEnum.STRATEGY).dataSources(sources)
-                    .tables(Map.of("egon_cola_outbox_message", outbox, "ddl_history", history,
+                    .tables(Map.of("egon_cola_outbox_message", outbox,
+                            "egon_cola_outbox_queue_member", outbox,
+                            "egon_cola_outbox_queue_lease", outbox, "ddl_history", history,
                             businessA, new TableProperties("SINGLE", "group_a", null, null, null),
                             businessB, new TableProperties("SINGLE", "group_b", null, null, null))).build();
             var strategy = new EgonColaShardingStrategyFactory(validation, Map.of(
@@ -104,6 +109,8 @@ class OutboxPostgresqlMultishardIntegrationTest {
             var storage = new OutboxMpStorageProperties();
             var initializer = new OutboxManagedDdlInitializer(runner, topology, validation, properties, storage,
                     new ObjectMapper(), Duration.ofSeconds(30));
+            preparesBothPrimaryPrefixesAndRecoversOnlyTheFailedTarget(properties, loader, topology, runner,
+                    storage, initializer, primaryA, primaryB, replicaA, replicaB);
             var bootstrapper = new EgonColaShardingDataSourceBootstrapper(new EgonColaPhysicalDataSourceFactory(),
                     loader, topology, new OutboxLogicalDataSourceFactory(initializer));
             logical = bootstrapper.createDataSource(properties);
@@ -169,7 +176,7 @@ class OutboxPostgresqlMultishardIntegrationTest {
                     String owner = "worker-" + worker;
                     futures.add(executor.submit(() -> {
                         barrier.await();
-                        return transaction.execute(status -> claim(routed, advisory, selectedSlot, owner, 10));
+                        return claimWithContentionRetries(transaction, routed, advisory, selectedSlot, owner, 10);
                     }));
                 }
                 for (var future : futures) { claimed.addAll(future.get(30, TimeUnit.SECONDS)); }
@@ -190,8 +197,95 @@ class OutboxPostgresqlMultishardIntegrationTest {
         }
     }
 
+    private static void preparesBothPrimaryPrefixesAndRecoversOnlyTheFailedTarget(
+            EgonColaShardingProperties properties, EgonColaShardingYamlLoader loader,
+            EgonColaShardingTopologyValidator topology, EgonColaPostgreDdlRunner runner,
+            OutboxMpStorageProperties storage, OutboxManagedDdlInitializer initializer,
+            JdbcTemplate primaryA, JdbcTemplate primaryB, JdbcTemplate replicaA, JdbcTemplate replicaB) throws Exception {
+        EgonColaDdlManifestBO manifest;
+        try (InputStream input = OutboxPostgresqlMultishardIntegrationTest.class.getClassLoader()
+                .getResourceAsStream("db/egon-outbox-mp/manifest.json")) {
+            manifest = new ObjectMapper().readValue(input, EgonColaDdlManifestBO.class);
+        }
+        assertThat(manifest.scripts()).extracting(EgonColaDdlManifestBO.ScriptBO::version)
+                .containsExactly("20260924_001", "20261027_001", "20261122_001");
+        var previousTables = new LinkedHashMap<>(properties.getTables());
+        previousTables.remove("egon_cola_outbox_queue_member");
+        previousTables.remove("egon_cola_outbox_queue_lease");
+        var previousProperties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
+                .configStyle(ConfigStyleEnum.STRATEGY).dataSources(properties.getDataSources()).tables(previousTables).build();
+        String previousFingerprint = topology.validate(previousProperties, loader.load(previousProperties)).fingerprint();
+        byte[] yaml = loader.load(properties);
+        String fingerprint = topology.validate(properties, yaml).fingerprint();
+        var previousManifest = new EgonColaDdlManifestBO(manifest.family(), manifest.scripts().subList(0, 2));
+        runner.run(List.of(
+                new EgonColaDdlTargetBO("a_primary", "egon_outbox", EgonColaDdlTargetBO.RoleEnum.MASTER_DATA,
+                        primaryA.getDataSource(), previousManifest, previousFingerprint),
+                new EgonColaDdlTargetBO("b_primary", "egon_outbox", EgonColaDdlTargetBO.RoleEnum.MASTER_DATA,
+                        primaryB.getDataSource(), previousManifest, previousFingerprint)));
+        storage.setPreviousRouteFingerprints(List.of(previousFingerprint));
+        Map<String, DataSource> physical = Map.of("a_primary", primaryA.getDataSource(),
+                "a_replica", replicaA.getDataSource(), "b_primary", primaryB.getDataSource(),
+                "b_replica", replicaB.getDataSource());
+
+        // A completes before B reaches the intentional SQL error; B's new script is one transaction.
+        primaryB.execute("CREATE TABLE egon_outbox.egon_cola_outbox_queue_lease (failure_probe integer)");
+        assertThatThrownBy(() -> initializer.initialize(physical, yaml))
+                .hasStackTraceContaining("DDL_TARGET_FAILED: b_primary/egon_outbox");
+        assertThat(initializer.isReadyFor(primaryA.getDataSource(), fingerprint)).isFalse();
+        assertThat(initializer.isReadyFor(primaryB.getDataSource(), fingerprint)).isFalse();
+        assertThat(primaryA.queryForObject("SELECT count(*) FROM egon_outbox.ddl_history", Integer.class)).isEqualTo(3);
+        assertThat(primaryB.queryForObject("SELECT count(*) FROM egon_outbox.ddl_history", Integer.class)).isEqualTo(2);
+        assertThat(primaryB.queryForObject("SELECT to_regclass('egon_outbox.egon_cola_outbox_queue_member') IS NULL",
+                Boolean.class)).isTrue();
+        primaryB.execute("DROP TABLE egon_outbox.egon_cola_outbox_queue_lease");
+
+        initializer.initialize(physical, yaml);
+        initializer.initialize(physical, yaml);
+        for (JdbcTemplate physicalNode : List.of(primaryA, primaryB, replicaA, replicaB)) {
+            assertThat(physicalNode.queryForObject("SELECT count(*) FROM egon_outbox.ddl_history", Integer.class)).isEqualTo(3);
+            assertThat(physicalNode.queryForObject("SELECT count(*) FROM egon_outbox.ddl_history "
+                    + "WHERE version IN ('20260924_001', '20261027_001') AND route_fingerprint = ?",
+                    Integer.class, previousFingerprint)).isEqualTo(2);
+            assertThat(physicalNode.queryForObject("SELECT count(*) FROM egon_outbox.ddl_history "
+                    + "WHERE version = '20261122_001' AND route_fingerprint = ?",
+                    Integer.class, fingerprint)).isEqualTo(1);
+            assertThat(physicalNode.queryForObject("SELECT to_regclass('egon_outbox.egon_cola_outbox_queue_member') IS NOT NULL "
+                    + "AND to_regclass('egon_outbox.egon_cola_outbox_queue_lease') IS NOT NULL", Boolean.class)).isTrue();
+            for (var script : manifest.scripts()) {
+                assertThat(physicalNode.queryForObject("SELECT checksum FROM egon_outbox.ddl_history WHERE version = ?",
+                        String.class, script.version())).isEqualTo(script.sha256());
+            }
+        }
+        for (var entry : Map.of("a_primary", primaryA, "b_primary", primaryB).entrySet()) {
+            var oldTarget = new EgonColaDdlTargetBO(entry.getKey(), "egon_outbox",
+                    EgonColaDdlTargetBO.RoleEnum.MASTER_DATA, entry.getValue().getDataSource(), previousManifest,
+                    fingerprint, java.util.Set.of(previousFingerprint));
+            assertThatThrownBy(() -> runner.run(List.of(oldTarget))).hasStackTraceContaining("MANIFEST_PREFIX_MISMATCH");
+        }
+    }
+
     private static List<Long> claim(JdbcTemplate jdbc, String advisory, int slot, String owner, int limit) {
         return OutboxShardContext.withSlot(slot, () -> claimScoped(jdbc, advisory, slot, owner, limit));
+    }
+
+    private static List<Long> claimWithContentionRetries(TransactionTemplate transaction, JdbcTemplate jdbc,
+            String advisory, int slot, String owner, int limit) {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                return transaction.execute(status -> claim(jdbc, advisory, slot, owner, limit));
+            } catch (org.springframework.dao.DataAccessException failure) {
+                boolean lockUnavailable = false;
+                for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+                    if (cause instanceof java.sql.SQLException sql && "55P03".equals(sql.getSQLState())) {
+                        lockUnavailable = true;
+                        break;
+                    }
+                }
+                // NOWAIT aborts the physical transaction; retry only after TransactionTemplate rolled it back.
+                if (!lockUnavailable || attempt >= 15) throw failure;
+            }
+        }
     }
 
     private static List<Long> claimScoped(JdbcTemplate jdbc, String advisory, int slot, String owner, int limit) {

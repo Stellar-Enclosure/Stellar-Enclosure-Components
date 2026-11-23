@@ -3,6 +3,7 @@ package top.egon.cola.component.outbox.persistence;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
@@ -32,7 +33,7 @@ import java.util.TreeMap;
 /** Verifies the managed outbox schema using read-only metadata access to its physical PRIMARY. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class OutboxSchemaMetadataValidator extends BaseValidator {
 
     private static final String SCHEMA = "egon_outbox";
@@ -145,6 +146,8 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
             validateColumns(metadata, HISTORY_TABLE, HISTORY_COLUMNS);
             validateIndexes(metadata, MESSAGE_TABLE, MESSAGE_INDEXES);
             validateIndexes(metadata, HISTORY_TABLE, HISTORY_INDEXES);
+            validateQueueSchema(connection, metadata, false);
+            validateQueueSchema(connection, metadata, true);
             validateMessageConstraints(connection);
             validateHistoryConstraints(connection);
             validateHistoryPrefix(connection, loadManifest());
@@ -204,6 +207,47 @@ public class OutboxSchemaMetadataValidator extends BaseValidator {
                 throw schemaFailure("INDEX_DEFINITION_MISMATCH: " + table + '.' + name);
             }
         });
+    }
+
+    private void validateQueueSchema(Connection connection, DatabaseMetaData metadata, boolean lease)
+            throws SQLException {
+        String table = lease ? OutboxShardRouting.QUEUE_LEASE_TABLE : OutboxShardRouting.QUEUE_MEMBER_TABLE;
+        String type = lease ? "lease" : "member";
+        String keyColumn = lease ? "channel" : "instance_id";
+        String keySuffix = lease ? "channel" : "instance";
+        String pk = "pk_outbox_queue_" + type;
+        String uk = "uk_outbox_queue_" + type + "_slot_" + keySuffix;
+        Map<String, ColumnSpecBO> columns = new HashMap<>();
+        for (String field : List.of("id", "shard_slot", "tenant_id", "create_user_id", "create_time",
+                "update_user_id", "update_time", "deleted_at", "version")) {
+            columns.put(field, MESSAGE_COLUMNS.get(field));
+        }
+        columns.put("expires_at", column(TIMESTAMPTZ, 0, 6, false));
+        columns.put(keyColumn, column(VARCHAR, lease ? 64 : 128, 0, false));
+        if (lease) {
+            columns.put("owner_instance_id", column(VARCHAR, 128, 0, false));
+            columns.put("epoch", column(BIGINT, 0, 0, false));
+        } else {
+            columns.put("capabilities_json", column(TEXT, 0, 0, false));
+            columns.put("last_seen_at", column(TIMESTAMPTZ, 0, 6, false));
+        }
+        validateColumns(metadata, table, columns);
+        validateIndexes(metadata, table, Map.of(pk, new IndexSpecBO(List.of("id"), true),
+                uk, new IndexSpecBO(List.of("shard_slot", keyColumn), true)));
+
+        Map<String, String> checks = constraintDefinitions(connection, table);
+        requireConstraint(checks, pk, "primary key (id)");
+        requireConstraint(checks, uk, "unique (shard_slot, " + keyColumn + ")");
+        requireConstraint(checks, table + "_shard_slot_check", "shard_slot >= 0");
+        requireConstraint(checks, table + "_tenant_id_check", "tenant_id = 0");
+        requireConstraint(checks, table + "_deleted_at_check", "deleted_at is null");
+        requireConstraint(checks, table + "_version_check", "version >= 0");
+        if (lease) {
+            requireConstraint(checks, table + "_epoch_check", "epoch > 0");
+        } else {
+            requireConstraint(checks, "ck_outbox_queue_member_expiry", "expires_at >= last_seen_at");
+            requireConstraint(checks, table + "_capabilities_json_check", "octet_length(capabilities_json)", "32768");
+        }
     }
 
     private void validateMessageConstraints(Connection connection) throws SQLException {

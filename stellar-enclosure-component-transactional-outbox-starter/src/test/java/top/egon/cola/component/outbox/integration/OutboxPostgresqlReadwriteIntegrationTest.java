@@ -77,7 +77,9 @@ class OutboxPostgresqlReadwriteIntegrationTest {
                     .configStyle(ConfigStyleEnum.STRATEGY)
                     .dataSources(List.of(source("primary", DataSourceRoleEnum.PRIMARY, primaryUrl, user, password),
                             source("replica", DataSourceRoleEnum.REPLICA, replicaUrl, user, password)))
-                    .tables(Map.of("egon_cola_outbox_message", outboxTable, "ddl_history", outboxTable,
+                    .tables(Map.of("egon_cola_outbox_message", outboxTable,
+                            "egon_cola_outbox_queue_member", outboxTable,
+                            "egon_cola_outbox_queue_lease", outboxTable, "ddl_history", outboxTable,
                             business, new TableProperties("SINGLE", "group0", null, null, null))).build();
             var strategy = new EgonColaShardingStrategyFactory(validation,
                     Map.of("SINGLE", new EgonColaSingleTableShardingStrategy()));
@@ -148,7 +150,10 @@ class OutboxPostgresqlReadwriteIntegrationTest {
                 }));
                 try {
                     assertThat(acquired.await(10, TimeUnit.SECONDS)).isTrue();
-                    transaction.executeWithoutResult(status -> assertThat(jdbc.queryForList(advisory, 102L, 0)).isEmpty());
+                    assertThatThrownBy(() -> transaction.executeWithoutResult(
+                            status -> jdbc.queryForList(advisory, 102L, 0)))
+                            .rootCause().isInstanceOfSatisfying(java.sql.SQLException.class,
+                                    failure -> assertThat(failure.getSQLState()).isEqualTo("55P03"));
                 } finally {
                     release.countDown();
                 }

@@ -22,6 +22,7 @@ import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaSingleTa
 import top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaTechnicalGroupShardingStrategy;
 import top.egon.cola.component.outbox.api.OutboxShardIdentity;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
+import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -30,6 +31,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,7 +59,9 @@ class OutboxManagedDdlReadwriteTest {
             var history = new TableProperties("SINGLE", "shard_0", null, null, null, "egon_outbox");
             var properties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
                     .configStyle(ConfigStyleEnum.STRATEGY).dataSources(sources)
-                    .tables(Map.of("egon_cola_outbox_message", message, "ddl_history", history)).build();
+                    .tables(Map.of("egon_cola_outbox_message", message,
+                            "egon_cola_outbox_queue_member", message,
+                            "egon_cola_outbox_queue_lease", message, "ddl_history", history)).build();
             var strategy = new EgonColaShardingStrategyFactory(validation, Map.of(
                     "SINGLE", new EgonColaSingleTableShardingStrategy(),
                     "TECHNICAL_GROUP", new EgonColaTechnicalGroupShardingStrategy()));
@@ -89,8 +93,16 @@ class OutboxManagedDdlReadwriteTest {
                     .containsEntry("shard_0", primaryA.dataSource()).containsEntry("shard_1", primaryB.dataSource());
             org.mockito.ArgumentCaptor<List<EgonColaDdlTargetBO>> captured = org.mockito.ArgumentCaptor.forClass(List.class);
             verify(runner).run(captured.capture());
-            assertThat(captured.getValue()).hasSize(2).allSatisfy(target ->
-                    assertThat(target.compatibleRouteFingerprints()).containsExactly("a".repeat(64)));
+            assertThat(captured.getValue()).extracting(EgonColaDdlTargetBO::alias)
+                    .containsExactlyInAnyOrder("writer", "writer_1");
+            assertThat(captured.getValue()).allSatisfy(target -> {
+                assertThat(target.role()).isEqualTo(EgonColaDdlTargetBO.RoleEnum.MASTER_DATA);
+                assertThat(target.schema()).isEqualTo("egon_outbox");
+                assertThat(target.routeFingerprint()).isEqualTo(topology.fingerprint());
+                assertThat(target.compatibleRouteFingerprints()).containsExactly("a".repeat(64));
+                assertThat(target.manifest().scripts()).extracting(script -> script.version())
+                        .containsExactly("20260924_001", "20261027_001", "20261122_001");
+            });
 
             when(primaryA.rows().next()).thenReturn(true, false);
             when(primaryB.rows().next()).thenReturn(true, false);
@@ -110,7 +122,9 @@ class OutboxManagedDdlReadwriteTest {
             var table = new TableProperties("SINGLE", "shard_0", null, null, null, "egon_outbox");
             var properties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
                     .configStyle(ConfigStyleEnum.STRATEGY).dataSources(List.of(primary, replica))
-                    .tables(Map.of("egon_cola_outbox_message", table, "ddl_history", table)).build();
+                    .tables(Map.of("egon_cola_outbox_message", table,
+                            "egon_cola_outbox_queue_member", table,
+                            "egon_cola_outbox_queue_lease", table, "ddl_history", table)).build();
             var strategy = new EgonColaShardingStrategyFactory(validation,
                     Map.of("SINGLE", new EgonColaSingleTableShardingStrategy()));
             var loader = new EgonColaShardingYamlLoader(strategy, new DefaultResourceLoader(), new StandardEnvironment());
@@ -166,6 +180,101 @@ class OutboxManagedDdlReadwriteTest {
             assertThatThrownBy(() -> initializer.initialize(Map.of("writer", writer, "reader", reader), yaml))
                     .hasMessageContaining("DDL_REPLICA_ROLE_MISMATCH");
             assertThat(initializer.isReadyFor(writer, fingerprint)).isFalse();
+        }
+    }
+
+    @Test
+    void rejectsMissingOrDifferentlyRoutedCoordinationTablesBeforeOpeningAnyTarget() throws Exception {
+        try (var validators = Validation.buildDefaultValidatorFactory()) {
+            ValidationUtils validation = new ValidationUtils(validators.getValidator());
+            var sources = List.of(source("writer", "shard_0", DataSourceRoleEnum.PRIMARY),
+                    source("reader", "shard_0", DataSourceRoleEnum.REPLICA),
+                    source("writer_1", "shard_1", DataSourceRoleEnum.PRIMARY),
+                    source("reader_1", "shard_1", DataSourceRoleEnum.REPLICA));
+            var message = new TableProperties("TECHNICAL_GROUP", "shard_0", "shard_slot", null, null,
+                    "egon_outbox", List.of("shard_0", "shard_1"));
+            var history = new TableProperties("SINGLE", "shard_0", null, null, null, "egon_outbox");
+            var mismatchedSlots = new TableProperties("TECHNICAL_GROUP", "shard_1", "shard_slot", null, null,
+                    "egon_outbox", List.of("shard_0", "shard_1"));
+            var otherSchema = new TableProperties("TECHNICAL_GROUP", "shard_0", "shard_slot", null, null,
+                    "public", List.of("shard_0", "shard_1"));
+            var strategy = new EgonColaShardingStrategyFactory(validation, Map.of(
+                    "SINGLE", new EgonColaSingleTableShardingStrategy(),
+                    "TECHNICAL_GROUP", new EgonColaTechnicalGroupShardingStrategy()));
+            var loader = new EgonColaShardingYamlLoader(strategy, new DefaultResourceLoader(), new StandardEnvironment());
+            var validator = new EgonColaShardingTopologyValidator(validation);
+            for (String table : List.of("egon_cola_outbox_queue_member", "egon_cola_outbox_queue_lease")) {
+                for (TableProperties invalid : java.util.Arrays.asList(null, history, mismatchedSlots, otherSchema)) {
+                    Map<String, TableProperties> tables = new LinkedHashMap<>(Map.of(
+                            "egon_cola_outbox_message", message, "egon_cola_outbox_queue_member", message,
+                            "egon_cola_outbox_queue_lease", message, "ddl_history", history));
+                    if (invalid == null) tables.remove(table); else tables.put(table, invalid);
+                    var properties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
+                            .configStyle(ConfigStyleEnum.STRATEGY).dataSources(sources).tables(tables).build();
+                    byte[] yaml = loader.load(properties);
+                    String fingerprint = validator.validate(properties, yaml).fingerprint();
+                    var runner = mock(EgonColaPostgreDdlRunner.class);
+                    var initializer = new OutboxManagedDdlInitializer(runner, validator, validation, properties,
+                            new OutboxMpStorageProperties(), new ObjectMapper());
+                    DataSource writer = mock(DataSource.class), reader = mock(DataSource.class),
+                            writer1 = mock(DataSource.class), reader1 = mock(DataSource.class);
+
+                    assertThatThrownBy(() -> initializer.initialize(Map.of("writer", writer, "reader", reader,
+                            "writer_1", writer1, "reader_1", reader1), yaml))
+                            .as("%s must match the message route: %s", table, invalid)
+                            .isInstanceOfAny(IllegalStateException.class, OutboxConfigurationException.class)
+                            .hasMessageContaining("OUTBOX_");
+                    assertThat(initializer.isReadyFor(writer, fingerprint)).isFalse();
+                    assertThat(initializer.isReadyFor(writer1, fingerprint)).isFalse();
+                    verifyNoInteractions(runner, writer, writer1, reader, reader1);
+                }
+            }
+        }
+    }
+
+    @Test
+    void incompleteSecondPrimaryMigrationCannotBecomeReadyOrStartReplicaReplay() throws Exception {
+        try (var validators = Validation.buildDefaultValidatorFactory()) {
+            ValidationUtils validation = new ValidationUtils(validators.getValidator());
+            var message = new TableProperties("TECHNICAL_GROUP", "shard_0", "shard_slot", null, null,
+                    "egon_outbox", List.of("shard_0", "shard_1"));
+            var history = new TableProperties("SINGLE", "shard_0", null, null, null, "egon_outbox");
+            var properties = EgonColaShardingProperties.builder().mode(ModeEnum.SHARDING_READWRITE)
+                    .configStyle(ConfigStyleEnum.STRATEGY)
+                    .dataSources(List.of(source("writer", "shard_0", DataSourceRoleEnum.PRIMARY),
+                            source("reader", "shard_0", DataSourceRoleEnum.REPLICA),
+                            source("writer_1", "shard_1", DataSourceRoleEnum.PRIMARY),
+                            source("reader_1", "shard_1", DataSourceRoleEnum.REPLICA)))
+                    .tables(Map.of("egon_cola_outbox_message", message,
+                            "egon_cola_outbox_queue_member", message,
+                            "egon_cola_outbox_queue_lease", message, "ddl_history", history)).build();
+            var strategy = new EgonColaShardingStrategyFactory(validation, Map.of(
+                    "SINGLE", new EgonColaSingleTableShardingStrategy(),
+                    "TECHNICAL_GROUP", new EgonColaTechnicalGroupShardingStrategy()));
+            byte[] yaml = new EgonColaShardingYamlLoader(strategy, new DefaultResourceLoader(), new StandardEnvironment())
+                    .load(properties);
+            var validator = new EgonColaShardingTopologyValidator(validation);
+            String fingerprint = validator.validate(properties, yaml).fingerprint();
+            var runner = mock(EgonColaPostgreDdlRunner.class);
+            when(runner.run(anyList())).thenAnswer(invocation -> {
+                List<EgonColaDdlTargetBO> targets = invocation.getArgument(0);
+                EgonColaDdlTargetBO only = targets.stream().filter(target -> target.alias().equals("writer"))
+                        .findFirst().orElseThrow();
+                return only.manifest().scripts().stream().map(script -> new EgonColaDdlResult(only.alias(),
+                        only.schema(), script.version(), script.sha256(), EgonColaDdlResult.StatusEnum.APPLIED,
+                        Duration.ZERO)).toList();
+            });
+            DataSource writer = mock(DataSource.class), writer1 = mock(DataSource.class),
+                    reader = mock(DataSource.class), reader1 = mock(DataSource.class);
+            var initializer = new OutboxManagedDdlInitializer(runner, validator, validation, properties,
+                    new OutboxMpStorageProperties(), new ObjectMapper());
+
+            assertThatThrownBy(() -> initializer.initialize(Map.of("writer", writer, "writer_1", writer1,
+                    "reader", reader, "reader_1", reader1), yaml))
+                    .hasMessageContaining("OUTBOX_DDL_MANIFEST_INCOMPLETE");
+            assertThat(initializer.isReadyFor(writer, fingerprint)).isFalse();
+            assertThat(initializer.isReadyFor(writer1, fingerprint)).isFalse();
+            verifyNoInteractions(writer, writer1, reader, reader1);
         }
     }
 

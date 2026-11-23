@@ -17,6 +17,27 @@ final class OutboxPrimaryReadPolicy {
     private static final String TABLE = "egon_outbox.egon_cola_outbox_message";
 
     private static final Set<String> ALLOWED = Set.of(
+            canonical("SELECT instance_id, capabilities_json, expires_at, clock_timestamp() AS database_time "
+                    + "FROM egon_outbox.egon_cola_outbox_queue_member WHERE shard_slot = ? AND tenant_id = 0 "
+                    + "AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY instance_id LIMIT ?"),
+            canonical("SELECT channel, owner_instance_id, epoch, expires_at FROM egon_outbox.egon_cola_outbox_queue_lease "
+                    + "WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL FOR SHARE"),
+            canonical("SELECT channel, owner_instance_id, epoch, expires_at "
+                    + "FROM egon_outbox.egon_cola_outbox_queue_lease WHERE shard_slot = ? AND tenant_id = 0 "
+                    + "AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY channel LIMIT ?"),
+            canonical("SELECT expires_at > clock_timestamp() FROM egon_outbox.egon_cola_outbox_queue_lease "
+                    + "WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL "
+                    + "AND owner_instance_id = ? AND epoch = ? FOR SHARE"),
+            canonical("SELECT " + COLUMNS + " FROM " + TABLE
+                    + " WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL "
+                    + "AND status IN ('PENDING','RETRY_WAIT') AND next_attempt_at <= statement_timestamp() "
+                    + "ORDER BY next_attempt_at, id LIMIT ? FOR UPDATE NOWAIT"),
+            canonical("SELECT " + COLUMNS + " FROM " + TABLE
+                    + " WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL "
+                    + "AND status = 'PROCESSING' AND locked_until <= statement_timestamp() "
+                    + "ORDER BY locked_until, id LIMIT ? FOR UPDATE NOWAIT"),
+            canonical("SELECT " + COLUMNS + " FROM " + TABLE
+                    + " WHERE id = ? AND shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL FOR UPDATE"),
             canonical("SELECT " + COLUMNS + " FROM " + TABLE
                     + " WHERE shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL AND (message_id = ? OR idempotency_key = ?)"
                     + " ORDER BY id FOR UPDATE"),

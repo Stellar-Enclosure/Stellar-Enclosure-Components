@@ -27,6 +27,7 @@ import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardin
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingTopologyValidator.TopologyBO;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
 import top.egon.cola.component.outbox.api.OutboxShardIdentity;
+import top.egon.cola.component.outbox.persistence.OutboxShardRouting;
 
 import javax.sql.DataSource;
 import java.io.IOException;
@@ -242,6 +243,7 @@ public class OutboxManagedDdlInitializer {
                 throw new IllegalStateException("OUTBOX_SINGLE_NODE_MISMATCH: " + table);
             }
         }
+        OutboxShardRouting.requireQueueProfiles(topology.profiles());
         return slots;
     }
 

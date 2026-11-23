@@ -10,6 +10,11 @@
       "version": "20261027_001",
       "path": "db/egon-outbox-mp/V20261027_001__add_outbox_shard_slot.sql",
       "sha256": "e05b26eca0b5d91f672441da2eaeaa7071787d3d5e910237e1832c3004706450"
+    },
+    {
+      "version": "20261122_001",
+      "path": "db/egon-outbox-mp/V20261122_001__add_outbox_queue_coordination.sql",
+      "sha256": "8ec593f61c04aa115c007c3389424e5fba8cb4131020f7e70589d46578812883"
     }
   ]
 }

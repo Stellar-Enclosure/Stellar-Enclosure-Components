@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import top.egon.cola.component.common.core.validation.BaseValidator;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
+import top.egon.cola.component.outbox.persistence.OutboxShardRouting;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -103,6 +104,72 @@ public final class JdbcOutboxSchemaValidator extends BaseValidator {
         } catch (DataAccessException failure) {
             throw new OutboxConfigurationException("JDBC outbox schema validation failed", failure);
         }
+    }
+
+    /** Checks the V2 technical tables without running or repairing DDL. */
+    public void validateCoordination() {
+        try {
+            validateQueueTable(OutboxShardRouting.QUEUE_MEMBER_TABLE, "member", "instance", "instance_id", Map.of(
+                    "instance_id", "character varying", "capabilities_json", "text",
+                    "last_seen_at", "timestamp with time zone"));
+            validateQueueTable(OutboxShardRouting.QUEUE_LEASE_TABLE, "lease", "channel", "channel", Map.of(
+                    "channel", "character varying", "owner_instance_id", "character varying", "epoch", "bigint"));
+        } catch (DataAccessException failure) {
+            throw new OutboxConfigurationException("JDBC outbox coordination schema validation failed", failure);
+        }
+    }
+
+    private void validateQueueTable(String table, String type, String suffix, String key, Map<String, String> specific) {
+        Map<String, String> columns = new LinkedHashMap<>(specific);
+        columns.put("id", "bigint");
+        columns.put("shard_slot", "integer");
+        columns.put("expires_at", "timestamp with time zone");
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT column_name, data_type, is_nullable, character_maximum_length, datetime_precision,
+                       is_identity
+                FROM information_schema.columns WHERE table_schema=? AND table_name=?
+                """, schema, table);
+        if (rows.size() != columns.size() || rows.stream().anyMatch(row -> !queueColumnMatches(columns, row))) {
+            throw invalidCoordination(table);
+        }
+        Map<String, String> constraints = new LinkedHashMap<>();
+        jdbc.queryForList("""
+                SELECT c.conname, pg_get_constraintdef(c.oid) AS definition FROM pg_catalog.pg_constraint c
+                JOIN pg_catalog.pg_class t ON t.oid=c.conrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+                WHERE n.nspname=? AND t.relname=? AND c.convalidated
+                """, schema, table).forEach(row -> constraints.put((String) row.get("conname"),
+                        (String) row.get("definition")));
+        if (!"PRIMARY KEY (id)".equals(constraints.get("pk_outbox_queue_" + type))
+                || !("UNIQUE (shard_slot, " + key + ")").equals(
+                        constraints.get("uk_outbox_queue_" + type + "_slot_" + suffix))
+                || !constraintContains(constraints.get(table + "_shard_slot_check"), "shard_slot = 0")) {
+            throw invalidCoordination(table);
+        }
+        if ("lease".equals(type)
+                ? !constraintContains(constraints.get(table + "_epoch_check"), "epoch > 0")
+                : !constraintContains(constraints.get("ck_outbox_queue_member_expiry"), "expires_at >= last_seen_at")) {
+            throw invalidCoordination(table);
+        }
+    }
+
+    private static boolean queueColumnMatches(Map<String, String> expected, Map<String, Object> row) {
+        String column = (String) row.get("column_name");
+        String type = expected.get(column);
+        if (type == null || !type.equals(row.get("data_type")) || !"NO".equals(row.get("is_nullable"))) {
+            return false;
+        }
+        return switch (type) {
+            case "timestamp with time zone" -> row.get("datetime_precision") instanceof Number n && n.intValue() == 6;
+            case "character varying" -> row.get("character_maximum_length") instanceof Number n
+                    && n.intValue() == ("channel".equals(column) ? 64 : 128);
+            case "bigint" -> !"id".equals(column) || "YES".equals(row.get("is_identity"));
+            default -> true;
+        };
+    }
+
+    private static OutboxConfigurationException invalidCoordination(String table) {
+        return new OutboxConfigurationException("JDBC outbox schema does not satisfy the deployed V2 contract: " + table);
     }
 
     private static Map<String, Column> columns() {

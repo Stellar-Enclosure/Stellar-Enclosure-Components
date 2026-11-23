@@ -15,6 +15,50 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class OutboxPrimaryReadPolicyTest {
 
+    private static final String MEMBER_SNAPSHOT = "SELECT instance_id, capabilities_json, expires_at, "
+            + "clock_timestamp() AS database_time FROM egon_outbox.egon_cola_outbox_queue_member "
+            + "WHERE shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL "
+            + "AND expires_at > clock_timestamp() ORDER BY instance_id LIMIT ?";
+
+    private static final String QUEUE_AUTHORIZATION = "SELECT channel, owner_instance_id, epoch, expires_at "
+            + "FROM egon_outbox.egon_cola_outbox_queue_lease WHERE shard_slot = ? AND channel = ? "
+            + "AND tenant_id = 0 AND deleted_at IS NULL FOR SHARE";
+
+    @Test
+    void permitsTheExactBoundedMemberSnapshotAndQueueAuthorizationReads() throws Exception {
+        assertThat(permits(MEMBER_SNAPSHOT)).isTrue();
+        assertThat(permits(QUEUE_AUTHORIZATION)).isTrue();
+        assertThat(permits(MEMBER_SNAPSHOT.toLowerCase(java.util.Locale.ROOT)
+                .replace(" from ", "\nfrom "))).isTrue();
+    }
+
+    @Test
+    void coordinationPrimaryReadsCannotBroadenTheirPredicatesProjectionOrLocks() throws Exception {
+        for (String approved : new String[]{MEMBER_SNAPSHOT, QUEUE_AUTHORIZATION}) {
+            assertThat(permits(approved.replace("shard_slot = ? AND ", "")))
+                    .as("shard scope: %s", approved).isFalse();
+            assertThat(permits(approved.replace("tenant_id = 0 AND ", "")))
+                    .as("technical tenant: %s", approved).isFalse();
+            assertThat(permits(approved.replace("deleted_at IS NULL", "deleted_at IS NOT NULL")))
+                    .as("soft delete: %s", approved).isFalse();
+            assertThat(permits(approved.replace("WHERE shard_slot = ? AND", "WHERE shard_slot = ? OR")))
+                    .as("fanout: %s", approved).isFalse();
+        }
+        assertThat(permits(MEMBER_SNAPSHOT.replace(" LIMIT ?", ""))).isFalse();
+        assertThat(permits(MEMBER_SNAPSHOT.replace("expires_at > clock_timestamp()", "expires_at >= clock_timestamp()")))
+                .isFalse();
+        assertThat(permits(MEMBER_SNAPSHOT.replace("clock_timestamp() AS database_time", "now() AS database_time")))
+                .isFalse();
+        assertThat(permits(MEMBER_SNAPSHOT.replace("instance_id, capabilities_json, expires_at, clock_timestamp() AS database_time", "*")))
+                .isFalse();
+        assertThat(permits(QUEUE_AUTHORIZATION.replace(" AND channel = ?", ""))).isFalse();
+        assertThat(permits(QUEUE_AUTHORIZATION.replace(" FOR SHARE", ""))).isFalse();
+        assertThat(permits(QUEUE_AUTHORIZATION.replace(" FOR SHARE", " FOR UPDATE"))).isFalse();
+        assertThat(permits(QUEUE_AUTHORIZATION.replace(" FOR SHARE", " FOR SHARE SKIP LOCKED"))).isFalse();
+        assertThat(permits("SELECT epoch FROM egon_outbox.egon_cola_outbox_queue_lease WHERE shard_slot = ? FOR SHARE"))
+                .isFalse();
+    }
+
     @Test
     void permitsOnlyTheExactMapperLockingQueriesAndSchemaChecks() throws Exception {
         Configuration configuration = new Configuration();

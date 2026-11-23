@@ -9,13 +9,14 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.condition.EnabledIf;
 import org.apache.ibatis.mapping.Environment;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.apache.ibatis.session.defaults.DefaultSqlSessionFactory;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.validation.autoconfigure.ValidationAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
@@ -33,21 +34,25 @@ import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlResult.StatusEnum;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO.RoleEnum;
 import top.egon.cola.component.common.mybatis.ddl.EgonColaPostgreDdlRunner;
+import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ConfigStyleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.DataSourceRoleEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.ModeEnum;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties.PhysicalDataSourceProperties;
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingTopologyValidator;
+import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingDataSourceBootstrapper.LogicalDataSourceFactory;
 import top.egon.cola.component.common.mybatis.sharding.bootstrap.EgonColaShardingTopologyValidator.TopologyBO;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMybatisPlusAutoConfiguration;
 import top.egon.cola.component.outbox.migration.OutboxLogicalDataSourceFactory;
 import top.egon.cola.component.outbox.migration.OutboxManagedDdlInitializer;
 import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
+import top.egon.cola.component.outbox.persistence.OutboxSchemaMetadataValidator;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
+import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
@@ -91,12 +96,17 @@ class OutboxManagedDdlIntegrationTest {
               - !SINGLE
                 tables:
                   - primary.egon_outbox.egon_cola_outbox_message
+                  - primary.egon_outbox.egon_cola_outbox_queue_member
+                  - primary.egon_outbox.egon_cola_outbox_queue_lease
                   - primary.egon_outbox.ddl_history
             transaction:
               defaultType: LOCAL
             """;
     private static final ValidatorFactory VALIDATOR_FACTORY = Validation.buildDefaultValidatorFactory();
     private static PostgreSQLContainer<?> postgresql;
+    private static PGSimpleDataSource ownedLocalDataSource;
+    private static String ownedLocalUrl;
+    private static boolean fixtureSchemaCreated;
 
     @Test
     void ddlFailurePreventsLogicalDataSourceCreationWithoutOpeningPostgres() throws Exception {
@@ -266,7 +276,7 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
     void appliesTheManifestOnceAndSkipsItOnRestart() throws Exception {
         FixtureBO fixture = fixture();
 
@@ -274,11 +284,73 @@ class OutboxManagedDdlIntegrationTest {
         fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
 
         assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_message"));
-        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_queue_member"));
+        assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_queue_lease"));
+        assertEquals(3, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        metadataValidator(fixture, new ObjectMapper()).validate();
+        assertEquals(0, scalar(fixture.physicalDataSource(),
+                "SELECT count(*) FROM egon_outbox.egon_cola_outbox_queue_member"));
+        assertEquals(0, scalar(fixture.physicalDataSource(),
+                "SELECT count(*) FROM egon_outbox.egon_cola_outbox_queue_lease"));
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
+    void appendsCoordinationMigrationAfterTheReviewedPreviousRouteWithoutRewritingItsHistory() throws Exception {
+        FixtureBO fixture = fixture();
+        EgonColaDdlManifestBO manifest = manifest();
+        assertEquals(3, manifest.scripts().size());
+        EgonColaDdlManifestBO previousManifest = new EgonColaDdlManifestBO(manifest.family(),
+                manifest.scripts().subList(0, 2));
+        byte[] previousYaml = previousYaml();
+        String previousFingerprint = new EgonColaShardingTopologyValidator(fixture.validationUtils())
+                .validate(fixture.shardingProperties(), previousYaml).fingerprint();
+        runner(fixture.validationUtils(), new PathMatchingResourcePatternResolver()).run(List.of(
+                new EgonColaDdlTargetBO("primary", SCHEMA, RoleEnum.MASTER_DATA, fixture.physicalDataSource(),
+                        previousManifest, previousFingerprint)));
+
+        IllegalStateException unreviewed = assertThrows(IllegalStateException.class,
+                () -> fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml()));
+        assertCauseContains(unreviewed, "ROUTE_FINGERPRINT_MISMATCH");
+        assertFalse(fixture.initializer().isReadyFor(fixture.physicalDataSource(), fixture.routeFingerprint()));
+        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertFalse(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_queue_member"));
+
+        fixture.storageProperties().setPreviousRouteFingerprints(List.of(previousFingerprint));
+        fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
+        fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
+
+        assertEquals(3, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history "
+                + "WHERE version IN ('20260924_001','20261027_001') AND route_fingerprint = '" + previousFingerprint + "'"));
+        assertEquals(1, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history "
+                + "WHERE version = '20261122_001' AND route_fingerprint = '" + fixture.routeFingerprint() + "'"));
+        metadataValidator(fixture, new ObjectMapper()).validate();
+    }
+
+    @Test
+    @EnabledIf("postgresqlEnabled")
+    void anOldTwoScriptManifestCannotAcceptTheNewInstalledHistory() throws Exception {
+        FixtureBO fixture = fixture();
+        fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
+        EgonColaDdlManifestBO current = manifest();
+        assertEquals(3, current.scripts().size());
+        EgonColaDdlManifestBO previous = new EgonColaDdlManifestBO(current.family(), current.scripts().subList(0, 2));
+        ObjectMapper oldManifestMapper = mock(ObjectMapper.class);
+        when(oldManifestMapper.readValue(any(InputStream.class), org.mockito.ArgumentMatchers.eq(EgonColaDdlManifestBO.class)))
+                .thenReturn(previous);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> metadataValidator(fixture, oldManifestMapper).validate());
+
+        assertCauseContains(failure, "DDL_HISTORY_PREFIX_MISMATCH");
+        assertEquals(3, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_queue_member"));
+        assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_queue_lease"));
+    }
+
+    @Test
+    @EnabledIf("postgresqlEnabled")
     void rejectsNonEmptySchemaWithoutManagedHistory() throws Exception {
         FixtureBO fixture = fixture();
         try (Connection connection = fixture.physicalDataSource().getConnection(); Statement statement = connection.createStatement()) {
@@ -292,7 +364,7 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
     void rejectsChecksumDriftInTheInstalledPrefix() throws Exception {
         FixtureBO fixture = fixture();
         fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
@@ -305,7 +377,7 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
     void rejectsRouteFingerprintDriftInTheInstalledPrefix() throws Exception {
         FixtureBO fixture = fixture();
         fixture.initializer().initialize(fixture.physicalSources(), fixture.yaml());
@@ -320,27 +392,33 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
     void rollsBackSqlAndHistoryTogetherWhenAScriptFails() throws Exception {
         FixtureBO fixture = fixture();
         byte[] sql = "CREATE TABLE rollback_probe (id integer); SELECT 1 / 0;".getBytes(StandardCharsets.UTF_8);
         String path = "db/test/rollback_probe.sql";
         ResourcePatternResolver resolver = mock(ResourcePatternResolver.class);
-        when(resolver.getResources(anyString())).thenReturn(new Resource[]{new ByteArrayResource(sql)});
+        ResourcePatternResolver classpath = new PathMatchingResourcePatternResolver();
+        when(resolver.getResources(anyString())).thenAnswer(invocation -> {
+            String location = invocation.getArgument(0);
+            return location.equals("classpath*:" + path)
+                    ? new Resource[]{new ByteArrayResource(sql)} : classpath.getResources(location);
+        });
         EgonColaPostgreDdlRunner runner = runner(fixture.validationUtils(), resolver);
         EgonColaDdlManifestBO manifest = new EgonColaDdlManifestBO("component-outbox", List.of(
                 new EgonColaDdlManifestBO.ScriptBO("20260924_001", path, sha256(sql))));
         EgonColaDdlTargetBO target = new EgonColaDdlTargetBO("primary", SCHEMA, RoleEnum.MASTER_DATA,
                 fixture.physicalDataSource(), manifest, fixture.routeFingerprint());
 
-        assertThrows(IllegalStateException.class, () -> runner.run(List.of(target)));
+        IllegalStateException failure = assertThrows(IllegalStateException.class, () -> runner.run(List.of(target)));
 
+        assertCauseContains(failure, "SQLState=22012");
         assertFalse(tableExists(fixture.physicalDataSource(), "rollback_probe"));
         assertFalse(tableExists(fixture.physicalDataSource(), "ddl_history"));
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = POSTGRES_ENABLED, matches = "true")
+    @EnabledIf("postgresqlEnabled")
     void concurrentInitializersSerializeOnTheManagedSchemaLock() throws Exception {
         FixtureBO fixture = fixture();
         OutboxManagedDdlInitializer second = initializer(fixture.shardingProperties(), fixture.storageProperties(),
@@ -361,15 +439,16 @@ class OutboxManagedDdlIntegrationTest {
         }
 
         assertTrue(tableExists(fixture.physicalDataSource(), "egon_cola_outbox_message"));
-        assertEquals(2, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
+        assertEquals(3, scalar(fixture.physicalDataSource(), "SELECT count(*) FROM egon_outbox.ddl_history"));
     }
 
     @AfterEach
     void removeTestSchema() throws Exception {
-        if (postgresql != null && postgresql.isRunning()) {
+        if (fixtureSchemaCreated) {
             try (Connection connection = adminDataSource().getConnection(); Statement statement = connection.createStatement()) {
                 statement.execute("DROP SCHEMA IF EXISTS egon_outbox CASCADE");
             }
+            fixtureSchemaCreated = false;
         }
     }
 
@@ -382,11 +461,12 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     private static FixtureBO fixture() throws Exception {
-        PostgreSQLContainer<?> container = postgresql();
-        execute(adminDataSource(), "CREATE SCHEMA egon_outbox");
+        PGSimpleDataSource admin = adminDataSource();
+        execute(admin, "CREATE SCHEMA egon_outbox");
+        fixtureSchemaCreated = true;
         PGSimpleDataSource physical = dataSource(SCHEMA);
         ValidationUtils validationUtils = new ValidationUtils(VALIDATOR_FACTORY.getValidator());
-        EgonColaShardingProperties shardingProperties = shardingProperties(container);
+        EgonColaShardingProperties shardingProperties = shardingProperties(admin.getURL(), admin.getUser(), admin.getPassword());
         OutboxMpStorageProperties storageProperties = new OutboxMpStorageProperties();
         byte[] yaml = BASE_YAML.getBytes(StandardCharsets.UTF_8);
         TopologyBO topology = new EgonColaShardingTopologyValidator(validationUtils).validate(shardingProperties, yaml);
@@ -417,11 +497,7 @@ class OutboxManagedDdlIntegrationTest {
                 .withPropertyValues("egon.cola.component.transactional-outbox.enabled=false")
                 .withPropertyValues(OutboxMpStorageProperties.PREFIX
                         + ".sql-session-factory-bean-name=outboxSqlSessionFactory")
-                .withUserConfiguration(OutboxMybatisPlusAutoConfiguration.class, TestDependenciesConfiguration.class);
-    }
-
-    private static EgonColaShardingProperties shardingProperties(PostgreSQLContainer<?> container) {
-        return shardingProperties(container.getJdbcUrl(), container.getUsername(), container.getPassword());
+                .withUserConfiguration(TestDependenciesConfiguration.class);
     }
 
     private static EgonColaShardingProperties shardingPropertiesWithoutPostgres() {
@@ -451,12 +527,56 @@ class OutboxManagedDdlIntegrationTest {
     }
 
     private static PGSimpleDataSource adminDataSource() {
+        String localUrl = System.getProperty("egon.outbox.test.postgres.url");
+        if (localUrl != null && !localUrl.isBlank()) {
+            if (ownedLocalDataSource == null) {
+                PGSimpleDataSource candidate = PostgresqlOutboxTestSupport.localDataSource(localUrl);
+                try {
+                    if (scalar(candidate, "SELECT count(*) FROM pg_namespace WHERE nspname = 'egon_outbox'") != 0) {
+                        throw new IllegalStateException("PostgreSQL DDL tests require a fresh database without an outbox schema");
+                    }
+                } catch (RuntimeException failure) {
+                    throw failure;
+                } catch (Exception failure) {
+                    throw new IllegalStateException("Cannot verify the isolated PostgreSQL DDL test database", failure);
+                }
+                ownedLocalDataSource = candidate;
+                ownedLocalUrl = localUrl;
+            } else if (!localUrl.equals(ownedLocalUrl)) {
+                throw new IllegalStateException("PostgreSQL DDL test database cannot change during a test run");
+            }
+            return ownedLocalDataSource;
+        }
         PostgreSQLContainer<?> container = postgresql();
         PGSimpleDataSource dataSource = new PGSimpleDataSource();
         dataSource.setURL(container.getJdbcUrl());
         dataSource.setUser(container.getUsername());
         dataSource.setPassword(container.getPassword());
         return dataSource;
+    }
+
+    private static boolean postgresqlEnabled() {
+        String localUrl = System.getProperty("egon.outbox.test.postgres.url");
+        return localUrl != null && !localUrl.isBlank()
+                || Boolean.parseBoolean(System.getenv(POSTGRES_ENABLED));
+    }
+
+    private static byte[] previousYaml() {
+        return BASE_YAML.replace("      - primary.egon_outbox.egon_cola_outbox_queue_member\n", "")
+                .replace("      - primary.egon_outbox.egon_cola_outbox_queue_lease\n", "")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static EgonColaDdlManifestBO manifest() throws Exception {
+        try (InputStream input = OutboxManagedDdlIntegrationTest.class.getClassLoader()
+                .getResourceAsStream("db/egon-outbox-mp/manifest.json")) {
+            return new ObjectMapper().readValue(input, EgonColaDdlManifestBO.class);
+        }
+    }
+
+    private static OutboxSchemaMetadataValidator metadataValidator(FixtureBO fixture, ObjectMapper mapper) {
+        return new OutboxSchemaMetadataValidator(fixture.initializer(), fixture.routeFingerprint(),
+                fixture.storageProperties(), mapper, fixture.validationUtils());
     }
 
     private static PGSimpleDataSource dataSource(String schema) {
@@ -535,6 +655,26 @@ class OutboxManagedDdlIntegrationTest {
 
     @Configuration(proxyBeanMethods = false)
     static class TestDependenciesConfiguration {
+
+        // Exercise the real storage hook factories without loading runtime Store/consumer beans.
+        @Bean("outboxMpStorageProperties")
+        @ConfigurationProperties(prefix = OutboxMpStorageProperties.PREFIX, ignoreUnknownFields = false)
+        OutboxMpStorageProperties outboxMpStorageProperties() {
+            return new OutboxMybatisPlusAutoConfiguration().outboxMpStorageProperties();
+        }
+
+        @Bean("outboxManagedDdlInitializer")
+        OutboxManagedDdlInitializer outboxManagedDdlInitializer(EgonColaPostgreDdlRunner runner,
+                EgonColaShardingTopologyValidator topology, ValidationUtils validation,
+                EgonColaShardingProperties sharding, OutboxMpStorageProperties storage, ObjectMapper mapper) {
+            return new OutboxMybatisPlusAutoConfiguration().outboxManagedDdlInitializer(runner, topology,
+                    validation, sharding, new EgonColaMybatisPlusProperties(), storage, mapper);
+        }
+
+        @Bean("egonColaShardingLogicalDataSourceFactory")
+        LogicalDataSourceFactory egonColaShardingLogicalDataSourceFactory(OutboxManagedDdlInitializer initializer) {
+            return new OutboxMybatisPlusAutoConfiguration().egonColaShardingLogicalDataSourceFactory(initializer);
+        }
 
         @Bean("egonColaValidationUtils")
         ValidationUtils egonColaValidationUtils() {

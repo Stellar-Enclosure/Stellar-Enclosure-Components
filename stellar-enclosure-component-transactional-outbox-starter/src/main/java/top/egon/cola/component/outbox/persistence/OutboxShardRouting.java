@@ -1,5 +1,6 @@
 package top.egon.cola.component.outbox.persistence;
 
+import top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO.PartitionKeyBO;
 import top.egon.cola.component.common.mybatis.routing.EgonColaTransactionWriteTarget;
@@ -16,6 +17,9 @@ import java.util.TreeMap;
 
 /** Resolves the technical slot from the transaction's already-pinned physical write group. */
 public final class OutboxShardRouting {
+
+    public static final String QUEUE_MEMBER_TABLE = "egon_cola_outbox_queue_member";
+    public static final String QUEUE_LEASE_TABLE = "egon_cola_outbox_queue_lease";
 
     private final DataSource dataSource;
     private final Map<Integer, String> slots;
@@ -37,7 +41,34 @@ public final class OutboxShardRouting {
                 || resolved.size() > 1 && properties.getMode() != EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE) {
             throw new OutboxConfigurationException("OUTBOX_SHARD_TOPOLOGY_MISMATCH");
         }
+        if (profiles.containsKey(QUEUE_MEMBER_TABLE) || profiles.containsKey(QUEUE_LEASE_TABLE)) {
+            requireQueueProfiles(profiles);
+        }
         this.slots = Map.copyOf(new TreeMap<>(resolved));
+    }
+
+    public static void requireQueueProfiles(Map<String, EgonColaRoutingProfileBO> profiles) {
+        var message = profiles.get("egon_cola_outbox_message");
+        if (message == null) {
+            throw new OutboxConfigurationException("OUTBOX_SHARD_TOPOLOGY_REQUIRED");
+        }
+        for (String table : List.of(QUEUE_MEMBER_TABLE, QUEUE_LEASE_TABLE)) {
+            var queue = profiles.get(table);
+            if (queue == null || queue.kind() != message.kind()
+                    || !queue.tenantSlotMap().equals(message.tenantSlotMap())
+                    || !queue.actualNodes().keySet().equals(message.actualNodes().keySet())) {
+                throw new OutboxConfigurationException("OUTBOX_QUEUE_TOPOLOGY_MISMATCH: " + table);
+            }
+            message.actualNodes().forEach((partition, targets) -> {
+                var expected = targets.stream()
+                        .map(node -> new EgonColaPhysicalTargetBO(node.group(), node.schema(), table))
+                        .toList();
+                var actual = queue.actualNodes().get(partition);
+                if (actual.size() != expected.size() || !Set.copyOf(expected).equals(Set.copyOf(actual))) {
+                    throw new OutboxConfigurationException("OUTBOX_QUEUE_TOPOLOGY_MISMATCH: " + table);
+                }
+            });
+        }
     }
 
     /** Compatibility for direct construction of a single-source store. */

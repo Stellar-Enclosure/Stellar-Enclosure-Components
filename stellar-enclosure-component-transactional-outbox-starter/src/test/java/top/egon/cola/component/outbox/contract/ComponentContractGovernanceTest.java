@@ -226,7 +226,10 @@ class ComponentContractGovernanceTest {
     void handwrittenEnumsImplementTheCommonEnumContract() throws Exception {
         List<String> headers = enumHeaders(MAIN_SOURCES);
 
-        assertThat(headers).as("本模块手写enum清单").hasSize(5);
+        assertThat(headers.stream().map(header -> header.split(" ", 2)[0]).toList())
+                .as("本模块手写enum清单")
+                .containsExactlyInAnyOrder("StorageType", "DispatchMode", "OutboxFinishStatusEnum",
+                        "OutboxStatus", "OutboxLifecycleSignalEnum", "Kind", "Kind");
         List<String> missingContract = new ArrayList<>();
         for (String header : headers) {
             if (!header.contains(EgonEnum.class.getSimpleName())
@@ -380,7 +383,7 @@ class ComponentContractGovernanceTest {
     }
 
     @Test
-    void managedMpMigrationChecksumsBothVersionsAndKeepsLegacySqlImmutable() throws Exception {
+    void managedMpMigrationAppendsCoordinationAndKeepsPublishedSqlImmutable() throws Exception {
         Path managedSql = MANAGED_OUTBOX_SQL;
         Path manifest = MANAGED_OUTBOX_MANIFEST;
         Path legacySql = LEGACY_OUTBOX_SQL;
@@ -389,17 +392,28 @@ class ComponentContractGovernanceTest {
 
         assertThat(root.path("family").asText()).isEqualTo("component-outbox");
         assertThat(root.path("scripts").isArray()).isTrue();
-        assertThat(root.path("scripts").size()).isEqualTo(2);
+        assertThat(root.path("scripts").size()).isEqualTo(3);
         JsonNode script = root.path("scripts").get(0);
         assertThat(script.path("version").asText()).isEqualTo("20260924_001");
         assertThat(script.path("path").asText()).isEqualTo(
                 "db/egon-outbox-mp/V20260924_001__initialize_outbox_mp_schema.sql");
-        assertThat(script.path("sha256").asText()).isEqualTo(sha256(sqlBytes));
+        assertThat(script.path("sha256").asText())
+                .isEqualTo("2bae1d8a90cdc7bd5a2c0889ff73625593de2d5b5261f60e23c3b8d76e708902")
+                .isEqualTo(sha256(sqlBytes));
         JsonNode shardScript = root.path("scripts").get(1);
         assertThat(shardScript.path("version").asText()).isEqualTo("20261027_001");
         assertThat(shardScript.path("path").asText()).isEqualTo("db/egon-outbox-mp/V20261027_001__add_outbox_shard_slot.sql");
-        assertThat(shardScript.path("sha256").asText()).isEqualTo(sha256(Files.readAllBytes(
+        assertThat(shardScript.path("sha256").asText())
+                .isEqualTo("e05b26eca0b5d91f672441da2eaeaa7071787d3d5e910237e1832c3004706450")
+                .isEqualTo(sha256(Files.readAllBytes(
                 Path.of("src/main/resources").resolve(shardScript.path("path").asText()))));
+        JsonNode coordinationScript = root.path("scripts").get(2);
+        assertThat(coordinationScript.path("version").asText()).isEqualTo("20261122_001");
+        assertThat(coordinationScript.path("path").asText())
+                .isEqualTo("db/egon-outbox-mp/V20261122_001__add_outbox_queue_coordination.sql");
+        assertThat(coordinationScript.path("sha256").asText()).matches("[0-9a-f]{64}")
+                .isEqualTo(sha256(Files.readAllBytes(Path.of("src/main/resources")
+                        .resolve(coordinationScript.path("path").asText()))));
         assertThat(sha256(Files.readAllBytes(legacySql))).isEqualTo(LEGACY_OUTBOX_SQL_SHA256);
 
         String store = read(MAIN_SOURCES.resolve(
