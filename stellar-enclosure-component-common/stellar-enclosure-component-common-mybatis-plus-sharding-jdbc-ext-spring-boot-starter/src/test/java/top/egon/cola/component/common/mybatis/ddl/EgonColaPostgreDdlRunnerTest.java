@@ -17,13 +17,17 @@ import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlManifestBO.ScriptBO
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.Mockito.*;
 import static top.egon.cola.component.common.mybatis.ddl.EgonColaDdlInitializationTest.*;
 
@@ -277,6 +281,118 @@ class EgonColaPostgreDdlRunnerTest {
             try (var connection = admin.getConnection(); var statement = connection.createStatement()) {
                 statement.execute("DROP SCHEMA " + schema + " CASCADE");
             }
+        }
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "EGON_MP_PG_SHARDING_IT", matches = "true")
+    void resumesTheSecondAuditPrimaryAfterFailureAndConfirmsAnUnknownCommit() throws Exception {
+        var primary0 = auditSource(0, "PRIMARY");
+        var primary1 = auditSource(1, "PRIMARY");
+        var replica0 = auditSource(0, "REPLICA");
+        var replica1 = auditSource(1, "REPLICA");
+        var firstManifest = auditManifest(0);
+        var secondManifest = auditManifest(1);
+        String schema = "audit_ddl_" + UUID.randomUUID().toString().replace("-", "");
+        try {
+            execute(primary0, "CREATE SCHEMA " + schema);
+            execute(primary1, "CREATE SCHEMA " + schema);
+            var migrations = runner();
+            var first = new EgonColaDdlTargetBO("audit_0", schema, EgonColaDdlTargetBO.RoleEnum.SHARD,
+                    primary0, firstManifest, ROUTE);
+            var unavailable = mock(DataSource.class);
+            when(unavailable.getConnection()).thenThrow(new SQLException("injected unavailable audit primary", "08006"));
+            var missingSecond = new EgonColaDdlTargetBO("audit_1", schema, EgonColaDdlTargetBO.RoleEnum.SHARD,
+                    unavailable, secondManifest, ROUTE);
+            var secondScript = secondManifest.scripts().getFirst();
+            var wrongHash = new EgonColaDdlManifestBO(secondManifest.family(),
+                    List.of(new ScriptBO(secondScript.version(), secondScript.path(), "0".repeat(64))));
+            var wrongSecond = new EgonColaDdlTargetBO("audit_1", schema, EgonColaDdlTargetBO.RoleEnum.SHARD,
+                    unavailable, wrongHash, ROUTE);
+            assertThatThrownBy(() -> migrations.run(List.of(first, wrongSecond))).hasMessageContaining("CHECKSUM_MISMATCH");
+            assertThat(auditHistory(primary0, schema)).isEmpty();
+            verifyNoInteractions(unavailable);
+
+            assertThatThrownBy(() -> migrations.run(List.of(first, missingSecond)))
+                    .hasMessageContaining("DDL_CONNECTION_FAILED: audit_1 SQLState=08006");
+            assertThat(auditHistory(primary0, schema)).containsExactly(firstManifest.scripts().getFirst().sha256());
+            assertThat(auditHistory(primary1, schema)).isEmpty();
+
+            var lostCommitResponse = mock(DataSource.class);
+            try (var physical = primary1.getConnection()) {
+                var faultyConnection = mock(Connection.class, delegatesTo(physical));
+                doAnswer(ignored -> {
+                    physical.commit();
+                    throw new SQLException("injected response loss after commit", "08006");
+                }).when(faultyConnection).commit();
+                when(lostCommitResponse.getConnection()).thenReturn(faultyConnection)
+                        .thenAnswer(ignored -> primary1.getConnection());
+                var second = new EgonColaDdlTargetBO("audit_1", schema, EgonColaDdlTargetBO.RoleEnum.SHARD,
+                        lostCommitResponse, secondManifest, ROUTE);
+                assertThat(migrations.run(List.of(first, second))).extracting(EgonColaDdlResult::status)
+                        .containsExactly(EgonColaDdlResult.StatusEnum.SKIPPED, EgonColaDdlResult.StatusEnum.APPLIED);
+                verify(lostCommitResponse, times(2)).getConnection();
+            }
+            var second = new EgonColaDdlTargetBO("audit_1", schema, EgonColaDdlTargetBO.RoleEnum.SHARD,
+                    primary1, secondManifest, ROUTE);
+            assertThat(migrations.run(List.of(first, second))).extracting(EgonColaDdlResult::status)
+                    .containsExactly(EgonColaDdlResult.StatusEnum.SKIPPED, EgonColaDdlResult.StatusEnum.SKIPPED);
+            awaitAuditHistory(replica0, schema, firstManifest.scripts().getFirst().sha256());
+            awaitAuditHistory(replica1, schema, secondScript.sha256());
+        } finally {
+            try {
+                execute(primary1, "DROP SCHEMA IF EXISTS " + schema + " CASCADE");
+            } finally {
+                execute(primary0, "DROP SCHEMA IF EXISTS " + schema + " CASCADE");
+            }
+        }
+    }
+
+    private static PGSimpleDataSource auditSource(int slot, String role) {
+        var source = new PGSimpleDataSource();
+        source.setURL(System.getenv("EGON_MP_PG_SHARD_" + slot + "_" + role + "_URL"));
+        source.setUser(System.getenv("EGON_MP_PG_USER"));
+        source.setPassword(System.getenv("EGON_MP_PG_PASSWORD"));
+        return source;
+    }
+
+    private static void execute(DataSource source, String sql) throws SQLException {
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    private static List<String> auditHistory(DataSource source, String schema) throws SQLException {
+        try (var connection = source.getConnection();
+             var existence = connection.prepareStatement("SELECT to_regclass(?) IS NOT NULL");
+             var query = connection.createStatement()) {
+            existence.setString(1, schema + ".ddl_history");
+            try (var result = existence.executeQuery()) {
+                if (!result.next() || !result.getBoolean(1)) return List.of();
+            }
+            var checksums = new ArrayList<String>();
+            try (var records = query.executeQuery("SELECT checksum FROM " + schema + ".ddl_history ORDER BY version")) {
+                while (records.next()) checksums.add(records.getString(1));
+            }
+            return List.copyOf(checksums);
+        }
+    }
+
+    private static void awaitAuditHistory(DataSource replica, String schema, String checksum) throws Exception {
+        long started = System.nanoTime();
+        var history = auditHistory(replica, schema);
+        while (history.isEmpty() && System.nanoTime() - started < Duration.ofSeconds(15).toNanos()) {
+            Thread.sleep(Duration.ofMillis(100));
+            history = auditHistory(replica, schema);
+        }
+        assertThat(history).containsExactly(checksum);
+    }
+
+    private static EgonColaDdlManifestBO auditManifest(int slot) throws Exception {
+        var resources = new PathMatchingResourcePatternResolver();
+        var location = "classpath:db/egon-operation-log/manifest-slot-" + slot + ".json";
+        try (var input = resources.getResource(location).getInputStream()) {
+            return new ObjectMapper().readValue(input, EgonColaDdlManifestBO.class);
         }
     }
 }
