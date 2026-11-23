@@ -102,10 +102,26 @@ public class TransactionalOutboxProperties {
         return coordination;
     }
 
-    public enum DispatchMode {
-        LEGACY,
-        LOCAL,
-        COORDINATED
+    public enum DispatchMode implements EgonEnum {
+        LEGACY(0),
+        LOCAL(1),
+        COORDINATED(2);
+
+        private final int code;
+
+        DispatchMode(int code) {
+            this.code = code;
+        }
+
+        @Override
+        public int getCode() {
+            return code;
+        }
+
+        @Override
+        public String getMessage() {
+            return name();
+        }
     }
 
     @Data
