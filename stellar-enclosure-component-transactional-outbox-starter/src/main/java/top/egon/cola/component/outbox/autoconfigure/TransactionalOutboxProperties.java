@@ -103,14 +103,16 @@ public class TransactionalOutboxProperties {
     }
 
     public enum DispatchMode implements EgonEnum {
-        LEGACY(0),
-        LOCAL(1),
-        COORDINATED(2);
+        LEGACY(0, "LEGACY"),
+        LOCAL(1, "LOCAL"),
+        COORDINATED(2, "COORDINATED");
 
         private final int code;
+        private final String message;
 
-        DispatchMode(int code) {
+        DispatchMode(int code, String message) {
             this.code = code;
+            this.message = message;
         }
 
         @Override
@@ -120,7 +122,7 @@ public class TransactionalOutboxProperties {
 
         @Override
         public String getMessage() {
-            return name();
+            return message;
         }
     }
 
