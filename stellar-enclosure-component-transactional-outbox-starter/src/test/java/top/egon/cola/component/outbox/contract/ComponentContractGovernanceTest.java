@@ -448,7 +448,17 @@ class ComponentContractGovernanceTest {
                 "egon.cola.component.transactional-outbox.storage.mp.migration-lock-timeout",
                 "egon.cola.component.transactional-outbox.storage.mp.manifest-resource",
                 "egon.cola.component.transactional-outbox.storage.mp.auto-initialize-ddl",
-                "egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints");
+                "egon.cola.component.transactional-outbox.storage.mp.previous-route-fingerprints",
+                "egon.cola.component.transactional-outbox.dispatch.mode",
+                "egon.cola.component.transactional-outbox.dispatch.consumption-enabled",
+                "egon.cola.component.transactional-outbox.dispatch.max-claim-batch",
+                "egon.cola.component.transactional-outbox.dispatch.max-concurrent-shards",
+                "egon.cola.component.transactional-outbox.dispatch.ack-reserve",
+                "egon.cola.component.transactional-outbox.coordination.heartbeat-interval",
+                "egon.cola.component.transactional-outbox.coordination.lease-duration",
+                "egon.cola.component.transactional-outbox.coordination.membership-ttl",
+                "egon.cola.component.transactional-outbox.coordination.claim-timeout",
+                "egon.cola.component.transactional-outbox.coordination.member-retention");
 
         assertThat(englishKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);
         assertThat(chineseKeys).containsExactlyInAnyOrderElementsOf(requiredKeys);

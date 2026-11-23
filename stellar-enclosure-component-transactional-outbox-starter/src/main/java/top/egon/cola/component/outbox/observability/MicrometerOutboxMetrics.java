@@ -17,6 +17,20 @@ public class MicrometerOutboxMetrics implements OutboxMetrics {
     }
 
     @Override
+    public void dispatchStage(int shardSlot, String channel, String stage) {
+        registry.counter("egon.cola.outbox.dispatch",
+                "shard", Integer.toString(shardSlot), "channel", channel, "stage", stage).increment();
+    }
+
+    @Override
+    public void dispatchStageDuration(int shardSlot, String channel, String stage, Duration duration) {
+        Timer.builder("egon.cola.outbox.dispatch.duration")
+                .tags("shard", Integer.toString(shardSlot), "channel", channel, "stage", stage)
+                .register(registry)
+                .record(duration);
+    }
+
+    @Override
     public void enqueue(boolean created) {
         registry.counter(
                 "egon.cola.outbox.enqueue",

@@ -57,10 +57,14 @@ class PostgresqlOutboxQueryPlanIntegrationTest extends PostgresqlOutboxTestSuppo
                 IntStream.range(0, 1_000).forEach(index ->
                         store.enqueue(newRecord("plan-" + index))));
         physicalJdbcTemplate.update("""
-                update egon_outbox.egon_cola_outbox_message
+                with numbered as (
+                    select id, row_number() over (order by id) as position
+                    from egon_outbox.egon_cola_outbox_message
+                )
+                update egon_outbox.egon_cola_outbox_message message
                 set status = 'PROCESSING', locked_by = 'expired',
                     locked_until = clock_timestamp() - interval '1 second'
-                where id % 2 = 0
+                from numbered where message.id = numbered.id and numbered.position % 2 = 0
                 """);
         physicalJdbcTemplate.execute("analyze egon_outbox.egon_cola_outbox_message");
 
@@ -121,14 +125,66 @@ class PostgresqlOutboxQueryPlanIntegrationTest extends PostgresqlOutboxTestSuppo
         assertThat(reclaimPlan).contains("idx_outbox_reclaim");
     }
 
+    @Test
+    void safeCandidateShapesUsePartialIndexesWithBoundedReturnedRows() throws Exception {
+        OutboxStore store = outboxStore();
+        new TransactionTemplate(transactionManager).executeWithoutResult(status ->
+                IntStream.range(0, 1_200).forEach(index -> store.enqueue(newRecord("safe-plan-" + index))));
+        physicalJdbcTemplate.update("""
+                with numbered as (
+                    select id, row_number() over (order by id) as position
+                    from egon_outbox.egon_cola_outbox_message
+                )
+                update egon_outbox.egon_cola_outbox_message message
+                set status = 'PROCESSING', locked_by = 'expired',
+                    locked_until = clock_timestamp() - interval '1 second'
+                from numbered where message.id = numbered.id and numbered.position % 2 = 0
+                """);
+        physicalJdbcTemplate.execute("analyze egon_outbox.egon_cola_outbox_message");
+
+        for (int limit : List.of(1, 2, 4)) {
+            for (boolean expired : List.of(false, true)) {
+                assertCandidatePlan(limit, expired, false);
+                if (limit == 1) {
+                    assertCandidatePlan(limit, expired, true);
+                }
+            }
+        }
+    }
+
+    private void assertCandidatePlan(int limit, boolean expired, boolean mp) throws Exception {
+        String clock = mp ? "statement_timestamp()" : "clock_timestamp()";
+        String timeColumn = expired ? "locked_until" : "next_attempt_at";
+        String statuses = expired ? "status = 'PROCESSING'" : "status IN ('PENDING','RETRY_WAIT')";
+        String scope = mp ? " AND shard_slot=0 AND tenant_id=0 AND deleted_at IS NULL" : "";
+        String query = "SELECT * FROM egon_outbox.egon_cola_outbox_message WHERE channel='test'" + scope
+                + " AND " + statuses + " AND " + timeColumn + " <= " + clock
+                + " ORDER BY " + timeColumn + ", id LIMIT " + limit
+                + (mp ? " FOR UPDATE NOWAIT" : " FOR UPDATE SKIP LOCKED");
+        var result = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(explain(query, true)).get(0);
+        var plan = result.get("Plan");
+        var index = expired ? "idx_outbox_reclaim" : "idx_outbox_claim";
+        assertThat(plan.findValuesAsText("Index Name")).contains(index);
+        assertThat(plan.get("Actual Rows").asInt()).isEqualTo(limit);
+        System.out.printf("Outbox plan store=%s branch=%s limit=%d rows=%d buffers=%d executionMs=%.3f%n",
+                mp ? "MP" : "JDBC", expired ? "expired" : "due", limit, plan.get("Actual Rows").asInt(),
+                plan.get("Shared Hit Blocks").asInt() + plan.get("Shared Read Blocks").asInt(),
+                result.get("Execution Time").asDouble());
+    }
+
     private String explain(String query) throws SQLException {
+        return explain(query, false);
+    }
+
+    private String explain(String query, boolean analyze) throws SQLException {
         try (Connection connection = physicalJdbcTemplate.getDataSource().getConnection()) {
             connection.setAutoCommit(false);
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SET LOCAL enable_seqscan = off");
-                try (ResultSet result = statement.executeQuery("EXPLAIN (FORMAT JSON) " + query)) {
+                try (ResultSet result = statement.executeQuery((analyze ? "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " : "EXPLAIN (FORMAT JSON) ") + query)) {
                     String plan = result.next() ? result.getString(1) : "";
-                    connection.commit();
+                    connection.rollback();
                     return plan;
                 }
             } catch (SQLException failure) {

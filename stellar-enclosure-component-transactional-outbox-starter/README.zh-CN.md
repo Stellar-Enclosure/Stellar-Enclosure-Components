@@ -542,6 +542,50 @@ egon:
 到期时间和租约过期均以数据库时间为准。每次 claim 都使用包含节点标识和 claim UUID 的
 唯一 owner token，成功、重试、死亡状态都只允许当前 owner 以 CAS 方式更新。
 
+### 安全调度与同版本回退
+
+以下配置键使用前缀 `egon.cola.component.transactional-outbox`。
+
+| 配置键 | 默认值 | 作用 |
+| --- | --- | --- |
+| `egon.cola.component.transactional-outbox.dispatch.mode` | `LEGACY` | LOCAL 使用就绪 worker 和带租约校验的消息 ACK。COORDINATED 同时要求队列归属。 |
+| `egon.cola.component.transactional-outbox.dispatch.consumption-enabled` | `true` | 设为 false 保留入队，暂停新领取和队列续约。排空中的合法在途消息仍可 ACK。 |
+| `egon.cola.component.transactional-outbox.dispatch.max-claim-batch` | `1` | 受实际就绪 worker 数和 polling.batch-size 约束。MP 固定为 1。 |
+| `egon.cola.component.transactional-outbox.dispatch.max-concurrent-shards` | `2` | 限制并行操作的分片数，每实例每分片至多一个领取事务。 |
+| `egon.cola.component.transactional-outbox.dispatch.ack-reserve` | `1s` | 消息租约到期之前为结果写入预留的时间。 |
+| `egon.cola.component.transactional-outbox.coordination.heartbeat-interval` | `5s` | 队列归属和成员刷新基准周期。 |
+| `egon.cola.component.transactional-outbox.coordination.lease-duration` | `20s` | 队列归属租约，与消息租约独立。 |
+| `egon.cola.component.transactional-outbox.coordination.membership-ttl` | `30s` | 成员上次心跳后保持参选资格的期限。 |
+| `egon.cola.component.transactional-outbox.coordination.claim-timeout` | `2s` | 单分片短事务预算，由两个安全模式共用。 |
+| `egon.cola.component.transactional-outbox.coordination.member-retention` | `1h` | 过期成员行保留期。 |
+
+启用 `LOCAL` 或 `COORDINATED` 消费时，保持轮询开启与
+`retry.recover-exhausted=false`。投递超时加 ACK 预留应短于消息租约。
+JDBC 的 `COORDINATED` 依赖部署方安装 V2。MP 使用受管清单，队列成员表
+`egon_cola_outbox_queue_member` 和归属表 `egon_cola_outbox_queue_lease`
+沿用消息表的 slot、actual data nodes、主从组以及 tenant ignore 配置。
+放开消费前逐组核对主库历史与各副本回放。
+
+同制品从 `COORDINATED` 切回 `LOCAL` 的顺序如下。
+
+1. 在共享存储域统一暂停新领取，停止并排空协调消费者。仅生产实例以消费关闭
+   方式继续入队。记录积压、在途任务和剩余租约。
+2. 确认旧消费者停止领取。等待合法在途 ACK 完成，未完成任务交给消息租约自然
+   到期。保留消息 ID、任务状态、队列 epoch 和受管版史。
+3. 使用同制品启动少量 `LOCAL` 消费者，消费打开且领取上限为 1。逐分片核对
+   投递、生产写入、队列 epoch 和受管版史再逐步扩容。任一核对失败可再次暂停
+   消费。旧制品可能因新增 MP 版史拒绝启动。
+
+`egon.cola.outbox.dispatch` 和 `egon.cola.outbox.dispatch.duration` 按分片、
+channel、阶段聚合。对照 `claim_committed`、`handoff`、`handler_started`、
+`ack_confirmed`。已有 delivery 指标记录 handler 返回，`indeterminate`
+表示数据库 ACK 仍未确定。
+
+上线前执行下文的真实拓扑验证，并在目标环境测量连接池借用、语句／锁等待和提交
+预算。在相同负载下对比每次成功投递的 SQL 工作量、业务事务 p95/p99、WAL 和副本
+延迟。以目标环境数据决定是否扩大批量，期间保留上限 1。回放暂停仅用于指定隔离
+测试副本。
+
 ## HTTP 投递
 
 HTTP 默认关闭。消息只保存逻辑 destination，不允许 outbox 记录携带任意 URL：
@@ -726,7 +770,16 @@ Docker 或数据库启动失败会使任务失败，不会静默跳过。
 `EGON_OUTBOX_PG_MULTISHARD_IT=true`、共享的 `EGON_OUTBOX_PG_USER` / `EGON_OUTBOX_PG_PASSWORD`，以及
 `EGON_OUTBOX_PG_SHARD_0_PRIMARY_URL`、`EGON_OUTBOX_PG_SHARD_0_REPLICA_URL`、
 `EGON_OUTBOX_PG_SHARD_1_PRIMARY_URL`、`EGON_OUTBOX_PG_SHARD_1_REPLICA_URL`。测试在两套主库创建并清理
-`egon_outbox` schema 和专用业务表；任一 schema 已存在时不会覆盖它。
+`egon_outbox` schema 和专用业务表；任一 schema 已存在时不会覆盖它。两项主从测试都需要
+专用副本进程，以及能执行 `pg_wal_replay_pause()` 和 `pg_wal_replay_resume()` 的账号。
+多分片测试启动两个协调消费者，再使用同一版本切回 `LOCAL`。串行运行两项测试并核对跳过数。
+
+```bash
+./mvnw -B -ntp -pl :stellar-enclosure-component-transactional-outbox-starter -am \
+  '-Dtest=**/component/outbox/**/*Test' -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dit.test=OutboxPostgresqlMultishardIntegrationTest,OutboxPostgresqlReadwriteIntegrationTest \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
+```
 
 ## 明确的支持边界
 

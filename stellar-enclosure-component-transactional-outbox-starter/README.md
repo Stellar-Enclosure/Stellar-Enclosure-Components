@@ -642,6 +642,60 @@ Database time determines due rows and lease expiry. Every claim uses a unique
 owner token containing the node identity and claim UUID; completion, retry, and
 dead-letter transitions are compare-and-set operations for that owner.
 
+### Safe dispatch and same-version rollback
+
+All keys below use the prefix
+`egon.cola.component.transactional-outbox`.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `egon.cola.component.transactional-outbox.dispatch.mode` | `LEGACY` | LOCAL uses ready workers and fenced message ACKs. COORDINATED also requires a queue owner. |
+| `egon.cola.component.transactional-outbox.dispatch.consumption-enabled` | `true` | False keeps producer writes and blocks new claim and renewal. In-flight handlers can complete their ACKs during drain. |
+| `egon.cola.component.transactional-outbox.dispatch.max-claim-batch` | `1` | Bounded by ready workers and polling.batch-size. MP requires 1. |
+| `egon.cola.component.transactional-outbox.dispatch.max-concurrent-shards` | `2` | Bounds concurrent shard I/O, with at most one local claim per shard. |
+| `egon.cola.component.transactional-outbox.dispatch.ack-reserve` | `1s` | Time reserved for the result write before the message lease expires. |
+| `egon.cola.component.transactional-outbox.coordination.heartbeat-interval` | `5s` | Base period for ownership and membership refresh. |
+| `egon.cola.component.transactional-outbox.coordination.lease-duration` | `20s` | Queue lease independent of the message lease. |
+| `egon.cola.component.transactional-outbox.coordination.membership-ttl` | `30s` | How long a member remains eligible without a heartbeat. |
+| `egon.cola.component.transactional-outbox.coordination.claim-timeout` | `2s` | Per-shard short transaction budget, shared by both safe modes. |
+| `egon.cola.component.transactional-outbox.coordination.member-retention` | `1h` | Retention for expired membership rows. |
+
+To enable active `LOCAL` or `COORDINATED`, keep polling enabled and
+`retry.recover-exhausted=false`. Keep the delivery deadline plus ACK reserve
+below the message lease. JDBC requires an operator-installed V2 for
+`COORDINATED`. MP uses the versioned managed manifest. Apply the new
+`egon_cola_outbox_queue_member` and `egon_cola_outbox_queue_lease` table rules
+with the same slot map, actual data nodes and primary/readwrite groups as the
+message table. The MP coordination tables also need the same tenant ignore
+configuration as the message table. Verify history and replay on every primary
+and replica before activation.
+
+To roll back `COORDINATED` to `LOCAL` with the same artifact:
+
+1. Pause new claims across the entire shared storage domain and stop or drain
+   the coordinated consumers. Keep producers running in consumption-disabled
+   instances. Capture backlog, in-flight claims and remaining leases.
+2. Check that the old consumers stopped claiming. Let valid in-flight ACKs
+   complete or leave unfinished rows until their message leases expire. Keep
+   message IDs, states, queue epochs and managed history intact.
+3. Start a small number of consumers from the same artifact with mode `LOCAL`,
+   consumption enabled and claim batch 1. Verify delivery on every shard,
+   continued operation of producers and unchanged history and queue epochs.
+   Scale once each shard passes. Use the consumption switch to pause again if a
+   check fails. Old artifacts can reject the new MP history.
+
+The `egon.cola.outbox.dispatch` counter and `egon.cola.outbox.dispatch.duration`
+timer use shard, channel and stage tags. Compare `claim_committed`, `handoff`,
+`handler_started` and `ack_confirmed`. The existing delivery result reports the
+handler outcome. The `indeterminate` stage indicates unresolved database ACK.
+
+Run the real topology scenarios in the PostgreSQL section before promotion.
+For a production activation gate, measure bounded pool acquisition, lock and
+statement waits, and commit on the target driver and topology. Measure per
+successful message SQL work, business transaction p95/p99, WAL and replica lag
+with the same workload in both modes. Keep batch 1 until target measurements
+support a change. Only the designated fixture should use WAL replay pause.
+
 ## HTTP Delivery
 
 HTTP is off by default. Messages use a logical destination, never an arbitrary
@@ -847,7 +901,18 @@ empty primary/replica databases, set `EGON_OUTBOX_PG_MULTISHARD_IT=true`, shared
 `EGON_OUTBOX_PG_SHARD_0_PRIMARY_URL`, `EGON_OUTBOX_PG_SHARD_0_REPLICA_URL`,
 `EGON_OUTBOX_PG_SHARD_1_PRIMARY_URL`, and `EGON_OUTBOX_PG_SHARD_1_REPLICA_URL`.
 The test creates and removes the `egon_outbox` schema and dedicated business
-tables on both primaries; existing schemas are never overwritten.
+tables on both primaries; existing schemas are never overwritten. Use dedicated
+replica processes and a role that can run `pg_wal_replay_pause()` and
+`pg_wal_replay_resume()` for both opt-in replication tests. The multishard test
+starts two coordinated consumers and then restarts the same version in
+`LOCAL`. Run the replication tests serially and check their reported skip count.
+
+```bash
+./mvnw -B -ntp -pl :stellar-enclosure-component-transactional-outbox-starter -am \
+  '-Dtest=**/component/outbox/**/*Test' -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dit.test=OutboxPostgresqlMultishardIntegrationTest,OutboxPostgresqlReadwriteIntegrationTest \
+  -Dfailsafe.failIfNoSpecifiedTests=false verify
+```
 
 ## Explicit Scope
 
