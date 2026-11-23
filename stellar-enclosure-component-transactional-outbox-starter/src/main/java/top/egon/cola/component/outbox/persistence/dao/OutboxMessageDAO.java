@@ -156,10 +156,10 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
         throw new UnsupportedOperationException("OUTBOX_RESTORE_UNSUPPORTED");
     }
 
-    List<OutboxMessagePO> selectSafeDue(@Param("channel") @NotBlank String channel,
+    List<OutboxMessagePO> selectSafeDue(@Param("channel") @NotBlank @Size(max = 64) String channel,
                                        @Param("limit") @Min(1) @Max(10_000) int limit);
 
-    List<OutboxMessagePO> selectSafeExpired(@Param("channel") @NotBlank String channel,
+    List<OutboxMessagePO> selectSafeExpired(@Param("channel") @NotBlank @Size(max = 64) String channel,
                                            @Param("limit") @Min(1) @Max(10_000) int limit);
 
     OutboxMessagePO selectSafeRow(@Param("id") @Positive long id);

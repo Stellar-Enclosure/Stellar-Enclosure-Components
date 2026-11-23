@@ -1,5 +1,10 @@
 package top.egon.cola.component.outbox.persistence.dao;
 
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.springframework.validation.annotation.Validated;
@@ -14,22 +19,22 @@ import java.util.List;
         technicalTable = "egon_outbox.egon_cola_outbox_queue_lease")
 public interface OutboxQueueLeaseDAO {
 
-    OutboxQueueLeasePO lockQueue(@Param("slot") int slot, @Param("channel") String channel);
+    OutboxQueueLeasePO lockQueue(@Param("slot") @PositiveOrZero int slot, @Param("channel") @NotBlank @Size(max = 64) String channel);
 
-    Boolean current(@Param("slot") int slot, @Param("channel") String channel,
-                    @Param("instance") String instance, @Param("epoch") long epoch);
+    Boolean current(@Param("slot") @PositiveOrZero int slot, @Param("channel") @NotBlank @Size(max = 64) String channel,
+                    @Param("instance") @NotBlank @Size(max = 128) String instance, @Param("epoch") @Positive long epoch);
 
-    List<OutboxQueueLeasePO> active(@Param("slot") int slot, @Param("limit") int limit);
+    List<OutboxQueueLeasePO> active(@Param("slot") @PositiveOrZero int slot, @Param("limit") @Positive @Max(4097) int limit);
 
-    int acquireExpired(@Param("slot") int slot, @Param("channel") String channel,
-                       @Param("instance") String instance, @Param("leaseMillis") long leaseMillis);
+    int acquireExpired(@Param("slot") @PositiveOrZero int slot, @Param("channel") @NotBlank @Size(max = 64) String channel,
+                       @Param("instance") @NotBlank @Size(max = 128) String instance, @Param("leaseMillis") @Positive long leaseMillis);
 
-    int register(@Param("slot") int slot, @Param("id") long id, @Param("channel") String channel,
-                 @Param("instance") String instance, @Param("leaseMillis") long leaseMillis);
+    int register(@Param("slot") @PositiveOrZero int slot, @Param("id") @Positive long id, @Param("channel") @NotBlank @Size(max = 64) String channel,
+                 @Param("instance") @NotBlank @Size(max = 128) String instance, @Param("leaseMillis") @Positive long leaseMillis);
 
-    int renew(@Param("slot") int slot, @Param("channel") String channel, @Param("instance") String instance,
-              @Param("epoch") long epoch, @Param("leaseMillis") long leaseMillis);
+    int renew(@Param("slot") @PositiveOrZero int slot, @Param("channel") @NotBlank @Size(max = 64) String channel, @Param("instance") @NotBlank @Size(max = 128) String instance,
+              @Param("epoch") @Positive long epoch, @Param("leaseMillis") @Positive long leaseMillis);
 
-    int release(@Param("slot") int slot, @Param("channel") String channel,
-                @Param("instance") String instance, @Param("epoch") long epoch);
+    int release(@Param("slot") @PositiveOrZero int slot, @Param("channel") @NotBlank @Size(max = 64) String channel,
+                @Param("instance") @NotBlank @Size(max = 128) String instance, @Param("epoch") @Positive long epoch);
 }
