@@ -18,6 +18,8 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.validation.annotation.Validated;
+import top.egon.cola.component.common.core.enums.ResultCode;
+import top.egon.cola.component.common.core.exception.CommonException;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.common.mybatis.business.EgonColaTenantIdProvider;
 import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationGroups.Query;
@@ -185,10 +187,13 @@ public class OperationLogRepository {
         }
     }
 
-    public static final class PermanentRejectionException extends IllegalStateException {
+    public static final class PermanentRejectionException extends CommonException {
+
+        @java.io.Serial
+        private static final long serialVersionUID = 1L;
 
         public PermanentRejectionException(String code) {
-            super(code);
+            super(ResultCode.VALIDATION_ERROR.getCode(), code, code);
         }
     }
 

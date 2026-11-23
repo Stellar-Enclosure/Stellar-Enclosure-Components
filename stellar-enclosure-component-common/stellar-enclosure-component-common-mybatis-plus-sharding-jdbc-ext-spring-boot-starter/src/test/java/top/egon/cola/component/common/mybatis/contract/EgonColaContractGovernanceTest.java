@@ -11,6 +11,10 @@ import top.egon.cola.component.common.mybatis.ddl.EgonColaDdlTargetBO;
 import top.egon.cola.component.common.mybatis.exception.EgonColaMybatisPlusConfigurationException;
 import top.egon.cola.component.common.mybatis.extension.EgonColaRepository;
 import top.egon.cola.component.common.mybatis.model.EgonColaModelValidationGroups;
+import top.egon.cola.component.common.mybatis.operationlog.OperationLogOutcomeEnum;
+import top.egon.cola.component.common.mybatis.operationlog.OperationLogPhaseEnum;
+import top.egon.cola.component.common.mybatis.operationlog.OperationLogRepository.PermanentRejectionException;
+import top.egon.cola.component.common.mybatis.operationlog.OperationLogWriteModeEnum;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRouteQuery;
 import top.egon.cola.component.common.mybatis.routing.EgonColaRoutingProfileBO;
 import top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties;
@@ -37,7 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * 修复合同：本模块的十个手写 enum 必须落在 {@link EgonEnum} 上，配置异常必须以
+ * 修复合同：本模块的手写 enum 必须落在 {@link EgonEnum} 上，配置异常必须以
  * {@link CommonException} 为公共根（REQ-003、REQ-004）。
  *
  * <p>线值、{@code @ConfigurationProperties} 绑定名与既有失败码文本必须由原回归继续证明保持。</p>
@@ -60,7 +64,10 @@ class EgonColaContractGovernanceTest {
             EgonColaShardingProperties.DataSourceRoleEnum.class,
             EgonColaModelValidationGroups.Operation.class,
             top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties.LifecycleScopeEnum.class,
-            BatchOperation.TYPE);
+            BatchOperation.TYPE,
+            OperationLogPhaseEnum.class,
+            OperationLogOutcomeEnum.class,
+            OperationLogWriteModeEnum.class);
 
     private static final Map<Class<?>, List<String>> DECLARATION_ORDER = ordered(
             entry(EgonColaDdlResult.StatusEnum.class, "APPLIED", "SKIPPED"),
@@ -74,8 +81,12 @@ class EgonColaContractGovernanceTest {
             entry(EgonColaModelValidationGroups.Operation.class,
                     "INSERT", "UPDATE", "DELETE", "QUERY", "LOADED", "RESTORE"),
             entry(top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties.LifecycleScopeEnum.class,
-                    "ID", "PARENT", "PAGE", "COUNT", "ALL_PARENT", "MONOTONE_DELETE", "RESTORE", "PURGE_ID", "PURGE_PARENT"),
-            entry(BatchOperation.TYPE, "INSERT", "UPDATE", "UPSERT"));
+                    "ID", "PARENT", "PAGE", "COUNT", "ALL_PARENT", "MONOTONE_DELETE", "RESTORE", "PURGE_ID", "PURGE_PARENT", "ID_BATCH"),
+            entry(BatchOperation.TYPE, "INSERT", "UPDATE", "UPSERT"),
+            entry(OperationLogPhaseEnum.class, "COMMAND", "EXECUTION"),
+            entry(OperationLogOutcomeEnum.class, "ACCEPTED", "SUCCEEDED", "FAILED", "PARTIAL_SUCCESS",
+                    "UNKNOWN", "REJECTED", "ROLLED_BACK"),
+            entry(OperationLogWriteModeEnum.class, "SOURCE_LOCAL", "OUTBOX"));
 
     private static final Pattern PACKAGE = Pattern.compile("^package\\s+([\\w.]+)\\s*;");
 
@@ -95,7 +106,7 @@ class EgonColaContractGovernanceTest {
     void everyHandwrittenEnumJoinsTheCommonEnumContract() throws Exception {
         List<String> headers = enumHeaders();
 
-        assertThat(headers).as("本模块手写 enum 精确十个").hasSize(10);
+        assertThat(headers).as("模块的全部手写枚举均纳入治理").hasSize(GOVERNED_ENUMS.size());
         assertThat(headers).as("REQ-004 手写 enum 必须实现 EgonEnum")
                 .allSatisfy(header -> assertThat(header).contains(EgonEnum.class.getSimpleName()));
         assertThat(enumConstantsWithoutExplicitCode())
@@ -124,11 +135,17 @@ class EgonColaContractGovernanceTest {
                         .as("%s.%s 的 message 使用原常量名", type.getSimpleName(), constant)
                         .isEqualTo(((Enum<?>) constant).name());
             }
-            assertThat(Arrays.stream(type.getDeclaredFields())
-                            .filter(field -> field.isAnnotationPresent(EnumValue.class)
-                                    || field.isAnnotationPresent(JsonValue.class)))
-                    .as("REQ-004 不得为枚举新增 @EnumValue/@JsonValue 改协议")
-                    .isEmpty();
+            List<String> jsonFields = Arrays.stream(type.getDeclaredFields())
+                    .filter(field -> field.isAnnotationPresent(JsonValue.class)).map(Field::getName).toList();
+            List<String> persistenceFields = Arrays.stream(type.getDeclaredFields())
+                    .filter(field -> field.isAnnotationPresent(EnumValue.class)).map(Field::getName).toList();
+            if (type == OperationLogPhaseEnum.class || type == OperationLogOutcomeEnum.class) {
+                assertThat(persistenceFields).as("审计事实持久化值沿用稳定字符串").containsExactly("message");
+                assertThat(jsonFields).as("审计事实 JSON 值沿用稳定字符串").containsExactly("message");
+            } else {
+                assertThat(persistenceFields).as("其余枚举保留现有持久化协议").isEmpty();
+                assertThat(jsonFields).as("其余枚举保留现有 JSON 协议").isEmpty();
+            }
         }
     }
 
@@ -162,8 +179,13 @@ class EgonColaContractGovernanceTest {
     void theConfigurationExceptionIsRootedOnCommonExceptionAndKeepsItsStableCode() throws Exception {
         Map<String, String> declared = declaredExceptions();
 
-        assertThat(declared.keySet()).as("本模块只有一个自定义异常").containsExactly(
-                EgonColaMybatisPlusConfigurationException.class.getSimpleName());
+        assertThat(declared.keySet()).as("组件自定义异常清单").containsExactly(
+                EgonColaMybatisPlusConfigurationException.class.getSimpleName(),
+                PermanentRejectionException.class.getSimpleName());
+        var rejection = new PermanentRejectionException("OPERATION_LOG_RECEIPT_CONFLICT");
+        assertThat(rejection.getClass().getSuperclass()).isEqualTo(CommonException.class);
+        assertThat(rejection.getStatus()).isEqualTo("OPERATION_LOG_RECEIPT_CONFLICT");
+        assertThat(rejection.isRetryable()).isFalse();
         assertThat(declared.get(EgonColaMybatisPlusConfigurationException.class.getSimpleName()))
                 .as("REQ-002 异常保持在所属 exception 包").isEqualTo(EXCEPTION_PACKAGE);
         assertThat(CommonException.class.isAssignableFrom(EgonColaMybatisPlusConfigurationException.class))
