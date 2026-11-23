@@ -38,6 +38,9 @@ import top.egon.cola.component.outbox.persistence.repository.OutboxMessageReposi
 import top.egon.cola.component.outbox.persistence.OutboxTechnicalContextExecutor;
 import top.egon.cola.component.outbox.store.MybatisPlusOutboxStore;
 import top.egon.cola.component.outbox.store.OutboxStore;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
+import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
+import top.egon.cola.component.outbox.dispatch.OutboxQueueCoordinator;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 
 import javax.sql.DataSource;
@@ -109,9 +112,76 @@ class OutboxMybatisPlusAutoConfigurationTest {
                     .hasStatement("top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO.insertMessage", false))
                     .isTrue();
             assertThat(context.getBean(OutboxStateMachineProperties.class).getBusiness().isEnabled()).isFalse();
+            assertThat(context.getBean(TransactionalOutboxProperties.class).getDispatch().getMode())
+                    .isEqualTo(DispatchMode.LEGACY);
+            assertThat(context).doesNotHaveBean(OutboxQueueCoordinator.class);
             assertThatThrownBy(() -> context.getBean(DeliveryHandlerRegistry.class).required("statemachine"))
                     .hasMessageContaining("No transactional outbox handler");
         });
+    }
+
+    @Test
+    void coordinated_mp_consumer_rejects_message_only_tenant_exclusions_without_falling_back() {
+        contextRunner.withPropertyValues(
+                "egon.cola.component.transactional-outbox.dispatch.mode=COORDINATED",
+                "egon.cola.component.transactional-outbox.storage.validate-schema=true",
+                "test.outbox.coordination-routing=true",
+                "egon.cola.component.transactional-outbox.polling.enabled=true",
+                "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    Throwable cause = context.getStartupFailure();
+                    while (cause.getCause() != null) cause = cause.getCause();
+                    assertThat(cause).isInstanceOf(OutboxConfigurationException.class)
+                            .hasMessageContaining("OUTBOX_TENANT_TABLE_IGNORE_REQUIRED");
+                });
+    }
+
+    @Test
+    void safe_mp_consumer_modes_reject_missing_queue_routes_even_when_all_tenant_exclusions_are_present() {
+        for (String mode : List.of("LOCAL", "COORDINATED")) {
+            contextRunner.withPropertyValues(
+                    "egon.cola.component.transactional-outbox.dispatch.mode=" + mode,
+                    "egon.cola.component.transactional-outbox.storage.validate-schema=true",
+                    "egon.cola.component.transactional-outbox.polling.enabled=true",
+                    "egon.cola.component.transactional-outbox.cleanup.enabled=false",
+                    "egon.cola.component.mybatis-plus.tenant-id.ignored-tables[1]=egon_cola_outbox_queue_member",
+                    "egon.cola.component.mybatis-plus.tenant-id.ignored-tables[2]=egon_cola_outbox_queue_lease")
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        Throwable cause = context.getStartupFailure();
+                        while (cause.getCause() != null) cause = cause.getCause();
+                        assertThat(cause).isInstanceOf(OutboxConfigurationException.class)
+                                .hasMessageContaining("OUTBOX_QUEUE_TOPOLOGY_MISMATCH");
+                    });
+        }
+    }
+
+    @Test
+    void safe_mp_consumer_modes_cannot_disable_required_schema_validation() {
+        for (String mode : List.of("LOCAL", "COORDINATED")) {
+            contextRunner.withPropertyValues(
+                    "egon.cola.component.transactional-outbox.dispatch.mode=" + mode,
+                    "egon.cola.component.transactional-outbox.polling.enabled=true",
+                    "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        assertThat(context.getStartupFailure()).hasStackTraceContaining(
+                                "OUTBOX_MP_SAFE_DISPATCH_REQUIRES_SCHEMA_AND_SINGLE_CLAIM");
+                    });
+        }
+    }
+
+    @Test
+    void legacy_mp_pause_is_wired_to_the_built_in_store_without_requiring_queue_profiles() {
+        contextRunner.withPropertyValues("egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed().hasSingleBean(MybatisPlusOutboxStore.class);
+                    assertThatThrownBy(() -> context.getBean(OutboxStore.class)
+                            .claimDue(1, "paused", java.time.Duration.ofMinutes(1)))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessage("OUTBOX_LEGACY_CLAIM_DISABLED");
+                });
     }
 
     @Test
@@ -260,21 +330,28 @@ class OutboxMybatisPlusAutoConfigurationTest {
         @Bean("egonColaRoutingProfiles")
         Map<String, EgonColaRoutingProfileBO> routingProfiles(
                 @Qualifier("egon.cola.component.mybatis-plus.sharding-top.egon.cola.component.common.mybatis.sharding.EgonColaShardingProperties")
-                EgonColaShardingProperties properties) {
+                EgonColaShardingProperties properties,
+                @org.springframework.beans.factory.annotation.Value("${test.outbox.coordination-routing:false}") boolean coordinationRouting) {
             List<String> groups = properties.getDataSources().stream()
                     .filter(source -> source.role() == EgonColaShardingProperties.DataSourceRoleEnum.PRIMARY)
                     .map(EgonColaShardingProperties.PhysicalDataSourceProperties::logicalName).toList();
-            if (properties.getMode() == EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE && groups.size() > 1) {
-                var table = new EgonColaShardingProperties.TableProperties("TECHNICAL_GROUP", groups.getFirst(),
-                        "shard_slot", null, null, "egon_outbox", groups);
-                return Map.of("egon_cola_outbox_message", new top.egon.cola.component.common.mybatis.sharding.strategy
-                        .EgonColaTechnicalGroupShardingStrategy().toRoutingProfile("egon_cola_outbox_message", table, properties.getDataSources()));
+            Map<String, EgonColaRoutingProfileBO> profiles = new java.util.LinkedHashMap<>();
+            List<String> tables = coordinationRouting ? List.of("egon_cola_outbox_message",
+                    "egon_cola_outbox_queue_member", "egon_cola_outbox_queue_lease") : List.of("egon_cola_outbox_message");
+            for (String logicalTable : tables) {
+                if (properties.getMode() == EgonColaShardingProperties.ModeEnum.SHARDING_READWRITE && groups.size() > 1) {
+                    var table = new EgonColaShardingProperties.TableProperties("TECHNICAL_GROUP", groups.getFirst(),
+                            "shard_slot", null, null, "egon_outbox", groups);
+                    profiles.put(logicalTable, new top.egon.cola.component.common.mybatis.sharding.strategy
+                            .EgonColaTechnicalGroupShardingStrategy().toRoutingProfile(logicalTable, table, properties.getDataSources()));
+                } else {
+                    var node = new top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO(
+                            "primary_a", "egon_outbox", logicalTable);
+                    profiles.put(logicalTable, top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyNodes.simple(
+                            logicalTable, EgonColaRoutingProfileBO.TableKindEnum.SINGLE, List.of(node)));
+                }
             }
-            var node = new top.egon.cola.component.common.mybatis.routing.EgonColaPhysicalTargetBO(
-                    "primary_a", "egon_outbox", "egon_cola_outbox_message");
-            return Map.of("egon_cola_outbox_message",
-                    top.egon.cola.component.common.mybatis.sharding.strategy.EgonColaShardingStrategyNodes.simple(
-                            "egon_cola_outbox_message", EgonColaRoutingProfileBO.TableKindEnum.SINGLE, List.of(node)));
+            return Map.copyOf(profiles);
         }
 
         @Bean("egonColaWriteTargetResolver")

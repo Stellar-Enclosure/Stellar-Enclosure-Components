@@ -36,6 +36,11 @@ import top.egon.cola.component.outbox.persistence.converter.OutboxHeadersConvert
 import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverter;
 import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverterImpl;
 import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueLeaseConverterImpl;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueMemberConverterImpl;
+import top.egon.cola.component.outbox.retry.OutboxRetryPolicy;
 import top.egon.cola.component.outbox.persistence.repository.OutboxMessageRepository;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.store.MybatisPlusOutboxStore;
@@ -190,6 +195,10 @@ public class OutboxMybatisPlusAutoConfiguration {
             @Qualifier("outboxMpStorageProperties") OutboxMpStorageProperties storageProperties,
             @Qualifier("egonColaRoutingProfiles") Map<String, EgonColaRoutingProfileBO> profiles,
             ObjectProvider<TransactionalOutboxProperties> outboxPropertiesProvider,
+            @Qualifier("outboxStateMachineObjectMapper") ObjectProvider<ObjectMapper> objectMapper,
+            @Qualifier("outboxRetryPolicy") ObjectProvider<OutboxRetryPolicy> retryPolicy,
+            ObjectProvider<OutboxQueueMemberDAO> members,
+            ObjectProvider<OutboxQueueLeaseDAO> leases,
             ConfigurableListableBeanFactory beanFactory
     ) {
         validateStoreInfrastructure(infrastructure, mybatisProperties, shardingProperties,
@@ -198,10 +207,31 @@ public class OutboxMybatisPlusAutoConfiguration {
         int maxClaimContentionRetries = outboxProperties == null
                 ? 8
                 : outboxProperties.getPolling().getMaxClaimContentionRetries();
-        return new MybatisPlusOutboxStore(repository, converter, technicalContext, lifecycle,
+        var store = new MybatisPlusOutboxStore(repository, converter, technicalContext, lifecycle,
                 workerTransaction, metadataValidator, clock, storageProperties,
                 new OutboxShardRouting(infrastructure.dataSource(), shardingProperties, profiles),
                 maxClaimContentionRetries);
+        if (outboxProperties != null) {
+            store.configureConsumption(outboxProperties);
+            var dispatch = outboxProperties.getDispatch();
+            if (dispatch.getMode() != TransactionalOutboxProperties.DispatchMode.LEGACY && dispatch.isConsumptionEnabled()) {
+                if (dispatch.getMaxClaimBatch() != 1 || !outboxProperties.getStorage().isValidateSchema()) {
+                    throw new OutboxConfigurationException("OUTBOX_MP_SAFE_DISPATCH_REQUIRES_SCHEMA_AND_SINGLE_CLAIM");
+                }
+                OutboxShardRouting.requireQueueProfiles(profiles);
+                if (dispatch.getMode() == TransactionalOutboxProperties.DispatchMode.COORDINATED) {
+                    for (String table : List.of(OutboxShardRouting.QUEUE_MEMBER_TABLE, OutboxShardRouting.QUEUE_LEASE_TABLE)) {
+                        if (!mybatisProperties.getTenantId().ignores(table)) {
+                            throw new OutboxConfigurationException("OUTBOX_TENANT_TABLE_IGNORE_REQUIRED: " + table);
+                        }
+                    }
+                }
+                store.configureSafeDispatch(outboxProperties, objectMapper.getObject(), retryPolicy.getObject(),
+                        members.getObject(), leases.getObject(),
+                        new OutboxQueueMemberConverterImpl(), new OutboxQueueLeaseConverterImpl());
+            }
+        }
+        return store;
     }
 
     @Bean("outboxLegacyMigrationService")

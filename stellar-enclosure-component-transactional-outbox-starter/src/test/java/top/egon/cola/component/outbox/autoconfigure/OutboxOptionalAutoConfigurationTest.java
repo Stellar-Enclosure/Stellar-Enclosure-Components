@@ -12,6 +12,10 @@ import top.egon.cola.component.outbox.delivery.http.HttpDeliveryHandler;
 import top.egon.cola.component.outbox.delivery.rabbitmq.RabbitDeliveryHandler;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 import top.egon.cola.component.outbox.store.OutboxStore;
+import top.egon.cola.component.outbox.api.TransactionalOutbox;
+import top.egon.cola.component.outbox.delivery.DeliveryHandlerRegistry;
+import top.egon.cola.component.outbox.dispatch.OutboxQueueCoordinator;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
 
 import javax.sql.DataSource;
 import java.time.Clock;
@@ -59,6 +63,21 @@ class OutboxOptionalAutoConfigurationTest {
                         "egon.cola.component.transactional-outbox.http.destinations.orders.uri=http://localhost/callback"
                 )
                 .run(context -> assertThat(context).hasSingleBean(HttpDeliveryHandler.class));
+    }
+
+    @Test
+    void legacy_optional_http_handler_and_producer_remain_available_while_consumption_is_paused() {
+        contextRunner.withPropertyValues(
+                "egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false",
+                "egon.cola.component.transactional-outbox.http.enabled=true",
+                "egon.cola.component.transactional-outbox.http.destinations.orders.uri=http://localhost/callback")
+                .run(context -> {
+                    assertThat(context).hasNotFailed().hasSingleBean(HttpDeliveryHandler.class)
+                            .hasSingleBean(TransactionalOutbox.class).doesNotHaveBean(OutboxQueueCoordinator.class);
+                    assertThat(context.getBean(TransactionalOutboxProperties.class).getDispatch().getMode())
+                            .isEqualTo(DispatchMode.LEGACY);
+                    assertThat(context.getBean(DeliveryHandlerRegistry.class).channels()).contains("http");
+                });
     }
 
     @Test

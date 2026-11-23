@@ -12,6 +12,8 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.outbox.common.exception.OutboxTransactionMismatchException;
+import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
 import top.egon.cola.component.outbox.persistence.converter.OutboxHeadersConverter;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.store.JdbcOutboxStore;
@@ -20,6 +22,7 @@ import top.egon.cola.component.outbox.transaction.OutboxTransactionGuard;
 import top.egon.cola.component.outbox.validation.OutboxMessageValidator;
 
 import javax.sql.DataSource;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -56,7 +59,11 @@ class OutboxJdbcAutoConfigurationTest {
     @Test
     void invalid_schema_and_disabled_component_fail_safely() {
         runner.withPropertyValues("egon.cola.component.transactional-outbox.storage.jdbc.schema=unsafe-name")
-                .run(context -> assertThat(context).hasFailed());
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining(
+                            "Invalid transactional outbox configuration: storage.jdbc.schema");
+                });
         runner.withPropertyValues("egon.cola.component.transactional-outbox.enabled=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -73,5 +80,41 @@ class OutboxJdbcAutoConfigurationTest {
                 mock(OutboxLifecycleService.class), mock(OutboxHeadersConverter.class),
                 mock(OutboxMessageValidator.class), mock(ValidationUtils.class));
         assertThrows(OutboxTransactionMismatchException.class, store::countBacklog);
+    }
+
+    @Test
+    void jdbc_configuration_injects_the_new_store_dependencies_without_enabling_a_new_mode_by_default() {
+        runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            OutboxStore store = context.getBean(OutboxStore.class);
+            assertThat(store.supportsDispatchMode(DispatchMode.LEGACY)).isTrue();
+            assertThat(store.supportsDispatchMode(DispatchMode.LOCAL)).isTrue();
+            assertThat(store.supportsDispatchMode(DispatchMode.COORDINATED)).isTrue();
+            assertThat(context.getBean(TransactionalOutboxProperties.class).getDispatch().getMode())
+                    .isEqualTo(DispatchMode.LEGACY);
+        });
+    }
+
+    @Test
+    void jdbc_consumption_pause_is_enforced_by_the_actual_store_before_a_connection_is_needed() {
+        runner.withPropertyValues("egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    OutboxConfigurationException failure = assertThrows(OutboxConfigurationException.class,
+                            () -> context.getBean(OutboxStore.class).claimDue(1, "paused", Duration.ofMinutes(1)));
+                    assertThat(failure).hasMessageContaining("OUTBOX_CONSUMPTION_DISABLED");
+                });
+    }
+
+    @Test
+    void coordinated_jdbc_startup_cannot_disable_required_schema_validation() {
+        runner.withPropertyValues(
+                "egon.cola.component.transactional-outbox.dispatch.mode=COORDINATED",
+                "egon.cola.component.transactional-outbox.polling.enabled=true",
+                "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining("JDBC outbox schema");
+                });
     }
 }

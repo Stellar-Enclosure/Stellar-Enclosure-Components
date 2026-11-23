@@ -15,6 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import top.egon.cola.component.common.core.validation.ValidationUtils;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 import top.egon.cola.component.outbox.persistence.converter.OutboxHeadersConverter;
+import top.egon.cola.component.outbox.retry.OutboxRetryPolicy;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.store.JdbcOutboxStore;
 import top.egon.cola.component.outbox.store.OutboxStore;
@@ -42,7 +43,8 @@ public class OutboxJdbcAutoConfiguration {
                             OutboxTransactionGuard guard, OutboxLifecycleService lifecycle,
                             OutboxMessageValidator validator, ObjectProvider<ObjectMapper> mappers,
                             @Qualifier("egonColaValidationUtils") ValidationUtils validationUtils,
-                            ConfigurableListableBeanFactory beanFactory) {
+                            ConfigurableListableBeanFactory beanFactory,
+                            @Qualifier("outboxRetryPolicy") OutboxRetryPolicy retryPolicy) {
         if (!OutboxInfrastructureResolver.supportsSelectedLocalTransaction(infrastructure.transactionManager(),
                 infrastructure.dataSource(), beanFactory.getBeanClassLoader())) {
             throw new OutboxConfigurationException("OUTBOX_DATASOURCE_TRANSACTION_MANAGER_REQUIRED");
@@ -51,7 +53,14 @@ public class OutboxJdbcAutoConfiguration {
         if (mapper == null) throw new OutboxConfigurationException("Transactional outbox requires exactly one ObjectMapper bean");
         TransactionTemplate worker = new TransactionTemplate(infrastructure.transactionManager());
         worker.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
-        return new JdbcOutboxStore(infrastructure.dataSource(), properties.getStorage().getJdbc().getSchema(),
-                worker, guard, lifecycle, new OutboxHeadersConverter(mapper, validator), validator, validationUtils);
+        var store = new JdbcOutboxStore(infrastructure.dataSource(), properties.getStorage().getJdbc().getSchema(),
+                worker, guard, lifecycle, new OutboxHeadersConverter(mapper, validator), validator, validationUtils,
+                properties, mapper, retryPolicy);
+        var dispatch = properties.getDispatch();
+        if (dispatch.getMode() != TransactionalOutboxProperties.DispatchMode.LEGACY
+                && dispatch.isConsumptionEnabled() && !properties.getStorage().isValidateSchema()) {
+            store.validateSchema();
+        }
+        return store;
     }
 }

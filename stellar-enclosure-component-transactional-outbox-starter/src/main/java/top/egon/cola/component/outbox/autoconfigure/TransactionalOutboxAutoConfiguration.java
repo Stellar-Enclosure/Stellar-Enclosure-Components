@@ -39,6 +39,7 @@ import top.egon.cola.component.outbox.delivery.DeliveryFailureClassifier;
 import top.egon.cola.component.outbox.delivery.DeliveryHandler;
 import top.egon.cola.component.outbox.delivery.DeliveryHandlerRegistry;
 import top.egon.cola.component.outbox.dispatch.OutboxDispatcher;
+import top.egon.cola.component.outbox.dispatch.OutboxQueueCoordinator;
 import top.egon.cola.component.outbox.dispatch.OutboxPoller;
 import top.egon.cola.component.outbox.dispatch.OutboxWorkerIdentity;
 import top.egon.cola.component.outbox.event.OutboxCommittedEventListener;
@@ -286,6 +287,18 @@ public class TransactionalOutboxAutoConfiguration {
         return scheduler;
     }
 
+    @Bean("outboxQueueCoordinator")
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "egon.cola.component.transactional-outbox.dispatch",
+            name = "mode", havingValue = "COORDINATED")
+    OutboxQueueCoordinator outboxQueueCoordinator(
+            @Qualifier("outboxStore") OutboxStore store,
+            @Qualifier("deliveryHandlerRegistry") DeliveryHandlerRegistry handlers,
+            @Qualifier("outboxWorkerIdentity") OutboxWorkerIdentity identity
+    ) {
+        return new OutboxQueueCoordinator(store, handlers, identity);
+    }
+
     @Bean("outboxDispatcher")
     @ConditionalOnMissingBean
     OutboxDispatcher outboxDispatcher(
@@ -342,10 +355,12 @@ public class TransactionalOutboxAutoConfiguration {
             OutboxCleanupJob cleanupJob,
             @Qualifier("outboxTaskScheduler") TaskScheduler taskScheduler,
             TransactionalOutboxProperties properties,
-            ObjectProvider<OutboxSchemaValidator> schemaValidator
+            ObjectProvider<OutboxSchemaValidator> schemaValidator,
+            @Qualifier("outboxQueueCoordinator") ObjectProvider<OutboxQueueCoordinator> coordinator
     ) {
         schemaValidator.getIfAvailable();
-        return new OutboxPoller(dispatcher, cleanupJob, taskScheduler, properties);
+        return new OutboxPoller(dispatcher, cleanupJob, taskScheduler, properties)
+                .withQueueCoordinator(coordinator.getIfAvailable());
     }
 
     @Bean

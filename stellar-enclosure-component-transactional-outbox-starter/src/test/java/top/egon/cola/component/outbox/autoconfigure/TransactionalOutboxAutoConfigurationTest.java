@@ -23,6 +23,8 @@ import top.egon.cola.component.outbox.delivery.DeliveryHandlerRegistry;
 import top.egon.cola.component.outbox.delivery.DeliveryResult;
 import top.egon.cola.component.outbox.dispatch.OutboxDispatcher;
 import top.egon.cola.component.outbox.dispatch.OutboxPoller;
+import top.egon.cola.component.outbox.dispatch.OutboxQueueCoordinator;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
 import top.egon.cola.component.outbox.store.OutboxStore;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.transaction.OutboxAfterCommitBuffer;
@@ -74,7 +76,71 @@ class TransactionalOutboxAutoConfigurationTest {
             assertThat(context.getBean("outboxStateMachineOutboxProperties"))
                     .isSameAs(context.getBean(TransactionalOutboxProperties.class));
             assertThat(context).hasSingleBean(OutboxLifecycleService.class);
+            assertThat(context.getBean(TransactionalOutboxProperties.class).getDispatch().getMode())
+                    .isEqualTo(DispatchMode.LEGACY);
+            assertThat(context).doesNotHaveBean(OutboxQueueCoordinator.class);
         });
+    }
+
+    @Test
+    void safe_consumer_modes_fail_closed_for_a_store_without_declared_capabilities() {
+        for (String mode : List.of("LOCAL", "COORDINATED")) {
+            configuredContext().withPropertyValues(
+                    "egon.cola.component.transactional-outbox.dispatch.mode=" + mode,
+                    "egon.cola.component.transactional-outbox.polling.enabled=true",
+                    "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                    .run(context -> {
+                        assertThat(context).hasFailed();
+                        Throwable cause = context.getStartupFailure();
+                        while (cause.getCause() != null) cause = cause.getCause();
+                        assertThat(cause).hasMessage("OUTBOX_STORE_DISPATCH_MODE_UNSUPPORTED");
+                    });
+        }
+    }
+
+    @Test
+    void paused_safe_modes_keep_the_producer_and_create_a_coordinator_only_for_coordinated_mode() {
+        for (DispatchMode mode : List.of(DispatchMode.LOCAL, DispatchMode.COORDINATED)) {
+            OutboxStore capable = mock(OutboxStore.class);
+            when(capable.supportsDispatchMode(any())).thenReturn(true);
+            when(capable.dispatchSlots()).thenReturn(List.of(0));
+            configuredContext(capable).withPropertyValues(
+                    "egon.cola.component.transactional-outbox.dispatch.mode=" + mode,
+                    "egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false",
+                    "egon.cola.component.transactional-outbox.polling.enabled=true",
+                    "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed().hasSingleBean(TransactionalOutbox.class);
+                        if (mode == DispatchMode.COORDINATED) assertThat(context).hasSingleBean(OutboxQueueCoordinator.class);
+                        else assertThat(context).doesNotHaveBean(OutboxQueueCoordinator.class);
+                        context.getBean(OutboxDispatcher.class).submitDue();
+                        context.getBean(OutboxDispatcher.class).submitMessageIds(List.of("paused"));
+                        verify(capable, never()).claim(any());
+                        verify(capable, never()).coordinate(any());
+                    });
+        }
+    }
+
+    @Test
+    void legacy_consumption_pause_vetoes_poll_and_after_commit_without_removing_producer_beans() {
+        OutboxStore paused = mock(OutboxStore.class);
+        DeliveryHandler handler = mock(DeliveryHandler.class);
+        when(handler.channel()).thenReturn("test-channel");
+        configuredContext(paused).withBean(DeliveryHandler.class, () -> handler)
+                .withBean("outboxDeliveryExecutor", SyncTaskExecutor.class, SyncTaskExecutor::new)
+                .withPropertyValues(
+                        "egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false",
+                        "egon.cola.component.transactional-outbox.retry.recover-exhausted=true",
+                        "egon.cola.component.transactional-outbox.cleanup.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed().hasSingleBean(TransactionalOutbox.class);
+                    var dispatcher = context.getBean(OutboxDispatcher.class);
+                    dispatcher.submitDue();
+                    dispatcher.submitMessageIds(List.of("paused"));
+                    verify(paused, never()).recoverExhausted(anyInt(), any());
+                    verify(paused, never()).claimDue(any(), anyInt(), anyString(), any());
+                    verify(paused, never()).claimByMessageIds(any(), any(), anyInt(), anyString(), any());
+                });
     }
 
     @Test
@@ -245,6 +311,10 @@ class TransactionalOutboxAutoConfigurationTest {
     }
 
     private ApplicationContextRunner configuredContext() {
+        return configuredContext(mock(OutboxStore.class));
+    }
+
+    private ApplicationContextRunner configuredContext(OutboxStore selectedStore) {
         return contextRunner
                 .withBean(DataSource.class, () -> mock(DataSource.class))
                 .withBean(
@@ -253,7 +323,7 @@ class TransactionalOutboxAutoConfigurationTest {
                 )
                 .withBean(ObjectMapper.class, ObjectMapper::new)
                 .withBean("egonColaMybatisPlusClock", Clock.class, Clock::systemUTC)
-                .withBean(OutboxStore.class, () -> mock(OutboxStore.class))
+                .withBean(OutboxStore.class, () -> selectedStore)
                 .withPropertyValues(
                         "egon.cola.component.transactional-outbox.storage.validate-schema=false",
                         "egon.cola.component.transactional-outbox.polling.enabled=false"

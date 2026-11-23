@@ -115,20 +115,37 @@ class OutboxPostgresqlReadwriteIntegrationTest {
             assertThat(primary.queryForObject("SELECT count(*) FROM egon_outbox.egon_cola_outbox_message", Long.class))
                     .isZero();
 
-            transaction.executeWithoutResult(status -> {
-                jdbc.update("UPDATE " + business + " SET state = 'committed' WHERE id = 1");
-                insertMessage(jdbc, 102L, "commit", "commit-key");
-                jdbc.update("UPDATE egon_outbox.egon_cola_outbox_message SET status = 'PROCESSING', "
-                        + "locked_by = 'worker', locked_until = now() + interval '1 minute', version = version + 1 WHERE id = ?", 102L);
-                assertThat(jdbc.queryForMap(processing, 102L, 0, "worker")).containsEntry("status", "PROCESSING");
-                assertThat(jdbc.queryForObject(advisory, Boolean.class, 102L, 0)).isTrue();
+            String safeDue = mapperSql("selectSafeDue");
+            String safeRow = mapperSql("selectSafeRow");
+            replica.execute("SELECT pg_wal_replay_pause()");
+            try {
+                awaitReplayPause(replica);
+                transaction.executeWithoutResult(status -> {
+                    jdbc.update("UPDATE " + business + " SET state = 'committed' WHERE id = 1");
+                    insertMessage(jdbc, 102L, "commit", "commit-key");
+                    assertThat(jdbc.queryForMap(safeDue, 0, "test", 1)).containsEntry("id", 102L);
+                    jdbc.update("UPDATE egon_outbox.egon_cola_outbox_message SET status = 'PROCESSING', "
+                            + "locked_by = 'worker', locked_until = now() + interval '1 minute', version = version + 1 WHERE id = ?", 102L);
+                    assertThat(jdbc.queryForMap(safeRow, 102L, 0)).containsEntry("status", "PROCESSING");
+                    assertThat(jdbc.queryForMap(processing, 102L, 0, "worker")).containsEntry("status", "PROCESSING");
+                    assertThat(jdbc.queryForObject(advisory, Boolean.class, 102L, 0)).isTrue();
+                    assertThat(jdbc.queryForObject("SELECT state FROM " + business + " WHERE id = 1", String.class))
+                            .isEqualTo("replica-visible");
+                });
+                assertThat(primary.queryForObject("SELECT state FROM public." + business + " WHERE id = 1", String.class))
+                        .isEqualTo("committed");
                 assertThat(jdbc.queryForObject("SELECT state FROM " + business + " WHERE id = 1", String.class))
                         .isEqualTo("replica-visible");
-            });
-            assertThat(primary.queryForObject("SELECT state FROM public." + business + " WHERE id = 1", String.class))
-                    .isEqualTo("committed");
-            assertThatThrownBy(() -> jdbc.queryForObject("SELECT state FROM " + business + " WHERE id = 1 FOR UPDATE", String.class))
-                    .hasStackTraceContaining("READWRITE_SQL_ROLE_MISMATCH");
+                assertThat(replica.queryForObject(
+                        "SELECT count(*) FROM egon_outbox.egon_cola_outbox_message WHERE id = 102", Long.class)).isZero();
+                transaction.executeWithoutResult(status ->
+                        assertThat(jdbc.queryForMap(safeRow, 102L, 0)).containsEntry("status", "PROCESSING"));
+                assertThatThrownBy(() -> jdbc.queryForObject(
+                        "SELECT state FROM " + business + " WHERE id = 1 FOR UPDATE", String.class))
+                        .hasStackTraceContaining("READWRITE_SQL_ROLE_MISMATCH");
+            } finally {
+                replica.execute("SELECT pg_wal_replay_resume()");
+            }
             awaitReplica(replica);
             assertThat(jdbc.queryForObject("SELECT message_id FROM egon_outbox.egon_cola_outbox_message WHERE id = 102", String.class))
                     .isEqualTo("commit");
@@ -192,11 +209,23 @@ class OutboxPostgresqlReadwriteIntegrationTest {
         try (InputStream input = OutboxPostgresqlReadwriteIntegrationTest.class.getClassLoader().getResourceAsStream(path)) {
             new XMLMapperBuilder(input, configuration, path, configuration.getSqlFragments()).parse();
             return configuration.getMappedStatement(OutboxMessageDAO.class.getName() + '.' + method)
-                    .getBoundSql(Map.of("id", 1L, "owner", "worker", "messageId", "message", "idempotencyKey", "key"))
+                    .getBoundSql(Map.of("id", 1L, "owner", "worker", "messageId", "message", "idempotencyKey", "key",
+                            "channel", "test", "limit", 1))
                     .getSql();
         } catch (Exception failure) {
             throw new IllegalStateException("Unable to load outbox mapper SQL", failure);
         }
+    }
+
+    private static void awaitReplayPause(JdbcTemplate replica) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            if ("paused".equals(replica.queryForObject("SELECT pg_get_wal_replay_pause_state()", String.class))) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Dedicated replica did not pause WAL replay");
     }
 
     private static void awaitReplica(JdbcTemplate replica) throws InterruptedException {
