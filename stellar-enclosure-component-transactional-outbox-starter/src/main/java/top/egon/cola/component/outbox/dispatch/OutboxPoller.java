@@ -23,6 +23,7 @@ public class OutboxPoller implements SmartLifecycle {
     private final DoubleSupplier randomSource;
     private final Clock clock;
     private volatile boolean running;
+    private OutboxQueueCoordinator queueCoordinator;
     private ScheduledFuture<?> pollingFuture;
     private ScheduledFuture<?> cleanupFuture;
 
@@ -58,13 +59,22 @@ public class OutboxPoller implements SmartLifecycle {
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
+    public OutboxPoller withQueueCoordinator(OutboxQueueCoordinator coordinator) {
+        this.queueCoordinator = coordinator;
+        return this;
+    }
+
     @Override
     public synchronized void start() {
         if (running) {
             return;
         }
+        if (properties.getDispatch().isConsumptionEnabled()
+                && properties.getDispatch().getMode() != TransactionalOutboxProperties.DispatchMode.LEGACY) {
+            dispatcher.startSafeDispatch(queueCoordinator);
+        }
         running = true;
-        if (properties.getPolling().isEnabled()) {
+        if (properties.getDispatch().isConsumptionEnabled() && properties.getPolling().isEnabled()) {
             double jitter = properties.getPolling().getJitter();
             if (jitter <= 0.0) {
                 pollingFuture = taskScheduler.scheduleWithFixedDelay(
@@ -90,6 +100,9 @@ public class OutboxPoller implements SmartLifecycle {
         cancel(cleanupFuture);
         pollingFuture = null;
         cleanupFuture = null;
+        if (properties.getDispatch().getMode() != TransactionalOutboxProperties.DispatchMode.LEGACY) {
+            dispatcher.stopSafeDispatch();
+        }
     }
 
     @Override

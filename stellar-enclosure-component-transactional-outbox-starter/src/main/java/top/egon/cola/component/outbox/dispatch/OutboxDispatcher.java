@@ -1,5 +1,30 @@
 package top.egon.cola.component.outbox.dispatch;
 
+import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.Objects;
+import java.util.Comparator;
+import top.egon.cola.component.outbox.store.OutboxQueueLease;
+import top.egon.cola.component.outbox.store.OutboxQueueKey;
+import top.egon.cola.component.outbox.store.OutboxFinishStatusEnum;
+import top.egon.cola.component.outbox.store.OutboxFinishCommand;
+import top.egon.cola.component.outbox.store.OutboxClaimCommand;
+import top.egon.cola.component.outbox.store.OutboxClaimBatchBO;
+import top.egon.cola.component.outbox.delivery.statemachine.BusinessStateMachineDeliveryHandler;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
+import org.springframework.aop.support.AopUtils;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -127,7 +152,11 @@ public class OutboxDispatcher {
     }
 
     public void submitDue() {
-        if (storageProperties.isMigrationMode()) {
+        if (!canConsume()) {
+            return;
+        }
+        if (safeMode()) {
+            signalSafeDispatch();
             return;
         }
         fullPollRequested.set(true);
@@ -135,7 +164,11 @@ public class OutboxDispatcher {
     }
 
     public void submitMessageIds(Collection<String> messageIds) {
-        if (storageProperties.isMigrationMode()) {
+        if (!canConsume()) {
+            return;
+        }
+        if (safeMode()) {
+            signalSafeDispatch();
             return;
         }
         if (messageIds == null || messageIds.isEmpty()) {
@@ -154,6 +187,13 @@ public class OutboxDispatcher {
     }
 
     void dispatchDue() {
+        if (!canConsume()) {
+            return;
+        }
+        if (safeMode()) {
+            signalSafeDispatch();
+            return;
+        }
         if (properties.getRetry().isRecoverExhausted()) {
             if (!workerIdentity.canClaim()) {
                 return;
@@ -173,6 +213,13 @@ public class OutboxDispatcher {
     }
 
     void dispatchMessageIds(Collection<String> messageIds) {
+        if (!canConsume()) {
+            return;
+        }
+        if (safeMode()) {
+            signalSafeDispatch();
+            return;
+        }
         if (messageIds == null || messageIds.isEmpty()) {
             return;
         }
@@ -514,4 +561,410 @@ public class OutboxDispatcher {
 
         List<OutboxRecord> claim(int limit);
     }
+
+    private volatile ReadyDispatchRuntime readyRuntime;
+
+    public synchronized void startSafeDispatch(OutboxQueueCoordinator coordinator) {
+        if (!safeMode() || !canConsume() || readyRuntime != null) {
+            return;
+        }
+        DispatchMode mode = properties.getDispatch().getMode();
+        if (!store.supportsDispatchMode(mode)) {
+            throw new IllegalStateException("OUTBOX_STORE_DISPATCH_MODE_UNSUPPORTED");
+        }
+        if (mode == DispatchMode.COORDINATED && coordinator == null) {
+            throw new IllegalStateException("OUTBOX_QUEUE_COORDINATOR_REQUIRED");
+        }
+        ReadyDispatchRuntime runtime = new ReadyDispatchRuntime(mode, coordinator);
+        readyRuntime = runtime;
+        runtime.start();
+    }
+
+    public synchronized void stopSafeDispatch() {
+        ReadyDispatchRuntime runtime = readyRuntime;
+        if (runtime != null) {
+            runtime.stop();
+            readyRuntime = null;
+        }
+    }
+
+    private boolean safeMode() {
+        return properties.getDispatch().getMode() != DispatchMode.LEGACY;
+    }
+
+    private boolean canConsume() {
+        return properties.getDispatch().isConsumptionEnabled() && !storageProperties.isMigrationMode();
+    }
+
+    private void signalSafeDispatch() {
+        ReadyDispatchRuntime runtime = readyRuntime;
+        if (runtime != null) {
+            runtime.signal();
+        }
+    }
+
+    private final class ReadyDispatchRuntime {
+
+        private final DispatchMode mode;
+        private final OutboxQueueCoordinator coordinator;
+        private final List<Integer> slots;
+        private final int parallelShards;
+        private final ScheduledExecutorService controller = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().daemon().name("outbox-dispatch-", 0).factory());
+        private final ScheduledExecutorService heartbeat;
+        private final ExecutorService claims;
+        private final AtomicBoolean accepting = new AtomicBoolean(true);
+        private final AtomicBoolean tickEnqueued = new AtomicBoolean();
+        private final AtomicLong signals = new AtomicLong();
+        private final ConcurrentLinkedQueue<ReadyWorker> ready = new ConcurrentLinkedQueue<>();
+        private final Set<Integer> claiming = ConcurrentHashMap.newKeySet();
+        private final Map<OutboxQueueKey, Long> retryAfter = new ConcurrentHashMap<>();
+        private final Map<OutboxQueueKey, Integer> emptyStreak = new ConcurrentHashMap<>();
+        private final List<ReadyWorker> workers = new ArrayList<>();
+        private int cursor;
+        private final AtomicInteger opportunity = new AtomicInteger();
+
+        ReadyDispatchRuntime(DispatchMode mode, OutboxQueueCoordinator coordinator) {
+            this.mode = mode;
+            this.coordinator = coordinator;
+            this.slots = List.copyOf(store.dispatchSlots());
+            if (slots.isEmpty()) {
+                throw new IllegalStateException("OUTBOX_DISPATCH_SHARDS_REQUIRED");
+            }
+            this.parallelShards = Math.min(slots.size(), Math.min(properties.getPolling().getConcurrency(),
+                    properties.getDispatch().getMaxConcurrentShards()));
+            claims = Executors.newFixedThreadPool(parallelShards,
+                    Thread.ofPlatform().daemon().name("outbox-claim-", 0).factory());
+            heartbeat = coordinator == null ? null : Executors.newScheduledThreadPool(parallelShards,
+                    Thread.ofPlatform().daemon().name("outbox-heartbeat-", 0).factory());
+        }
+
+        void start() {
+            for (int index = 0; index < properties.getPolling().getConcurrency(); index++) {
+                ReadyWorker worker = new ReadyWorker();
+                try {
+                    taskExecutor.execute(worker::run);
+                    workers.add(worker);
+                } catch (RuntimeException failure) {
+                    metrics.wakeupRejected();
+                    log.warn("Outbox worker did not start, failureType={}", failure.getClass().getSimpleName());
+                }
+            }
+            if (heartbeat != null) {
+                long interval = Math.max(1, properties.getCoordination().getHeartbeatInterval().toMillis());
+                for (int slot : slots) {
+                    long jitter = ThreadLocalRandom.current().nextLong(Math.max(1, interval / 5));
+                    heartbeat.scheduleWithFixedDelay(() -> {
+                        if (accepting.get() && canConsume()) {
+                            coordinator.refresh(slot, key -> claiming.contains(key.shardSlot()));
+                            signal();
+                        }
+                    }, jitter, interval + jitter, TimeUnit.MILLISECONDS);
+                }
+            }
+            signal();
+        }
+
+        void signal() {
+            if (!accepting.get() || !canConsume()) {
+                return;
+            }
+            signals.incrementAndGet();
+            if (tickEnqueued.compareAndSet(false, true)) {
+                try {
+                    controller.execute(this::runTick);
+                } catch (RejectedExecutionException stopped) {
+                    tickEnqueued.set(false);
+                }
+            }
+        }
+
+        private void runTick() {
+            long observed = signals.get();
+            try {
+                dispatchReady();
+            } finally {
+                tickEnqueued.set(false);
+                if (signals.get() != observed) {
+                    signal();
+                }
+            }
+        }
+
+        private void dispatchReady() {
+            if (!accepting.get() || !canConsume() || ready.isEmpty() || !workerIdentity.canClaim()) {
+                return;
+            }
+            List<OutboxQueueKey> candidates = runnableQueues();
+            if (candidates.isEmpty()) {
+                return;
+            }
+            int first = Math.floorMod(cursor, candidates.size());
+            for (int index = 0; index < candidates.size() && claiming.size() < parallelShards; index++) {
+                OutboxQueueKey key = candidates.get((first + index) % candidates.size());
+                if (!accepting.get() || ready.isEmpty()) {
+                    break;
+                }
+                if (retryAfter.getOrDefault(key, 0L) - System.nanoTime() > 0 || !claiming.add(key.shardSlot())) {
+                    continue;
+                }
+                OutboxQueueLease lease = mode == DispatchMode.COORDINATED
+                        ? coordinator.owned(key.shardSlot()).get(key) : null;
+                if (mode == DispatchMode.COORDINATED && lease == null) {
+                    claiming.remove(key.shardSlot());
+                    continue;
+                }
+                int requested = Math.min(properties.getDispatch().getMaxClaimBatch(),
+                        candidates.size() > 1 ? Math.max(1, ready.size() / candidates.size()) : ready.size());
+                List<ReadyWorker> reserved = reserve(requested);
+                if (reserved.isEmpty()) {
+                    claiming.remove(key.shardSlot());
+                    break;
+                }
+                try {
+                    claims.execute(() -> claimAndAssign(key, lease, reserved));
+                } catch (RejectedExecutionException stopped) {
+                    ready.addAll(reserved);
+                    claiming.remove(key.shardSlot());
+                }
+                cursor = first + index + 1;
+            }
+        }
+
+        private List<OutboxQueueKey> runnableQueues() {
+            if (mode == DispatchMode.COORDINATED) {
+                return slots.stream().flatMap(slot -> coordinator.owned(slot).keySet().stream())
+                        .sorted(Comparator.comparingInt(OutboxQueueKey::shardSlot).thenComparing(OutboxQueueKey::channel))
+                        .toList();
+            }
+            List<String> channels = handlerRegistry.channels().stream().sorted().toList();
+            return slots.stream().flatMap(slot -> channels.stream().map(channel -> new OutboxQueueKey(slot, channel)))
+                    .toList();
+        }
+
+        private List<ReadyWorker> reserve(int count) {
+            List<ReadyWorker> reserved = new ArrayList<>(count);
+            for (int index = 0; index < count; index++) {
+                ReadyWorker worker = ready.poll();
+                if (worker == null) {
+                    break;
+                }
+                reserved.add(worker);
+            }
+            return reserved;
+        }
+
+        private void claimAndAssign(OutboxQueueKey key, OutboxQueueLease lease, List<ReadyWorker> reserved) {
+            int assigned = 0;
+            boolean committed = false;
+            long started = System.nanoTime();
+            try {
+                if (!accepting.get() || !canConsume() || !workerIdentity.canClaim()) {
+                    return;
+                }
+                int count = reserved.size();
+                int recovery = count / 4 + (count % 4 > 0 && Math.floorMod(opportunity.getAndIncrement(), 4) == 0 ? 1 : 0);
+                var command = OutboxClaimCommand.builder().queueKey(key).queueLease(lease)
+                        .claimToken(workerIdentity.nextLeaseOwner()).leaseDuration(properties.getDelivery().getLeaseDuration())
+                        .limit(count).dueQuota(count - recovery).reclaimQuota(recovery).build();
+                OutboxClaimBatchBO batch = store.claim(command);
+                committed = true;
+                for (int i = 0; i < batch.getRecords().size(); i++) {
+                    metrics.dispatchStage(key.shardSlot(), key.channel(), "claim_committed");
+                }
+                if (System.nanoTime() - started >= properties.getCoordination().getClaimTimeout().toNanos()) {
+                    throw new IllegalStateException("OUTBOX_CLAIM_DEADLINE_EXCEEDED");
+                }
+                if (batch.isNotOwner() || batch.getRecords().isEmpty() && batch.getExhaustedCount() == 0) {
+                    backOff(key);
+                } else {
+                    retryAfter.remove(key);
+                    emptyStreak.remove(key);
+                }
+                if (batch.getRecords().size() > count) {
+                    throw new IllegalStateException("OUTBOX_CLAIM_EXCEEDS_RESERVED_CAPACITY");
+                }
+                long committedNanos = System.nanoTime();
+                for (OutboxRecord row : batch.getRecords()) {
+                    if (!Objects.equals(row.channel(), key.channel()) || row.shardSlot() != key.shardSlot()
+                            || !command.getClaimToken().equals(row.lockedBy())) {
+                        throw new IllegalStateException("OUTBOX_CLAIM_RECEIPT_MISMATCH");
+                    }
+                    Assignment assignment = new Assignment(row, batch.getDatabaseTime(), started, committedNanos);
+                    if (reserved.get(assigned).mailbox.offer(assignment)) {
+                        assigned++;
+                        metrics.dispatchStage(key.shardSlot(), key.channel(), "handoff");
+                    } else {
+                        throw new IllegalStateException("OUTBOX_RESERVED_WORKER_NOT_READY");
+                    }
+                }
+            } catch (RuntimeException failure) {
+                backOff(key);
+                metrics.dispatchStage(key.shardSlot(), key.channel(), committed ? "handoff_failed" : "claim_unconfirmed");
+                log.warn("Outbox claim not dispatched, slot={}, channel={}, failureType={}",
+                        key.shardSlot(), key.channel(), failure.getClass().getSimpleName());
+            } finally {
+                for (int index = assigned; index < reserved.size(); index++) {
+                    if (accepting.get()) {
+                        ready.add(reserved.get(index));
+                    }
+                }
+                claiming.remove(key.shardSlot());
+                signal();
+            }
+        }
+
+        private void backOff(OutboxQueueKey key) {
+            long base = properties.getPolling().getFixedDelay().toNanos();
+            int multiplier = emptyStreak.merge(key, 1, (previous, next) -> Math.min(5, previous + 1));
+            long delay = base * multiplier;
+            delay += (long) (delay * properties.getPolling().getJitter() * ThreadLocalRandom.current().nextDouble());
+            retryAfter.put(key, System.nanoTime() + Math.min(base * 5, delay));
+        }
+
+        void stop() {
+            if (!accepting.getAndSet(false)) {
+                return;
+            }
+            controller.shutdownNow();
+            if (heartbeat != null) {
+                heartbeat.shutdown();
+            }
+            claims.shutdown();
+            long end = System.nanoTime() + properties.getShutdown().getGracePeriod().toNanos();
+            await(claims, end);
+            if (heartbeat != null) {
+                await(heartbeat, end);
+                for (int slot : slots) {
+                    if (System.nanoTime() >= end || claiming.contains(slot)) {
+                        continue;
+                    }
+                    coordinator.release(slot);
+                }
+            }
+            for (ReadyWorker worker : workers) {
+                long remaining = end - System.nanoTime();
+                if (remaining > 0) {
+                    try {
+                        worker.stopped.await(remaining, TimeUnit.NANOSECONDS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void await(ExecutorService executor, long end) {
+            try {
+                executor.awaitTermination(Math.max(0, end - System.nanoTime()), TimeUnit.NANOSECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private final class ReadyWorker {
+            private final BlockingQueue<Assignment> mailbox = new ArrayBlockingQueue<>(1);
+            private final CountDownLatch stopped = new CountDownLatch(1);
+
+            void run() {
+                try {
+                    do {
+                        ready.add(this);
+                        signal();
+                        Assignment item = null;
+                        while (item == null && (accepting.get() || claiming.size() > 0 || !mailbox.isEmpty())) {
+                            item = mailbox.poll(50, TimeUnit.MILLISECONDS);
+                        }
+                        if (item != null) {
+                            deliverWithLease(item);
+                        }
+                    } while (accepting.get());
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    ready.remove(this);
+                    stopped.countDown();
+                }
+            }
+        }
+    }
+
+    private record Assignment(OutboxRecord record, Instant databaseTime, long startedNanos, long committedNanos) { }
+
+    private Duration leaseRemaining(Assignment assignment) {
+        if (assignment.databaseTime() == null || assignment.record().lockedUntil() == null) {
+            return Duration.ZERO;
+        }
+        return Duration.between(assignment.databaseTime(), assignment.record().lockedUntil())
+                .minusNanos(System.nanoTime() - assignment.startedNanos());
+    }
+
+    private void deliverWithLease(Assignment assignment) {
+        OutboxRecord row = assignment.record();
+        Duration budget = leaseRemaining(assignment).minus(properties.getDispatch().getAckReserve());
+        if (budget.isNegative() || budget.isZero()) {
+            metrics.dispatchStage(row.shardSlot(), row.channel(), "lease_expired_before_handler");
+            return;
+        }
+        metrics.dispatchStageDuration(row.shardSlot(), row.channel(), "claim_to_start",
+                Duration.ofNanos(System.nanoTime() - assignment.committedNanos()));
+        Duration timeout = properties.getDelivery().getTimeout();
+        if (timeout.compareTo(budget) > 0) {
+            timeout = budget;
+        }
+        long started = System.nanoTime();
+        DeliveryResult result = invokeHandler(row, clock.instant().plus(timeout), true);
+        metrics.delivery(row.channel(), metricResult(result), Duration.ofNanos(System.nanoTime() - started));
+        var command = OutboxFinishCommand.builder().id(row.id()).shardSlot(row.shardSlot()).messageId(row.messageId())
+                .attemptCount(row.attemptCount()).claimToken(row.lockedBy()).deliveryResult(result).build();
+        long ackStarted = System.nanoTime();
+        OutboxFinishStatusEnum finish = OutboxFinishStatusEnum.INDETERMINATE;
+        for (int tryNumber = 0; tryNumber < 2 && leaseRemaining(assignment).isPositive(); tryNumber++) {
+            try {
+                finish = store.finishDelivery(command);
+            } catch (RuntimeException failure) {
+                finish = OutboxFinishStatusEnum.INDETERMINATE;
+            }
+            if (finish != OutboxFinishStatusEnum.INDETERMINATE) {
+                break;
+            }
+        }
+        metrics.dispatchStageDuration(row.shardSlot(), row.channel(), "result_to_ack",
+                Duration.ofNanos(System.nanoTime() - ackStarted));
+        metrics.dispatchStage(row.shardSlot(), row.channel(), finish == OutboxFinishStatusEnum.APPLIED
+                ? "ack_confirmed" : finish.name().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private DeliveryResult invokeHandler(OutboxRecord record, Instant deadline, boolean safe) {
+        DeliveryHandler handler;
+        try {
+            handler = handlerRegistry.required(record.channel());
+        } catch (RuntimeException missing) {
+            return DeliveryResult.permanentFailure(HANDLER_MISSING, HANDLER_MISSING);
+        }
+        if (!safe || AopUtils.getTargetClass(handler) != BusinessStateMachineDeliveryHandler.class) {
+            try {
+                handler.validateDestination(record.destination());
+            } catch (RuntimeException rejected) {
+                return DeliveryResult.permanentFailure(DESTINATION_INVALID, DESTINATION_INVALID);
+            }
+        }
+        DeliveryContext context = new DeliveryContext(record.messageId(), record.channel(), record.destination(),
+                record.payload(), record.contentType(), record.schemaVersion(), record.headers(), record.traceId(),
+                record.attemptCount(), record.maxAttempts(), deadline);
+        DeliveryResult result;
+        try {
+            if (safe) {
+                metrics.dispatchStage(record.shardSlot(), record.channel(), "handler_started");
+            }
+            result = handler.deliver(context);
+        } catch (Exception failure) {
+            result = failureClassifier.classify(failure);
+        }
+        return result == null
+                ? DeliveryResult.permanentFailure("OUTBOX_INVALID_DELIVERY_RESULT", "OUTBOX_INVALID_DELIVERY_RESULT")
+                : result;
+    }
+
 }

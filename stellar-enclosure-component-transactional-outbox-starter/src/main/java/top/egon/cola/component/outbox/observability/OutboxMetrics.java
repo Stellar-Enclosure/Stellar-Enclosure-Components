@@ -4,6 +4,10 @@ import java.time.Duration;
 
 public interface OutboxMetrics {
 
+    default void dispatchStage(int shardSlot, String channel, String stage) { }
+
+    default void dispatchStageDuration(int shardSlot, String channel, String stage, Duration duration) { }
+
     void enqueue(boolean created);
 
     void claimed(int count);

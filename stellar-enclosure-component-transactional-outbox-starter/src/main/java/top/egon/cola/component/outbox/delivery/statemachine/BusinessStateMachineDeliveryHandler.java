@@ -101,6 +101,18 @@ public class BusinessStateMachineDeliveryHandler implements DeliveryHandler {
         if (!destination.equals(context.destination())) {
             return eventInvalid();
         }
+        var headers = context.headers();
+        if (!event.getEventId().equals(headers.get("egon-event-id"))
+                || !event.getMachineKey().equals(headers.get("egon-machine-key"))
+                || !event.getDefinitionVersion().toString().equals(headers.get("egon-definition-version"))) {
+            return eventInvalid();
+        }
+        if (!event.getTenantId().toString().equals(headers.get("egon-tenant-id"))) {
+            log.warn("Rejecting business state-machine event with mismatched tenant header");
+            return DeliveryResult.permanentFailure(
+                    "OUTBOX_SM_TENANT_REJECTED",
+                    "Business event tenant header does not match its body");
+        }
         BusinessStateMachineDefinitionStrategy definition = definitions.get(destination);
         if (definition == null) {
             if (properties.getBusiness().isRetryOnMissingDefinition()) {
@@ -113,18 +125,6 @@ public class BusinessStateMachineDeliveryHandler implements DeliveryHandler {
             return DeliveryResult.permanentFailure(
                     "OUTBOX_SM_DEFINITION_MISSING",
                     "Business state-machine definition is not registered");
-        }
-        var headers = context.headers();
-        if (!event.getEventId().equals(headers.get("egon-event-id"))
-                || !event.getMachineKey().equals(headers.get("egon-machine-key"))
-                || !event.getDefinitionVersion().toString().equals(headers.get("egon-definition-version"))) {
-            return eventInvalid();
-        }
-        if (!event.getTenantId().toString().equals(headers.get("egon-tenant-id"))) {
-            log.warn("Rejecting business state-machine event with mismatched tenant header");
-            return DeliveryResult.permanentFailure(
-                    "OUTBOX_SM_TENANT_REJECTED",
-                    "Business event tenant header does not match its body");
         }
         return service.process(event, context);
     }
