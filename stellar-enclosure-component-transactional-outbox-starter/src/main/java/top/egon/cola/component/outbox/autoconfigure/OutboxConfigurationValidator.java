@@ -34,8 +34,9 @@ public class OutboxConfigurationValidator extends BaseValidator {
         if (properties == null) {
             throw invalid("properties");
         }
-        validateBean(properties);
         validateCore(properties);
+        validateDispatch(properties);
+        validateBean(properties);
         validateHttp(properties.getHttp());
         validateRabbitmq(properties.getRabbitmq());
     }
@@ -99,6 +100,57 @@ public class OutboxConfigurationValidator extends BaseValidator {
         }
         if (properties.getNodeId() != null && properties.getNodeId().length() > 80) {
             throw invalid("node-id");
+        }
+    }
+
+    private void validateDispatch(TransactionalOutboxProperties properties) {
+        var dispatch = properties.getDispatch();
+        var coordination = properties.getCoordination();
+        if (dispatch.getMode() == null) {
+            throw invalid("dispatch.mode");
+        }
+        positive(dispatch.getMaxClaimBatch(), "dispatch.max-claim-batch");
+        positive(dispatch.getMaxConcurrentShards(), "dispatch.max-concurrent-shards");
+        positive(dispatch.getAckReserve(), "dispatch.ack-reserve");
+        positive(coordination.getHeartbeatInterval(), "coordination.heartbeat-interval");
+        positive(coordination.getLeaseDuration(), "coordination.lease-duration");
+        positive(coordination.getMembershipTtl(), "coordination.membership-ttl");
+        positive(coordination.getClaimTimeout(), "coordination.claim-timeout");
+        positive(coordination.getMemberRetention(), "coordination.member-retention");
+
+        if (dispatch.getMode() == TransactionalOutboxProperties.DispatchMode.LEGACY
+                || !dispatch.isConsumptionEnabled()) {
+            return;
+        }
+        if (!properties.getPolling().isEnabled()) {
+            throw invalid("polling.enabled");
+        }
+        if (properties.getRetry().isRecoverExhausted()) {
+            throw invalid("retry.recover-exhausted");
+        }
+        if (dispatch.getMaxClaimBatch() > Math.min(10_000, properties.getPolling().getBatchSize())) {
+            throw invalid("dispatch.max-claim-batch");
+        }
+
+        Duration timeBeforeAck = properties.getDelivery().getLeaseDuration().minus(dispatch.getAckReserve());
+        if (timeBeforeAck.compareTo(properties.getDelivery().getTimeout()) <= 0) {
+            throw invalid("dispatch.ack-reserve");
+        }
+        Duration heartbeat = coordination.getHeartbeatInterval();
+        Duration claim = coordination.getClaimTimeout();
+        Duration queueLease = coordination.getLeaseDuration();
+        if (claim.compareTo(heartbeat) >= 0 || claim.compareTo(queueLease) >= 0
+                || claim.compareTo(timeBeforeAck) >= 0) {
+            throw invalid("coordination.claim-timeout");
+        }
+        if (queueLease.dividedBy(3).compareTo(heartbeat) < 0) {
+            throw invalid("coordination.lease-duration");
+        }
+        if (coordination.getMembershipTtl().minus(queueLease).compareTo(heartbeat) < 0) {
+            throw invalid("coordination.membership-ttl");
+        }
+        if (coordination.getMemberRetention().compareTo(coordination.getMembershipTtl()) <= 0) {
+            throw invalid("coordination.member-retention");
         }
     }
 

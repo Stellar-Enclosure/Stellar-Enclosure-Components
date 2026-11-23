@@ -4,6 +4,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.validation.annotation.Validated;
@@ -18,7 +19,7 @@ import java.util.Set;
 /** Applies the fixed technical lifecycle graph without performing persistence. */
 @Slf4j
 @Validated
-@RequiredArgsConstructor
+@RequiredArgsConstructor(onConstructor_ = @Autowired)
 public class OutboxLifecycleService {
 
     private static final Set<String> PERSISTED_STATES = Set.of(
@@ -55,6 +56,19 @@ public class OutboxLifecycleService {
             @Min(0) int attemptCount,
             @Min(1) int maxAttempts
     ) {
+        return evaluate(source, signal, attemptCount, maxAttempts, false);
+    }
+
+    public OutboxStatus evaluateSafeClaim(@NotNull String source, @NotNull OutboxLifecycleSignalEnum signal,
+                                          @Min(0) int attemptCount, @Min(1) int maxAttempts) {
+        if (signal != OutboxLifecycleSignalEnum.CLAIM && signal != OutboxLifecycleSignalEnum.RECLAIM) {
+            throw rejected("Only claim and reclaim are valid safe claim signals");
+        }
+        return evaluate(source, signal, attemptCount, maxAttempts, true);
+    }
+
+    private OutboxStatus evaluate(String source, OutboxLifecycleSignalEnum signal, int attemptCount,
+                                  int maxAttempts, boolean safeClaim) {
         if (source == null || source.isBlank() || signal == null || attemptCount < 0 || maxAttempts < 1) {
             throw new OutboxStateMachineException(
                     "OUTBOX_FSM_INPUT_INVALID",
@@ -77,7 +91,8 @@ public class OutboxLifecycleService {
                 MessageBuilder.withPayload(signal)
                         .copyHeaders(Map.of(
                                 "attemptCount", attemptCount,
-                                "maxAttempts", maxAttempts
+                                "maxAttempts", maxAttempts,
+                                OutboxLifecycleStateMachineFactory.SAFE_CLAIM_HEADER, safeClaim
                         ))
                         .build(),
                 properties.getExecutionTimeout()

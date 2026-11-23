@@ -27,6 +27,8 @@ public class OutboxLifecycleStateMachineFactory {
             "DEAD"
     );
 
+    static final String SAFE_CLAIM_HEADER = "safeClaim";
+
     private static final String ATTEMPT_COUNT_HEADER = "attemptCount";
     private static final String MAX_ATTEMPTS_HEADER = "maxAttempts";
 
@@ -55,10 +57,16 @@ public class OutboxLifecycleStateMachineFactory {
 
             var transitions = builder.configureTransitions();
             add(transitions, NEW_STATE, OutboxStatus.PENDING.getMessage(), OutboxLifecycleSignalEnum.ENQUEUE, null);
-            add(transitions, OutboxStatus.PENDING.getMessage(), OutboxStatus.PROCESSING.getMessage(),
-                    OutboxLifecycleSignalEnum.CLAIM, null);
-            add(transitions, OutboxStatus.RETRY_WAIT.getMessage(), OutboxStatus.PROCESSING.getMessage(),
-                    OutboxLifecycleSignalEnum.CLAIM, null);
+            for (OutboxStatus pending : Set.of(OutboxStatus.PENDING, OutboxStatus.RETRY_WAIT)) {
+                add(transitions, pending.getMessage(), OutboxStatus.PROCESSING.getMessage(),
+                        OutboxLifecycleSignalEnum.CLAIM, context ->
+                                !Boolean.TRUE.equals(context.getMessageHeader(SAFE_CLAIM_HEADER))
+                                        || RETRY_WITH_BUDGET.evaluate(context));
+                add(transitions, pending.getMessage(), OutboxStatus.DEAD.getMessage(),
+                        OutboxLifecycleSignalEnum.CLAIM, context ->
+                                Boolean.TRUE.equals(context.getMessageHeader(SAFE_CLAIM_HEADER))
+                                        && RETRY_EXHAUSTED.evaluate(context));
+            }
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.PROCESSING.getMessage(),
                     OutboxLifecycleSignalEnum.RECLAIM, RETRY_WITH_BUDGET);
             add(transitions, OutboxStatus.PROCESSING.getMessage(), OutboxStatus.DEAD.getMessage(),

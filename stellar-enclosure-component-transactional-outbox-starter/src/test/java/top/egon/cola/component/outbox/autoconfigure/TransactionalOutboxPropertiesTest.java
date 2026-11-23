@@ -62,6 +62,63 @@ class TransactionalOutboxPropertiesTest {
         });
     }
 
+    @Test
+    void shouldExposeCoordinatedDispatchDefaultsWithoutActivatingThem() throws Exception {
+        TransactionalOutboxProperties properties = new TransactionalOutboxProperties();
+        Object dispatch = property(properties, "getDispatch");
+        Object coordination = property(properties, "getCoordination");
+
+        assertThat(property(dispatch, "getMode").toString()).isEqualTo("LEGACY");
+        assertThat(property(dispatch, "getMode").getClass().getSimpleName()).isEqualTo("DispatchMode");
+        assertThat(property(dispatch, "isConsumptionEnabled")).isEqualTo(true);
+        assertThat(property(dispatch, "getMaxClaimBatch")).isEqualTo(1);
+        assertThat(property(dispatch, "getMaxConcurrentShards")).isEqualTo(2);
+        assertThat(property(dispatch, "getAckReserve")).isEqualTo(Duration.ofSeconds(1));
+        assertThat(property(coordination, "getHeartbeatInterval")).isEqualTo(Duration.ofSeconds(5));
+        assertThat(property(coordination, "getLeaseDuration")).isEqualTo(Duration.ofSeconds(20));
+        assertThat(property(coordination, "getMembershipTtl")).isEqualTo(Duration.ofSeconds(30));
+        assertThat(property(coordination, "getClaimTimeout")).isEqualTo(Duration.ofSeconds(2));
+        assertThat(property(coordination, "getMemberRetention")).isEqualTo(Duration.ofHours(1));
+    }
+
+    @Test
+    void shouldBindDispatchAndCoordinationAlongsideExistingPollingKeys() {
+        contextRunner.withPropertyValues(
+                "egon.cola.component.transactional-outbox.dispatch.mode=COORDINATED",
+                "egon.cola.component.transactional-outbox.dispatch.consumption-enabled=false",
+                "egon.cola.component.transactional-outbox.dispatch.max-claim-batch=4",
+                "egon.cola.component.transactional-outbox.dispatch.max-concurrent-shards=3",
+                "egon.cola.component.transactional-outbox.dispatch.ack-reserve=2s",
+                "egon.cola.component.transactional-outbox.coordination.heartbeat-interval=6s",
+                "egon.cola.component.transactional-outbox.coordination.lease-duration=24s",
+                "egon.cola.component.transactional-outbox.coordination.membership-ttl=36s",
+                "egon.cola.component.transactional-outbox.coordination.claim-timeout=3s",
+                "egon.cola.component.transactional-outbox.coordination.member-retention=2h",
+                "egon.cola.component.transactional-outbox.polling.batch-size=20"
+        ).run(context -> {
+            assertThat(context).hasNotFailed();
+            TransactionalOutboxProperties properties = context.getBean(TransactionalOutboxProperties.class);
+            Object dispatch = property(properties, "getDispatch");
+            Object coordination = property(properties, "getCoordination");
+
+            assertThat(property(dispatch, "getMode").toString()).isEqualTo("COORDINATED");
+            assertThat(property(dispatch, "isConsumptionEnabled")).isEqualTo(false);
+            assertThat(property(dispatch, "getMaxClaimBatch")).isEqualTo(4);
+            assertThat(property(dispatch, "getMaxConcurrentShards")).isEqualTo(3);
+            assertThat(property(dispatch, "getAckReserve")).isEqualTo(Duration.ofSeconds(2));
+            assertThat(property(coordination, "getHeartbeatInterval")).isEqualTo(Duration.ofSeconds(6));
+            assertThat(property(coordination, "getLeaseDuration")).isEqualTo(Duration.ofSeconds(24));
+            assertThat(property(coordination, "getMembershipTtl")).isEqualTo(Duration.ofSeconds(36));
+            assertThat(property(coordination, "getClaimTimeout")).isEqualTo(Duration.ofSeconds(3));
+            assertThat(property(coordination, "getMemberRetention")).isEqualTo(Duration.ofHours(2));
+            assertThat(properties.getPolling().getBatchSize()).isEqualTo(20);
+        });
+    }
+
+    private static Object property(Object target, String getter) throws ReflectiveOperationException {
+        return target.getClass().getMethod(getter).invoke(target);
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableConfigurationProperties(TransactionalOutboxProperties.class)
     static class PropertiesConfiguration {

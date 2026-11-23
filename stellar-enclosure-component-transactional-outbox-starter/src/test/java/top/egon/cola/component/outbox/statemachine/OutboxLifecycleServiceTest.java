@@ -22,6 +22,7 @@ import top.egon.cola.component.outbox.store.OutboxStore;
 import top.egon.cola.component.outbox.store.OutboxStatus;
 
 import javax.sql.DataSource;
+import java.lang.reflect.InvocationTargetException;
 import java.time.Clock;
 import java.time.Duration;
 
@@ -144,6 +145,61 @@ class OutboxLifecycleServiceTest {
                 0
         )).isInstanceOfSatisfying(OutboxStateMachineException.class,
                         failure -> assertThat(failure.getReason()).isEqualTo("OUTBOX_FSM_INPUT_INVALID"));
+    }
+
+    @Test
+    void safeClaimUsesThePersistedAttemptBudgetBeforeCreatingAnotherLease() throws Exception {
+        OutboxLifecycleService service = service();
+
+        for (OutboxStatus source : new OutboxStatus[]{OutboxStatus.PENDING, OutboxStatus.RETRY_WAIT}) {
+            assertThat(evaluateSafeClaim(service, source, OutboxLifecycleSignalEnum.CLAIM, 2, 3))
+                    .isEqualTo(OutboxStatus.PROCESSING);
+            assertThat(evaluateSafeClaim(service, source, OutboxLifecycleSignalEnum.CLAIM, 3, 3))
+                    .isEqualTo(OutboxStatus.DEAD);
+            assertThat(evaluateSafeClaim(service, source, OutboxLifecycleSignalEnum.CLAIM, 4, 3))
+                    .isEqualTo(OutboxStatus.DEAD);
+        }
+        assertThat(evaluateSafeClaim(service, OutboxStatus.PROCESSING, OutboxLifecycleSignalEnum.RECLAIM, 2, 3))
+                .isEqualTo(OutboxStatus.PROCESSING);
+        assertThat(evaluateSafeClaim(service, OutboxStatus.PROCESSING, OutboxLifecycleSignalEnum.RECLAIM, 3, 3))
+                .isEqualTo(OutboxStatus.DEAD);
+    }
+
+    @Test
+    void safeClaimRejectsResultSignalsAndTerminalSources() {
+        OutboxLifecycleService service = service();
+
+        assertThatThrownBy(() -> evaluateSafeClaim(service, OutboxStatus.PROCESSING,
+                OutboxLifecycleSignalEnum.DELIVERY_SUCCEEDED, 1, 3))
+                .isInstanceOf(OutboxStateMachineException.class);
+        assertThatThrownBy(() -> evaluateSafeClaim(service, OutboxStatus.SUCCEEDED,
+                OutboxLifecycleSignalEnum.CLAIM, 1, 3))
+                .isInstanceOf(OutboxStateMachineException.class);
+    }
+
+    @Test
+    void safeClaimDoesNotChangeTheLegacyClaimContract() {
+        OutboxLifecycleService service = service();
+
+        assertThat(service.evaluate(OutboxStatus.PENDING.getMessage(), OutboxLifecycleSignalEnum.CLAIM, 3, 3))
+                .isEqualTo(OutboxStatus.PROCESSING);
+        assertThat(service.evaluate(OutboxStatus.RETRY_WAIT.getMessage(), OutboxLifecycleSignalEnum.CLAIM, 4, 3))
+                .isEqualTo(OutboxStatus.PROCESSING);
+    }
+
+    private static OutboxStatus evaluateSafeClaim(OutboxLifecycleService service, OutboxStatus source,
+                                                 OutboxLifecycleSignalEnum signal, int attemptCount,
+                                                 int maxAttempts) throws Exception {
+        try {
+            return (OutboxStatus) OutboxLifecycleService.class.getMethod("evaluateSafeClaim",
+                    String.class, OutboxLifecycleSignalEnum.class, int.class, int.class)
+                    .invoke(service, source.getMessage(), signal, attemptCount, maxAttempts);
+        } catch (InvocationTargetException failure) {
+            if (failure.getCause() instanceof Exception cause) {
+                throw cause;
+            }
+            throw failure;
+        }
     }
 
     @Test

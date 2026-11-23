@@ -5,12 +5,34 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import top.egon.cola.component.outbox.api.OutboxReceipt;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
 
 import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 
 public interface OutboxStore {
+
+    default boolean supportsDispatchMode(DispatchMode mode) {
+        return mode == DispatchMode.LEGACY;
+    }
+
+    default OutboxQueueCoordinationBO coordinate(@NotNull @Valid OutboxQueueCoordinationCommand command) {
+        throw new UnsupportedOperationException("OUTBOX_QUEUE_COORDINATION_UNSUPPORTED");
+    }
+
+    default OutboxClaimBatchBO claim(@NotNull @Valid OutboxClaimCommand command) {
+        throw new UnsupportedOperationException("OUTBOX_SAFE_CLAIM_UNSUPPORTED");
+    }
+
+    default OutboxFinishStatusEnum finishDelivery(@NotNull @Valid OutboxFinishCommand command) {
+        throw new UnsupportedOperationException("OUTBOX_SAFE_FINISH_UNSUPPORTED");
+    }
+
+    /** Physical message slots addressable by this store. */
+    default List<Integer> dispatchSlots() {
+        return List.of(0);
+    }
 
     default void selectShard(String group) {
         if (group != null) {

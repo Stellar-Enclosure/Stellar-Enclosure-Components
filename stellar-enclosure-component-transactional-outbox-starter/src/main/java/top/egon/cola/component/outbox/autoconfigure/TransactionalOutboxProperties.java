@@ -1,5 +1,13 @@
 package top.egon.cola.component.outbox.autoconfigure;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import lombok.experimental.Accessors;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.core.Ordered;
 import org.springframework.util.unit.DataSize;
@@ -25,6 +33,10 @@ public class TransactionalOutboxProperties {
     private final Rabbitmq rabbitmq = new Rabbitmq();
     private final Cleanup cleanup = new Cleanup();
     private final Shutdown shutdown = new Shutdown();
+    @Valid
+    private final Dispatch dispatch = new Dispatch();
+    @Valid
+    private final Coordination coordination = new Coordination();
 
     public boolean isEnabled() {
         return enabled;
@@ -80,6 +92,65 @@ public class TransactionalOutboxProperties {
 
     public Shutdown getShutdown() {
         return shutdown;
+    }
+
+    public Dispatch getDispatch() {
+        return dispatch;
+    }
+
+    public Coordination getCoordination() {
+        return coordination;
+    }
+
+    public enum DispatchMode {
+        LEGACY,
+        LOCAL,
+        COORDINATED
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    public static class Dispatch {
+        @NotNull
+        @Builder.Default
+        private DispatchMode mode = DispatchMode.LEGACY;
+        @Builder.Default
+        private boolean consumptionEnabled = true;
+        @Positive
+        @Builder.Default
+        private int maxClaimBatch = 1;
+        @Positive
+        @Builder.Default
+        private int maxConcurrentShards = 2;
+        @NotNull
+        @Builder.Default
+        private Duration ackReserve = Duration.ofSeconds(1);
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    @Accessors(chain = true)
+    @Builder
+    public static class Coordination {
+        @NotNull
+        @Builder.Default
+        private Duration heartbeatInterval = Duration.ofSeconds(5);
+        @NotNull
+        @Builder.Default
+        private Duration leaseDuration = Duration.ofSeconds(20);
+        @NotNull
+        @Builder.Default
+        private Duration membershipTtl = Duration.ofSeconds(30);
+        @NotNull
+        @Builder.Default
+        private Duration claimTimeout = Duration.ofSeconds(2);
+        @NotNull
+        @Builder.Default
+        private Duration memberRetention = Duration.ofHours(1);
     }
 
     public static class Annotation {
