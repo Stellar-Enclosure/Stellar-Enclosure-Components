@@ -434,6 +434,26 @@ class OutboxDispatcherTest {
         }
     }
 
+    @Test
+    void a_failed_handler_does_not_remove_the_only_ready_worker() throws Exception {
+        CountDownLatch applied = new CountDownLatch(1);
+        try (SafeHarness safe = new SafeHarness(1, List.of(0), context -> {
+            if ("safe-1".equals(context.messageId())) {
+                throw new AssertionError("isolated handler error");
+            }
+            return DeliveryResult.success();
+        })) {
+            safe.add(1, 0);
+            safe.add(2, 0);
+            safe.onApplied = applied::countDown;
+            safe.start();
+            safe.subject.submitDue();
+            assertThat(applied.await(3, TimeUnit.SECONDS)).isTrue();
+            assertThat(safe.delivered).containsExactly("safe-1", "safe-2");
+            assertThat(safe.finishes).extracting(OutboxFinishCommand::getMessageId).containsExactly("safe-2");
+        }
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) throw new AssertionError("test barrier was not released");

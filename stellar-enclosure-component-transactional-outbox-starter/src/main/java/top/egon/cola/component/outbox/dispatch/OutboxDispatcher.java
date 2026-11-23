@@ -877,7 +877,14 @@ public class OutboxDispatcher {
                             item = mailbox.poll(50, TimeUnit.MILLISECONDS);
                         }
                         if (item != null) {
-                            deliverWithLease(item);
+                            try {
+                                deliverWithLease(item);
+                            } catch (RuntimeException | AssertionError | LinkageError failure) {
+                                OutboxRecord row = item.record();
+                                metrics.dispatchStage(row.shardSlot(), row.channel(), "worker_failed");
+                                log.error("Outbox worker left the message for lease recovery, slot={}, channel={}, failureType={}",
+                                        row.shardSlot(), row.channel(), failure.getClass().getSimpleName());
+                            }
                         }
                     } while (accepting.get());
                 } catch (InterruptedException interrupted) {
