@@ -295,7 +295,7 @@ class JdbcOutboxPostgresqlIntegrationTest {
             assertEquals(1, first.epoch());
             var other = fixture.store().coordinate(coordination("instance-b", Set.of("test")));
             assertEquals(2, other.getMembers().size());
-            assertTrue(other.getLeases().isEmpty());
+            assertEquals(first, other.getLeases().get("test"));
             OutboxRecord running = fixture.store().claim(claim(1, "old-message-token", first)).getRecords().getFirst();
 
             jdbc.update("UPDATE " + SCHEMA + ".egon_cola_outbox_queue_lease "
@@ -311,7 +311,7 @@ class JdbcOutboxPostgresqlIntegrationTest {
                     fixture.store().finishDelivery(finish(running, DeliveryResult.success())));
 
             var staleRenewal = coordination("instance-a", Set.of()).setRenew(List.of(first));
-            assertTrue(fixture.store().coordinate(staleRenewal).getLeases().isEmpty());
+            assertEquals(successor, fixture.store().coordinate(staleRenewal).getLeases().get("test"));
             var renew = coordination("instance-b", Set.of()).setRenew(List.of(successor));
             assertEquals(successor.epoch(), fixture.store().coordinate(renew).getLeases().get("test").epoch());
             fixture.store().coordinate(coordination("instance-b", Set.of()).setRelease(List.of(successor)).setDraining(true));

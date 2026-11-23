@@ -73,6 +73,7 @@ public final class JdbcOutboxStore implements OutboxStore {
     private final String queueTable;
     private volatile boolean coordinationReady;
     private static final int MAX_MEMBERS = 1024;
+    private static final int MAX_QUEUES = 4096;
     private static final int MEMBER_CLEANUP_LIMIT = 100;
     private static final long MEMBER_CLEANUP_INTERVAL_NANOS = Duration.ofMinutes(1).toNanos();
     private final AtomicLong lastMemberCleanup = new AtomicLong(System.nanoTime() - MEMBER_CLEANUP_INTERVAL_NANOS);
@@ -155,7 +156,6 @@ public final class JdbcOutboxStore implements OutboxStore {
                             + "last_seen_at=EXCLUDED.last_seen_at, expires_at=EXCLUDED.expires_at",
                     command.getInstanceId(), capabilities, ttl);
 
-            Map<String, OutboxQueueLease> owned = new LinkedHashMap<>();
             for (String channel : queues) {
                 OutboxQueueLease release = findLease(command.getRelease(), channel);
                 OutboxQueueLease renew = findLease(command.getRenew(), channel);
@@ -174,9 +174,6 @@ public final class JdbcOutboxStore implements OutboxStore {
                             queueLeaseMillis(), channel, command.getInstanceId(), renew.epoch());
                 }
                 if (command.getAcquire().contains(channel)) acquireQueue(channel, command.getInstanceId());
-                OutboxQueueLease current = lockedQueue(channel, "FOR UPDATE");
-                if (current != null && current.instanceId().equals(command.getInstanceId())
-                        && current.expiresAt().isAfter(databaseTime())) owned.put(channel, current);
             }
             List<OutboxQueueCoordinationBO.Member> members = jdbc.query("SELECT instance_id, capabilities_json, expires_at "
                             + "FROM " + memberTable + " WHERE shard_slot=0 AND expires_at > clock_timestamp() "
@@ -197,8 +194,18 @@ public final class JdbcOutboxStore implements OutboxStore {
                                 + " WHERE shard_slot=0 AND expires_at <= clock_timestamp()-(? * interval '1 millisecond') "
                                 + "ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED)", retention, retention, MEMBER_CLEANUP_LIMIT);
             }
+            Map<String, OutboxQueueLease> activeLeases = new LinkedHashMap<>();
+            List<OutboxQueueLease> leases = jdbc.query("SELECT channel, owner_instance_id, epoch, expires_at FROM "
+                            + queueTable + " WHERE shard_slot=0 AND expires_at > clock_timestamp() ORDER BY channel LIMIT ?",
+                    this::readQueueLease, MAX_QUEUES + 1);
+            if (leases.size() > MAX_QUEUES) {
+                throw new OutboxStorageException("OUTBOX_QUEUE_SNAPSHOT_LIMIT_EXCEEDED");
+            }
+            for (OutboxQueueLease lease : leases) {
+                activeLeases.put(lease.key().channel(), lease);
+            }
             return OutboxQueueCoordinationBO.builder().databaseTime(databaseTime())
-                    .members(List.copyOf(members)).leases(Map.copyOf(owned)).build();
+                    .members(List.copyOf(members)).leases(Map.copyOf(activeLeases)).build();
         });
     }
 
@@ -661,11 +668,15 @@ public final class JdbcOutboxStore implements OutboxStore {
                 instance, queueLeaseMillis(), channel, Long.MAX_VALUE);
     }
 
+    private OutboxQueueLease readQueueLease(ResultSet rs, int row) throws SQLException {
+        return new OutboxQueueLease(new OutboxQueueKey(0, rs.getString("channel")),
+                rs.getString("owner_instance_id"), rs.getLong("epoch"), instant(rs, "expires_at"));
+    }
+
     private OutboxQueueLease lockedQueue(String channel, String lock) {
         List<OutboxQueueLease> leases = jdbc.query("SELECT channel, owner_instance_id, epoch, expires_at FROM "
                         + queueTable + " WHERE shard_slot=0 AND channel=? " + lock,
-                (rs, row) -> new OutboxQueueLease(new OutboxQueueKey(0, rs.getString("channel")),
-                        rs.getString("owner_instance_id"), rs.getLong("epoch"), instant(rs, "expires_at")), channel);
+                this::readQueueLease, channel);
         return leases.isEmpty() ? null : leases.getFirst();
     }
 
