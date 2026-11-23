@@ -111,10 +111,7 @@ public final class OutboxQueueCoordinator {
 
     void release(int slot) {
         View view = views.remove(slot);
-        if (view == null) {
-            return;
-        }
-        List<OutboxQueueLease> leases = view.snapshot().getLeases().values().stream()
+        List<OutboxQueueLease> leases = view == null ? List.of() : view.snapshot().getLeases().values().stream()
                 .filter(lease -> instanceId.equals(lease.instanceId())).toList();
         try {
             store.coordinate(OutboxQueueCoordinationCommand.builder().shardSlot(slot).instanceId(instanceId)

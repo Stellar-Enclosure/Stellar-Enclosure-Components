@@ -110,6 +110,20 @@ class OutboxQueueCoordinatorTest {
     }
 
     @Test
+    void drain_retires_membership_even_when_the_last_heartbeat_lost_its_view() throws Exception {
+        CoordinationStore fixture = new CoordinationStore(Set.of("http"));
+        Object coordinator = coordinator(fixture.store, fixture.channels);
+        refresh(coordinator, 0, key -> false);
+        refresh(coordinator, 0, key -> false);
+        fixture.failNext = true;
+        refresh(coordinator, 0, key -> false);
+        assertThat(owned(coordinator, 0)).isEmpty();
+        invoke(coordinator, "release", new Class<?>[]{int.class}, 0);
+        assertThat(fixture.last(0).isDraining()).isTrue();
+        assertThat(fixture.last(0).getRelease()).isEmpty();
+    }
+
+    @Test
     void release_drains_the_member_and_preserves_the_last_epoch_evidence() throws Exception {
         CoordinationStore fixture = new CoordinationStore(Set.of("http"));
         Object coordinator = coordinator(fixture.store, fixture.channels);

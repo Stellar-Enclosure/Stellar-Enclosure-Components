@@ -218,8 +218,8 @@ class OutboxPostgresqlMultishardIntegrationTest {
                         "runtime-paused", DispatchMode.COORDINATED, pausedProbe, new RuntimeFault(), readProbe, false)) {
                     pausedMessage = enqueueRuntime(paused, "group_a", "during-consumption-pause");
                     assertThat(runtimeStatus(primaryA, pausedMessage)).isEqualTo("PENDING");
-                    assertThat(activeRuntimeMembers(primaryA)).isZero();
-                    assertThat(activeRuntimeMembers(primaryB)).isZero();
+                    awaitRuntime(() -> activeRuntimeMembers(primaryA) == 0 && activeRuntimeMembers(primaryB) == 0,
+                            "former coordinators retired or expired while the paused producer wrote no heartbeat");
                     assertThat(pausedProbe.totalStarts.get()).isZero();
                 }
 
