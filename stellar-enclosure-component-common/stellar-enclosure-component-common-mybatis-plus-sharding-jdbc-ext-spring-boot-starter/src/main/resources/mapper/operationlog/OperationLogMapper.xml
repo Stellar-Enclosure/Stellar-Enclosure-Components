@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="top.egon.cola.component.common.mybatis.operationlog.OperationLogDAO">
+
+    <resultMap id="detail" type="top.egon.cola.component.common.mybatis.operationlog.OperationLogPO" autoMapping="true">
+        <id property="id" column="id"/>
+        <result property="details" column="details" javaType="com.fasterxml.jackson.databind.node.ObjectNode"
+            typeHandler="top.egon.cola.component.common.mybatis.operationlog.OperationLogPO$JsonbTypeHandler"/>
+    </resultMap>
+
+    <insert id="append">
+        INSERT INTO egon_cola_operation_log (
+            id, tenant_id, operation_id, schema_version, source_service, module_code, action_code, resource_type, resource_id, biz_code, namespace_code, env,
+            app_code, actor_type, actor_id, actor_name, trigger_type, phase, outcome, reason_code, http_method, request_url, route_pattern, handler_method, trace_id, request_id,
+            occurred_at, duration_ms, details, create_user_id, create_time, update_user_id, update_time, version, deleted_at
+        ) VALUES (
+            #{et.id}, #{et.tenantId}, #{et.operationId}, #{et.schemaVersion}, #{et.sourceService}, #{et.moduleCode}, #{et.actionCode}, #{et.resourceType}, #{et.resourceId}, #{et.bizCode}, #{et.namespaceCode}, #{et.env}, #{et.appCode}, #{et.actorType}, #{et.actorId}, #{et.actorName}, #{et.triggerType}, #{et.phase}, #{et.outcome}, #{et.reasonCode}, #{et.httpMethod}, #{et.requestUrl}, #{et.routePattern}, #{et.handlerMethod}, #{et.traceId}, #{et.requestId}, #{et.occurredAt}, #{et.durationMs}, #{et.details,jdbcType=OTHER,typeHandler=top.egon.cola.component.common.mybatis.operationlog.OperationLogPO$JsonbTypeHandler}, #{et.createUserId}, #{et.createTime}, #{et.updateUserId}, #{et.updateTime}, #{et.version}, #{et.deletedAt}
+        )
+    </insert>
+
+    <select id="page" resultType="top.egon.cola.component.common.mybatis.operationlog.OperationLogRepository$PageRow">
+        SELECT id, tenant_id, operation_id, occurred_at, source_service, module_code,
+            action_code, resource_type, resource_id, actor_type, actor_id, actor_name,
+            phase, outcome, route_pattern
+        FROM egon_cola_operation_log
+        WHERE tenant_id = #{query.tenantId} AND deleted_at IS NULL
+            AND occurred_at &gt;= #{query.from} AND occurred_at &lt; #{query.to}
+        <if test="query.filters['actionCode'] != null">AND action_code = #{query.filters.actionCode}</if>
+        <if test="query.filters['actorId'] != null">AND actor_id = #{query.filters.actorId}</if>
+        <if test="query.filters['resourceType'] != null">AND resource_type = #{query.filters.resourceType}</if>
+        <if test="query.filters['resourceId'] != null">AND resource_id = #{query.filters.resourceId}</if>
+        <if test="query.filters['bizCode'] != null">AND biz_code = #{query.filters.bizCode}</if>
+        <if test="query.filters['namespaceCode'] != null">AND namespace_code = #{query.filters.namespaceCode}</if>
+        <if test="query.filters['env'] != null">AND env = #{query.filters.env}</if>
+        <if test="query.filters['appCode'] != null">AND app_code = #{query.filters.appCode}</if>
+        <if test="query.filters['outcome'] != null">AND outcome = #{query.filters.outcome}</if>
+        <if test="query.beforeTime != null">
+            AND (occurred_at &lt; #{query.beforeTime}
+                OR (occurred_at = #{query.beforeTime} AND id &lt; #{query.beforeId}))
+        </if>
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT #{query.fetchLimit}
+    </select>
+
+    <select id="findDetail" resultMap="detail">
+        SELECT id, tenant_id, operation_id, schema_version, source_service, module_code, action_code, resource_type, resource_id, biz_code, namespace_code, env,
+            app_code, actor_type, actor_id, actor_name, trigger_type, phase, outcome, reason_code, http_method, request_url, route_pattern, handler_method, trace_id, request_id,
+            occurred_at, duration_ms, details, create_user_id, create_time, update_user_id, update_time, version, deleted_at
+        FROM egon_cola_operation_log
+        WHERE tenant_id = #{tenantId} AND id = #{id} AND occurred_at = #{occurredAt} AND deleted_at IS NULL
+    </select>
+</mapper>

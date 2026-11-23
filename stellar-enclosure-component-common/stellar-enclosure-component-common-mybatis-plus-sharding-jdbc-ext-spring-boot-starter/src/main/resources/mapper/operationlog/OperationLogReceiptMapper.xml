@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="top.egon.cola.component.common.mybatis.operationlog.OperationLogReceiptDAO">
+    <insert id="insertIfAbsent">
+        INSERT INTO egon_cola_operation_log_receipt
+            (id, tenant_id, occurred_at, payload_sha256, create_user_id,
+             create_time, update_user_id, update_time, version, deleted_at)
+        VALUES (#{et.id}, #{et.tenantId}, #{et.occurredAt}, #{et.payloadSha256}, #{et.createUserId},
+                #{et.createTime}, #{et.updateUserId}, #{et.updateTime}, #{et.version}, #{et.deletedAt})
+        ON CONFLICT (tenant_id, id) DO NOTHING
+    </insert>
+
+    <select id="confirm" resultType="top.egon.cola.component.common.mybatis.operationlog.OperationLogReceiptDAO$ReceiptConfirmation">
+        SELECT occurred_at, payload_sha256
+        FROM egon_cola_operation_log_receipt
+        WHERE tenant_id = #{tenantId} AND id = #{id} AND deleted_at IS NULL
+    </select>
+</mapper>

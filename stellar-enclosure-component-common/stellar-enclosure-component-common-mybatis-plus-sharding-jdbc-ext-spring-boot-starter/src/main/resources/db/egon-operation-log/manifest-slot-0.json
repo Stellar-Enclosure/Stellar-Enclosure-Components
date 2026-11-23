@@ -1,0 +1,10 @@
+{
+  "family": "component-operation-log",
+  "scripts": [
+    {
+      "version": "20261123_001",
+      "path": "db/egon-operation-log/V20261123_001__initialize_operation_log_slot_0.sql",
+      "sha256": "8e06fd57e3d966da686518e13b084e9e5ee4bcc14e1e1b6a921e7724cffe7061"
+    }
+  ]
+}
