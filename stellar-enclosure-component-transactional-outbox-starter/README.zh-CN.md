@@ -776,7 +776,7 @@ Docker 或数据库启动失败会使任务失败，不会静默跳过。
 
 ```bash
 ./mvnw -B -ntp -pl :stellar-enclosure-component-transactional-outbox-starter -am \
-  '-Dtest=**/component/outbox/**/*Test' -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest=OutboxQueueCoordinatorTest,OutboxDispatcherTest,OutboxPollerTest -Dsurefire.failIfNoSpecifiedTests=false \
   -Dit.test=OutboxPostgresqlMultishardIntegrationTest,OutboxPostgresqlReadwriteIntegrationTest \
   -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```

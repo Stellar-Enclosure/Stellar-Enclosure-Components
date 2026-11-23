@@ -909,7 +909,7 @@ starts two coordinated consumers and then restarts the same version in
 
 ```bash
 ./mvnw -B -ntp -pl :stellar-enclosure-component-transactional-outbox-starter -am \
-  '-Dtest=**/component/outbox/**/*Test' -Dsurefire.failIfNoSpecifiedTests=false \
+  -Dtest=OutboxQueueCoordinatorTest,OutboxDispatcherTest,OutboxPollerTest -Dsurefire.failIfNoSpecifiedTests=false \
   -Dit.test=OutboxPostgresqlMultishardIntegrationTest,OutboxPostgresqlReadwriteIntegrationTest \
   -Dfailsafe.failIfNoSpecifiedTests=false verify
 ```
