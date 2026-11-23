@@ -36,6 +36,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
+import top.egon.cola.component.outbox.store.OutboxFinishStatusEnum;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -242,6 +245,54 @@ class PostgresqlOutboxRecoveryIntegrationTest extends PostgresqlOutboxTestSuppor
                 from egon_outbox.egon_cola_outbox_message
                 where message_id = 'exhausted-reclaim'
                 """, String.class)).isEqualTo("OUTBOX_RETRY_EXHAUSTED");
+    }
+
+    @Test
+    void safe_reclaim_uses_a_new_message_token_and_cannot_overwrite_the_new_attempt() {
+        var safe = safeMpOutboxStore(DispatchMode.COORDINATED);
+        safe.enqueue(newRecord("safe-reclaim", "safe-reclaim-key", "d".repeat(64), 3));
+        var lease = safe.coordinate(coordinateCommand("instance-a", Set.of("test"))).getLeases().get("test");
+        OutboxRecord old = safe.claim(safeClaim("safe-old-token", lease)).getRecords().getFirst();
+        physicalJdbcTemplate.update("UPDATE egon_outbox.egon_cola_outbox_message "
+                + "SET locked_until=clock_timestamp()-interval '1 second' WHERE id=?", old.id());
+        assertThat(safe.finishDelivery(safeFinish(old, DeliveryResult.success()))).isEqualTo(OutboxFinishStatusEnum.LEASE_LOST);
+        OutboxRecord replacement = safe.claim(safeClaim("safe-new-token", lease).setDueQuota(0).setReclaimQuota(1))
+                .getRecords().getFirst();
+        assertThat(replacement.id()).isEqualTo(old.id());
+        assertThat(replacement.messageId()).isEqualTo(old.messageId());
+        assertThat(replacement.attemptCount()).isEqualTo(2);
+        var before = physicalJdbcTemplate.queryForMap("SELECT status,attempt_count,version,locked_by "
+                + "FROM egon_outbox.egon_cola_outbox_message WHERE id=?", replacement.id());
+        assertThat(safe.finishDelivery(safeFinish(old, DeliveryResult.success()))).isEqualTo(OutboxFinishStatusEnum.LEASE_LOST);
+        assertThat(physicalJdbcTemplate.queryForMap("SELECT status,attempt_count,version,locked_by "
+                + "FROM egon_outbox.egon_cola_outbox_message WHERE id=?", replacement.id())).isEqualTo(before);
+        assertThat(safe.finishDelivery(safeFinish(replacement, DeliveryResult.success()))).isEqualTo(OutboxFinishStatusEnum.APPLIED);
+    }
+
+    @Test
+    void safe_claim_terminalizes_exhausted_rows_without_returning_them_for_delivery() {
+        var safe = safeMpOutboxStore(DispatchMode.LOCAL);
+        safe.enqueue(newRecord("safe-exhausted-pending", "safe-exhausted-pending-key", "e".repeat(64), 1));
+        safe.enqueue(newRecord("safe-exhausted-retry", "safe-exhausted-retry-key", "f".repeat(64), 1));
+        safe.enqueue(newRecord("safe-exhausted-running", "safe-exhausted-running-key", "a".repeat(64), 1));
+        physicalJdbcTemplate.update("UPDATE egon_outbox.egon_cola_outbox_message SET attempt_count=1");
+        physicalJdbcTemplate.update("UPDATE egon_outbox.egon_cola_outbox_message SET status='RETRY_WAIT', attempt_count=2 "
+                + "WHERE message_id='safe-exhausted-retry'");
+        physicalJdbcTemplate.update("UPDATE egon_outbox.egon_cola_outbox_message SET status='PROCESSING', "
+                + "locked_by='crashed', locked_until=clock_timestamp()-interval '1 second' "
+                + "WHERE message_id='safe-exhausted-running'");
+        int exhausted = 0;
+        for (int index = 0; index < 3; index++) {
+            var command = safeClaim("safe-no-delivery-"+index, null);
+            if (index == 2) command.setDueQuota(0).setReclaimQuota(1);
+            var batch = safe.claim(command);
+            assertThat(batch.getRecords()).isEmpty();
+            exhausted += batch.getExhaustedCount();
+        }
+        assertThat(exhausted).isEqualTo(3);
+        assertThat(physicalJdbcTemplate.queryForObject("SELECT count(*) FROM egon_outbox.egon_cola_outbox_message "
+                + "WHERE status='DEAD' AND locked_by IS NULL AND locked_until IS NULL "
+                + "AND last_error_code='OUTBOX_RETRY_EXHAUSTED' AND completed_at IS NOT NULL", Integer.class)).isEqualTo(3);
     }
 
     private DeliveryHandlerRegistry registry() {

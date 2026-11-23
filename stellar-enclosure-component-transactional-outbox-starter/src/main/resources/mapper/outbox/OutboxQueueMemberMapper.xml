@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO">
+
+    <resultMap id="member" type="top.egon.cola.component.outbox.persistence.po.OutboxQueueMemberPO">
+        <result column="id" property="id"/>
+        <result column="shard_slot" property="shardSlot"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="create_user_id" property="createUserId"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_user_id" property="updateUserId"/>
+        <result column="update_time" property="updateTime"/>
+        <result column="deleted_at" property="deletedAt"/>
+        <result column="version" property="version"/>
+        <result column="last_seen_at" property="lastSeenAt"/>
+        <result column="instance_id" property="instanceId"/>
+        <result column="capabilities_json" property="capabilitiesJson"/>
+        <result column="expires_at" property="expiresAt"/>
+        <result column="database_time" property="databaseTime"/>
+    </resultMap>
+
+    <update id="refresh">
+        UPDATE egon_outbox.egon_cola_outbox_queue_member
+        SET capabilities_json = #{json}, last_seen_at = statement_timestamp(),
+            expires_at = statement_timestamp() + (#{ttlMillis} * interval '1 millisecond'),
+            update_time = clock_timestamp(), version = version + 1
+        WHERE shard_slot = #{slot} AND tenant_id = 0 AND deleted_at IS NULL AND instance_id = #{instance}
+    </update>
+
+    <insert id="register">
+        INSERT INTO egon_outbox.egon_cola_outbox_queue_member
+            (id, shard_slot, instance_id, capabilities_json, last_seen_at, expires_at,
+             tenant_id, create_user_id, create_time, update_user_id, update_time)
+        VALUES (#{id}, #{slot}, #{instance}, #{json}, statement_timestamp(),
+            statement_timestamp() + (#{ttlMillis} * interval '1 millisecond'),
+            0, 'system:outbox', clock_timestamp(), 'system:outbox', clock_timestamp())
+        ON CONFLICT (shard_slot, instance_id) DO NOTHING
+    </insert>
+
+    <select id="active" resultMap="member" flushCache="true" useCache="false">
+        SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, instance_id, capabilities_json, last_seen_at, expires_at, clock_timestamp() AS database_time
+        FROM egon_outbox.egon_cola_outbox_queue_member WHERE shard_slot = #{slot} AND tenant_id = 0
+          AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY instance_id LIMIT #{limit} FOR KEY SHARE
+    </select>
+
+    <select id="staleIds" resultType="java.lang.Long" useCache="false">
+        SELECT id FROM egon_outbox.egon_cola_outbox_queue_member
+        WHERE shard_slot = #{slot} AND tenant_id = 0 AND deleted_at IS NULL
+          AND expires_at &lt;= clock_timestamp() - (#{retentionMillis} * interval '1 millisecond')
+        ORDER BY id LIMIT #{limit} FOR KEY SHARE
+    </select>
+
+    <delete id="removeStale">
+        DELETE FROM egon_outbox.egon_cola_outbox_queue_member
+        WHERE shard_slot = #{slot} AND tenant_id = 0 AND deleted_at IS NULL AND id = #{id}
+          AND expires_at &lt;= clock_timestamp() - (#{retentionMillis} * interval '1 millisecond')
+    </delete>
+</mapper>

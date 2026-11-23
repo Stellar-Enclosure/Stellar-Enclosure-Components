@@ -1,5 +1,8 @@
 package top.egon.cola.component.outbox.store;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotNull;
@@ -8,10 +11,22 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DataAccessException;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionTemplate;
 import top.egon.cola.component.common.id.snowflake.SnowflakeIdGenerator;
 import top.egon.cola.component.outbox.api.OutboxReceipt;
 import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
+import top.egon.cola.component.outbox.delivery.DeliveryResult;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueLeaseConverter;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueMemberConverter;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO;
+import top.egon.cola.component.outbox.persistence.po.OutboxQueueLeasePO;
+import top.egon.cola.component.outbox.persistence.po.OutboxQueueMemberPO;
+import top.egon.cola.component.outbox.retry.OutboxRetryPolicy;
 import top.egon.cola.component.outbox.common.exception.OutboxConfigurationException;
 import top.egon.cola.component.outbox.common.exception.OutboxIdempotencyConflictException;
 import top.egon.cola.component.outbox.common.exception.OutboxStorageException;
@@ -27,7 +42,12 @@ import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleStateMachineFactory;
 import top.egon.cola.component.outbox.statemachine.OutboxLifecycleSignalEnum;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Stream;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -46,6 +66,8 @@ import java.sql.SQLException;
 public class MybatisPlusOutboxStore implements OutboxStore {
 
     private static final String TECHNICAL_USER_ID = "system:outbox";
+    private static final int MAX_MEMBERS = 1024;
+    private static final int MAX_QUEUES = 4096;
     private static final int MAX_CANDIDATE_LIMIT = 10_000;
     private static final int DEFAULT_MAX_CLAIM_CONTENTION_RETRIES = 8;
     private static final String RECLAIM_EXHAUSTED_CODE = "OUTBOX_RETRY_EXHAUSTED";
@@ -116,6 +138,373 @@ public class MybatisPlusOutboxStore implements OutboxStore {
         this.maxClaimContentionRetries = maxClaimContentionRetries;
     }
 
+
+    private volatile DispatchResources safeDispatch;
+    private volatile TransactionalOutboxProperties dispatchOptions;
+
+    public void configureConsumption(TransactionalOutboxProperties properties) {
+        this.dispatchOptions = Objects.requireNonNull(properties);
+    }
+
+    public synchronized void configureSafeDispatch(TransactionalOutboxProperties properties, ObjectMapper objectMapper,
+                                                   OutboxRetryPolicy retryPolicy, OutboxQueueMemberDAO members,
+                                                   OutboxQueueLeaseDAO leases, OutboxQueueMemberConverter memberConverter,
+                                                   OutboxQueueLeaseConverter leaseConverter) {
+        if (safeDispatch != null) {
+            throw new IllegalStateException("OUTBOX_DISPATCH_ALREADY_CONFIGURED");
+        }
+        var options = Objects.requireNonNull(properties);
+        configureConsumption(options);
+        TransactionTemplate transaction = new TransactionTemplate(workerTransaction.getTransactionManager(), workerTransaction);
+        transaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        transaction.setTimeout(Math.max(1, Math.toIntExact(options.getCoordination().getClaimTimeout()
+                .plusMillis(999).toSeconds())));
+        safeDispatch = new DispatchResources(options, Objects.requireNonNull(objectMapper), Objects.requireNonNull(retryPolicy),
+                Objects.requireNonNull(members), Objects.requireNonNull(leases), Objects.requireNonNull(memberConverter),
+                Objects.requireNonNull(leaseConverter), transaction);
+    }
+
+    @Override
+    public boolean supportsDispatchMode(DispatchMode mode) {
+        return mode == DispatchMode.LEGACY || mode != null && safeDispatch != null;
+    }
+
+    @Override
+    public List<Integer> dispatchSlots() {
+        return shardRouting.slots();
+    }
+
+    @Override
+    public OutboxQueueCoordinationBO coordinate(OutboxQueueCoordinationCommand command) {
+        DispatchResources resources = safeResources();
+        Objects.requireNonNull(command, "command");
+        int slot = command.getShardSlot();
+        shardRouting.requireSlot(slot);
+        if (resources.options().getDispatch().getMode() != DispatchMode.COORDINATED
+                || !command.isDraining() && !consumptionEnabled()) {
+            throw new IllegalStateException("OUTBOX_QUEUE_COORDINATION_DISABLED");
+        }
+        validateCoordination(command);
+        var options = resources.options().getCoordination();
+        long ttl = command.isDraining() ? 0 : options.getMembershipTtl().toMillis();
+        String json = writeCapabilities(resources, command.isDraining() ? Set.of() : command.getChannels());
+        return safeTransaction(resources, slot, () -> {
+            refreshMember(resources, slot, command.getInstanceId(), json, ttl);
+            reviseLeases(resources, command, options.getLeaseDuration().toMillis());
+            List<OutboxQueueMemberPO> active = technicalContext.executeMember(
+                    () -> resources.members().active(slot, MAX_MEMBERS + 1));
+            List<OutboxQueueLeasePO> leases = technicalContext.executeLease(
+                    () -> resources.leases().active(slot, MAX_QUEUES + 1));
+            if (active.size() > MAX_MEMBERS || leases.size() > MAX_QUEUES) {
+                throw new OutboxStorageException("Outbox coordination snapshot exceeds its limit");
+            }
+            if (!command.isDraining() && !active.isEmpty()
+                    && active.getFirst().getInstanceId().equals(command.getInstanceId())) {
+                pruneMembership(resources, slot, options.getMemberRetention().toMillis());
+            }
+            var memberView = active.stream().map(row -> resources.memberConverter().toTarget(
+                    row.setChannels(readCapabilities(resources, row.getCapabilitiesJson())))).toList();
+            Map<String, OutboxQueueLease> leaseView = new LinkedHashMap<>();
+            for (OutboxQueueLeasePO lease : leases) {
+                leaseView.put(lease.getChannel(), resources.leaseConverter().toTarget(lease.setShardSlot(slot)));
+            }
+            return OutboxQueueCoordinationBO.builder().members(memberView).leases(Map.copyOf(leaseView))
+                    .databaseTime(active.isEmpty() ? null : active.getFirst().getDatabaseTime()).build();
+        });
+    }
+
+    private void validateCoordination(OutboxQueueCoordinationCommand command) {
+        if (command.getInstanceId() == null || command.getInstanceId().isBlank()
+                || command.getInstanceId().length() > 128 || command.getChannels() == null
+                || command.getChannels().size() > 128 || command.getAcquire() == null
+                || !command.getChannels().containsAll(command.getAcquire())
+                || command.getRenew() == null || command.getRelease() == null
+                || command.getRenew().size() > 128 || command.getRelease().size() > 128
+                || command.isDraining() && (!command.getRenew().isEmpty() || !command.getAcquire().isEmpty())) {
+            throw new IllegalArgumentException("OUTBOX_COORDINATION_COMMAND_INVALID");
+        }
+        int slot = command.getShardSlot();
+        command.getChannels().forEach(channel -> new OutboxQueueKey(slot, channel));
+        Set<String> intents = new LinkedHashSet<>(command.getAcquire());
+        for (OutboxQueueLease lease : Stream.concat(command.getRenew().stream(), command.getRelease().stream()).toList()) {
+            if (lease == null || lease.key().shardSlot() != slot || !command.getInstanceId().equals(lease.instanceId())
+                    || !intents.add(lease.key().channel())) {
+                throw new IllegalArgumentException("OUTBOX_COORDINATION_INTENT_INVALID");
+            }
+        }
+        if (command.getRenew().stream().anyMatch(lease -> !command.getChannels().contains(lease.key().channel()))) {
+            throw new IllegalArgumentException("OUTBOX_COORDINATION_CAPABILITY_REQUIRED");
+        }
+    }
+
+    private void refreshMember(DispatchResources resources, int slot, String instance, String json, long ttl) {
+        technicalContext.executeMember(() -> {
+            if (resources.members().refresh(slot, instance, json, ttl) == 0
+                    && resources.members().register(slot, nextId(), instance, json, ttl) == 0) {
+                resources.members().refresh(slot, instance, json, ttl);
+            }
+            return null;
+        });
+    }
+
+    private void reviseLeases(DispatchResources resources, OutboxQueueCoordinationCommand command, long leaseMillis) {
+        int slot = command.getShardSlot();
+        String instance = command.getInstanceId();
+        technicalContext.executeLease(() -> {
+            Map<String, Runnable> actions = new TreeMap<>();
+            for (OutboxQueueLease release : command.getRelease()) {
+                actions.put(release.key().channel(), () -> resources.leases().release(
+                        slot, release.key().channel(), instance, release.epoch()));
+            }
+            for (OutboxQueueLease renew : command.getRenew()) {
+                actions.put(renew.key().channel(), () -> resources.leases().renew(
+                        slot, renew.key().channel(), instance, renew.epoch(), leaseMillis));
+            }
+            for (String channel : command.getAcquire()) {
+                actions.put(channel, () -> {
+                    if (resources.leases().acquireExpired(slot, channel, instance, leaseMillis) == 0) {
+                        resources.leases().register(slot, nextId(), channel, instance, leaseMillis);
+                    }
+                });
+            }
+            actions.values().forEach(Runnable::run);
+            return null;
+        });
+    }
+
+    private void pruneMembership(DispatchResources resources, int slot, long retentionMillis) {
+        technicalContext.executeMember(() -> {
+            for (Long id : resources.members().staleIds(slot, retentionMillis, 16)) {
+                resources.members().removeStale(slot, id, retentionMillis);
+            }
+            return null;
+        });
+    }
+
+    private static String writeCapabilities(DispatchResources resources, Set<String> channels) {
+        try {
+            String json = resources.mapper().writeValueAsString(channels.stream().sorted().toList());
+            if (json.getBytes(StandardCharsets.UTF_8).length > 32768) {
+                throw new IllegalArgumentException("OUTBOX_COORDINATION_CAPABILITIES_TOO_LARGE");
+            }
+            return json;
+        } catch (JsonProcessingException failure) {
+            throw new OutboxStorageException("Failed to encode outbox capabilities", failure);
+        }
+    }
+
+    private static Set<String> readCapabilities(DispatchResources resources, String json) {
+        try {
+            List<String> channels = resources.mapper().readValue(json, new TypeReference<List<String>>() { });
+            if (channels == null || channels.size() > 128) {
+                throw new OutboxStorageException("Stored outbox capabilities are invalid");
+            }
+            for (String channel : channels) {
+                new OutboxQueueKey(0, channel);
+            }
+            Set<String> unique = Set.copyOf(channels);
+            if (unique.size() != channels.size()) {
+                throw new OutboxStorageException("Stored outbox capabilities contain duplicate channels");
+            }
+            return unique;
+        } catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw new OutboxStorageException("Failed to decode outbox capabilities", failure);
+        }
+    }
+
+    @Override
+    public OutboxClaimBatchBO claim(OutboxClaimCommand command) {
+        DispatchResources resources = safeResources();
+        Objects.requireNonNull(command, "command");
+        OutboxQueueKey key = Objects.requireNonNull(command.getQueueKey(), "queueKey");
+        shardRouting.requireSlot(key.shardSlot());
+        DispatchMode mode = resources.options().getDispatch().getMode();
+        if (mode == DispatchMode.LEGACY || !consumptionEnabled()
+                || storageProperties.isMigrationMode()) {
+            throw new IllegalStateException("OUTBOX_SAFE_CLAIM_DISABLED");
+        }
+        if (command.getLimit() != 1 || command.getDueQuota() < 0 || command.getReclaimQuota() < 0
+                || (long) command.getDueQuota() + command.getReclaimQuota() > 1
+                || command.getClaimToken() == null || command.getClaimToken().isBlank()
+                || command.getClaimToken().length() > 128 || command.getLeaseDuration() == null
+                || command.getLeaseDuration().toMillis() < 1
+                || mode == DispatchMode.LOCAL && command.getQueueLease() != null
+                || command.getQueueLease() != null && !key.equals(command.getQueueLease().key())) {
+            throw new IllegalArgumentException("OUTBOX_SAFE_CLAIM_INVALID");
+        }
+        return safeTransaction(resources, key.shardSlot(), () -> {
+            OutboxQueueLease lease = command.getQueueLease();
+            if (mode == DispatchMode.COORDINATED && !lockQueue(resources, lease)) {
+                return OutboxClaimBatchBO.builder().notOwner(true).build();
+            }
+            OutboxClaimBatchBO batch = technicalContext.execute(() -> claimCandidate(key, command));
+            if (mode == DispatchMode.COORDINATED && !stillOwnsQueue(resources, lease)) {
+                throw new OutboxStorageException("Queue lease expired before the outbox claim completed");
+            }
+            return batch;
+        });
+    }
+
+    private boolean lockQueue(DispatchResources resources, OutboxQueueLease lease) {
+        if (lease == null) {
+            return false;
+        }
+        return technicalContext.executeLease(() -> {
+            var selected = resources.leases().lockQueue(lease.key().shardSlot(), lease.key().channel());
+            return selected != null && selected.getEpoch() == lease.epoch()
+                    && lease.instanceId().equals(selected.getOwnerInstanceId())
+                    && Boolean.TRUE.equals(resources.leases().current(
+                            lease.key().shardSlot(), lease.key().channel(), lease.instanceId(), lease.epoch()));
+        });
+    }
+
+    private boolean stillOwnsQueue(DispatchResources resources, OutboxQueueLease lease) {
+        return technicalContext.executeLease(() -> Boolean.TRUE.equals(resources.leases().current(
+                lease.key().shardSlot(), lease.key().channel(), lease.instanceId(), lease.epoch())));
+    }
+
+    private OutboxClaimBatchBO claimCandidate(OutboxQueueKey key, OutboxClaimCommand command) {
+        boolean reclaimFirst = command.getReclaimQuota() > 0;
+        List<OutboxMessagePO> rows = repository.safeCandidates(key.channel(), reclaimFirst, 1);
+        if (rows.isEmpty()) {
+            rows = repository.safeCandidates(key.channel(), !reclaimFirst, 1);
+        }
+        if (rows.isEmpty()) {
+            return new OutboxClaimBatchBO();
+        }
+        OutboxMessagePO candidate = rows.getFirst();
+        OutboxLifecycleSignalEnum signal = candidate.getStatus() == OutboxStatus.PROCESSING
+                ? OutboxLifecycleSignalEnum.RECLAIM : OutboxLifecycleSignalEnum.CLAIM;
+        OutboxStatus target = lifecycle.evaluateSafeClaim(candidate.getStatus().name(), signal,
+                candidate.getAttemptCount(), candidate.getMaxAttempts());
+        if (target == OutboxStatus.DEAD) {
+            int changed = repository.safeExhausted(candidate, RECLAIM_EXHAUSTED_CODE, RECLAIM_EXHAUSTED_MESSAGE);
+            return OutboxClaimBatchBO.builder().exhaustedCount(changed).build();
+        }
+        if (repository.safeClaim(candidate, command.getClaimToken(), command.getLeaseDuration().toMillis()) != 1) {
+            return new OutboxClaimBatchBO();
+        }
+        OutboxMessagePO claimed = repository.safeRow(candidate.getId());
+        if (claimed == null || !command.getClaimToken().equals(claimed.getLockedBy())) {
+            throw new OutboxStorageException("Claimed outbox message could not be reloaded from its shard");
+        }
+        return OutboxClaimBatchBO.builder().records(List.of(toRecord(claimed))).databaseTime(claimed.getUpdatedAt()).build();
+    }
+
+    @Override
+    public OutboxFinishStatusEnum finishDelivery(OutboxFinishCommand command) {
+        DispatchResources resources = safeResources();
+        Objects.requireNonNull(command, "command");
+        shardRouting.requireSlot(command.getShardSlot());
+        if (command.getId() <= 0 || command.getAttemptCount() < 1 || command.getMessageId() == null
+                || command.getMessageId().isBlank() || command.getMessageId().length() > 64
+                || command.getClaimToken() == null || command.getClaimToken().isBlank()
+                || command.getClaimToken().length() > 128
+                || command.getDeliveryResult() == null || command.getDeliveryResult().kind() == null) {
+            throw new IllegalArgumentException("OUTBOX_SAFE_FINISH_INVALID");
+        }
+        try {
+            return safeTransaction(resources, command.getShardSlot(), () ->
+                    technicalContext.execute(() -> finishLocked(resources, command)));
+        } catch (OutboxStorageException | TransactionException uncertain) {
+            log.warn("Outbox result remains unconfirmed, messageId={}, slot={}, failureType={}",
+                    command.getMessageId(), command.getShardSlot(), uncertain.getClass().getSimpleName());
+            return OutboxFinishStatusEnum.INDETERMINATE;
+        }
+    }
+
+    private OutboxFinishStatusEnum finishLocked(DispatchResources resources, OutboxFinishCommand command) {
+        OutboxMessagePO row = repository.safeRow(command.getId());
+        if (row == null || !command.getMessageId().equals(row.getMessageId())) {
+            return OutboxFinishStatusEnum.LEASE_LOST;
+        }
+        if (row.getAttemptCount() != command.getAttemptCount()) {
+            return OutboxFinishStatusEnum.LEASE_LOST;
+        }
+        if (row.getStatus() == OutboxStatus.SUCCEEDED || row.getStatus() == OutboxStatus.DEAD) {
+            return OutboxFinishStatusEnum.ALREADY_TERMINAL;
+        }
+        if (row.getStatus() != OutboxStatus.PROCESSING
+                || !command.getClaimToken().equals(row.getLockedBy())) {
+            return OutboxFinishStatusEnum.LEASE_LOST;
+        }
+        DeliveryResult result = command.getDeliveryResult();
+        OutboxLifecycleSignalEnum signal = switch (result.kind()) {
+            case SUCCESS -> OutboxLifecycleSignalEnum.DELIVERY_SUCCEEDED;
+            case RETRYABLE_FAILURE -> OutboxLifecycleSignalEnum.DELIVERY_RETRYABLE;
+            case PERMANENT_FAILURE -> OutboxLifecycleSignalEnum.DELIVERY_PERMANENT;
+        };
+        OutboxStatus target = lifecycle.evaluate(row.getStatus().name(), signal, row.getAttemptCount(), row.getMaxAttempts());
+        String code = target == OutboxStatus.DEAD && signal == OutboxLifecycleSignalEnum.DELIVERY_RETRYABLE
+                ? RECLAIM_EXHAUSTED_CODE : result.code();
+        int rows = writeFinish(row, target, code, result.message(), target == OutboxStatus.RETRY_WAIT
+                ? resources.retryPolicy().nextDelay(row.getAttemptCount()).toMillis() : 0);
+        return rows == 1 ? OutboxFinishStatusEnum.APPLIED : OutboxFinishStatusEnum.LEASE_LOST;
+    }
+
+    private int writeFinish(OutboxMessagePO row, OutboxStatus target, String code, String message, long delayMillis) {
+        long id = row.getId();
+        long version = row.getVersion();
+        String owner = row.getLockedBy();
+        return switch (target) {
+            case SUCCEEDED -> repository.updateSucceeded(id, version, owner, target, clock.instant(), TECHNICAL_USER_ID);
+            case RETRY_WAIT -> repository.updateRetry(id, version, owner, target, delayMillis,
+                    sanitize(code, 64), sanitize(message, 2000), clock.instant(), TECHNICAL_USER_ID);
+            case DEAD -> repository.updateDead(id, version, owner, target, sanitize(code, 64),
+                    sanitize(message, 2000), clock.instant(), TECHNICAL_USER_ID);
+            default -> throw new OutboxStorageException("Unexpected outbox result state");
+        };
+    }
+
+    private DispatchResources safeResources() {
+        if (safeDispatch == null) {
+            throw new UnsupportedOperationException("OUTBOX_SAFE_DISPATCH_NOT_CONFIGURED");
+        }
+        return safeDispatch;
+    }
+
+    private boolean consumptionEnabled() {
+        return dispatchOptions == null || dispatchOptions.getDispatch().isConsumptionEnabled();
+    }
+
+    private void requireLegacyClaim() {
+        if (!consumptionEnabled() || dispatchOptions != null
+                && dispatchOptions.getDispatch().getMode() != DispatchMode.LEGACY) {
+            throw new IllegalStateException("OUTBOX_LEGACY_CLAIM_DISABLED");
+        }
+    }
+
+    private static long nextId() {
+        return SnowflakeIdGenerator.nextLongId();
+    }
+
+    private <T> T safeTransaction(DispatchResources resources, int slot, Supplier<T> operation) {
+        long started = System.nanoTime();
+        return runSafeTransaction(resources, slot, operation, started);
+    }
+
+    private <T> T runSafeTransaction(DispatchResources resources, int slot, Supplier<T> operation, long started) {
+        long budget = resources.options().getCoordination().getClaimTimeout().toNanos();
+        try {
+            return resources.transaction().execute(status -> OutboxShardContext.withSlot(slot, () -> {
+                T result = operation.get();
+                if (System.nanoTime() - started >= budget) {
+                    throw new OutboxStorageException("Outbox shard operation exceeded its transaction budget");
+                }
+                return result;
+            }));
+        } catch (DataAccessException failure) {
+            throw storageFailure("Outbox shard transaction failed", failure);
+        }
+    }
+
+    private record DispatchResources(TransactionalOutboxProperties options, ObjectMapper mapper,
+                                     OutboxRetryPolicy retryPolicy, OutboxQueueMemberDAO members,
+                                     OutboxQueueLeaseDAO leases, OutboxQueueMemberConverter memberConverter,
+                                     OutboxQueueLeaseConverter leaseConverter, TransactionTemplate transaction) {
+    }
+
+
     @Override
     public void selectShard(String group) {
         shardRouting.selectGroup(group);
@@ -171,6 +560,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
             @NotNull String leaseOwner,
             @NotNull Duration leaseDuration
     ) {
+        requireLegacyClaim();
         List<String> channelFilter = normalizeChannels(channels);
         if (channelFilter != null && channelFilter.isEmpty()) {
             return List.of();
@@ -208,6 +598,7 @@ public class MybatisPlusOutboxStore implements OutboxStore {
             @NotNull String leaseOwner,
             @NotNull Duration leaseDuration
     ) {
+        requireLegacyClaim();
         if (messageIds == null || messageIds.isEmpty()) {
             return List.of();
         }
@@ -290,8 +681,12 @@ public class MybatisPlusOutboxStore implements OutboxStore {
                 return false;
             }
             OutboxStatus target = lifecycle.evaluate(
-                    current.getStatus().getMessage(), OutboxLifecycleSignalEnum.SCHEDULE_RETRY,
+                    current.getStatus().getMessage(), safeDispatch == null ? OutboxLifecycleSignalEnum.SCHEDULE_RETRY
+                            : OutboxLifecycleSignalEnum.DELIVERY_RETRYABLE,
                     current.getAttemptCount(), current.getMaxAttempts());
+            if (target == OutboxStatus.DEAD) {
+                return writeFinish(current, target, RECLAIM_EXHAUSTED_CODE, errorMessage, 0) == 1;
+            }
             return repository.updateRetry(id, current.getVersion(), leaseOwner, target, delay.toMillis(),
                     sanitize(errorCode, 64), sanitize(errorMessage, 2000), clock.instant(),
                     TECHNICAL_USER_ID) == 1;
@@ -464,6 +859,9 @@ public class MybatisPlusOutboxStore implements OutboxStore {
 
     private <T> T inWorkerTransaction(String publicMessage, int shardSlot, Supplier<T> operation) {
         try {
+            if (safeDispatch != null) {
+                return safeTransaction(safeDispatch, shardSlot, () -> technicalContext.execute(operation));
+            }
             return workerTransaction.execute(status -> OutboxShardContext.withSlot(
                     shardSlot, () -> technicalContext.execute(operation)));
         } catch (OutboxStorageException failure) {

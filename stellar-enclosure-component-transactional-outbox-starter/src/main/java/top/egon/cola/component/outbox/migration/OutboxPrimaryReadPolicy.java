@@ -17,9 +17,23 @@ final class OutboxPrimaryReadPolicy {
     private static final String TABLE = "egon_outbox.egon_cola_outbox_message";
 
     private static final Set<String> ALLOWED = Set.of(
+            canonical("SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, "
+                    + "instance_id, capabilities_json, last_seen_at, expires_at, clock_timestamp() AS database_time "
+                    + "FROM egon_outbox.egon_cola_outbox_queue_member WHERE shard_slot = ? AND tenant_id = 0 "
+                    + "AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY instance_id LIMIT ? FOR KEY SHARE"),
+            canonical("SELECT id FROM egon_outbox.egon_cola_outbox_queue_member "
+                    + "WHERE shard_slot = ? AND tenant_id = 0 AND deleted_at IS NULL "
+                    + "AND expires_at <= clock_timestamp() - (? * interval '1 millisecond') ORDER BY id LIMIT ? FOR KEY SHARE"),
+            canonical("SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, "
+                    + "channel, owner_instance_id, epoch, expires_at "
+                    + "FROM egon_outbox.egon_cola_outbox_queue_lease WHERE shard_slot = ? AND tenant_id = 0 "
+                    + "AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY channel LIMIT ? FOR KEY SHARE"),
             canonical("SELECT instance_id, capabilities_json, expires_at, clock_timestamp() AS database_time "
                     + "FROM egon_outbox.egon_cola_outbox_queue_member WHERE shard_slot = ? AND tenant_id = 0 "
                     + "AND deleted_at IS NULL AND expires_at > clock_timestamp() ORDER BY instance_id LIMIT ?"),
+            canonical("SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, "
+                    + "channel, owner_instance_id, epoch, expires_at FROM egon_outbox.egon_cola_outbox_queue_lease "
+                    + "WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL FOR SHARE"),
             canonical("SELECT channel, owner_instance_id, epoch, expires_at FROM egon_outbox.egon_cola_outbox_queue_lease "
                     + "WHERE shard_slot = ? AND channel = ? AND tenant_id = 0 AND deleted_at IS NULL FOR SHARE"),
             canonical("SELECT channel, owner_instance_id, epoch, expires_at "

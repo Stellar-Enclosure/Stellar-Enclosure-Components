@@ -411,4 +411,56 @@
         </foreach>
         ORDER BY id
     </select>
+
+    <select id="selectSafeDue" resultMap="outboxMessageResultMap" flushCache="true" useCache="false">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/> FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND status IN ('PENDING','RETRY_WAIT') AND next_attempt_at &lt;= statement_timestamp()
+        ORDER BY next_attempt_at, id LIMIT #{limit} FOR UPDATE NOWAIT
+    </select>
+
+    <select id="selectSafeExpired" resultMap="outboxMessageResultMap" flushCache="true" useCache="false">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/> FROM egon_outbox.egon_cola_outbox_message
+        WHERE shard_slot = #{_outboxSlot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND status = 'PROCESSING' AND locked_until &lt;= statement_timestamp()
+        ORDER BY locked_until, id LIMIT #{limit} FOR UPDATE NOWAIT
+    </select>
+
+    <select id="selectSafeRow" resultMap="outboxMessageResultMap" flushCache="true" useCache="false">
+        <include refid="outboxShardBinding"/>
+        SELECT <include refid="outboxMessageColumns"/> FROM egon_outbox.egon_cola_outbox_message
+        WHERE id = #{id} AND shard_slot = #{_outboxSlot} AND tenant_id = 0 AND deleted_at IS NULL FOR UPDATE
+    </select>
+
+    <update id="commitSafeClaim">
+        <include refid="outboxShardBinding"/>
+        UPDATE egon_outbox.egon_cola_outbox_message
+        SET status = 'PROCESSING', attempt_count = attempt_count + 1,
+            locked_by = #{owner}, locked_until = clock_timestamp() + (#{leaseMillis} * interval '1 millisecond'),
+            updated_at = clock_timestamp(), update_time = clock_timestamp(),
+            update_user_id = 'system:outbox', version = version + 1
+        WHERE id = #{id} AND version = #{version} AND shard_slot = #{_outboxSlot}
+          AND status = #{source} AND tenant_id = 0 AND deleted_at IS NULL AND attempt_count &lt; max_attempts
+          <include refid="safeDuePredicate"/>
+    </update>
+
+    <update id="completeSafeExhausted">
+        <include refid="outboxShardBinding"/>
+        UPDATE egon_outbox.egon_cola_outbox_message
+        SET status = 'DEAD', locked_by = NULL, locked_until = NULL, completed_at = clock_timestamp(),
+            last_error_code = #{code}, last_error_message = #{message},
+            updated_at = clock_timestamp(), update_time = clock_timestamp(),
+            update_user_id = 'system:outbox', version = version + 1
+        WHERE id = #{id} AND version = #{version} AND shard_slot = #{_outboxSlot}
+          AND status = #{source} AND tenant_id = 0 AND deleted_at IS NULL AND attempt_count >= max_attempts
+          <include refid="safeDuePredicate"/>
+    </update>
+
+    <sql id="safeDuePredicate">
+        AND ((status IN ('PENDING','RETRY_WAIT') AND next_attempt_at &lt;= clock_timestamp())
+            OR (status = 'PROCESSING' AND locked_until &lt;= clock_timestamp()))
+    </sql>
+
 </mapper>

@@ -1,6 +1,28 @@
 package top.egon.cola.component.outbox.integration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.mapstruct.factory.Mappers;
+import org.springframework.transaction.support.TransactionTemplate;
+import top.egon.cola.component.outbox.autoconfigure.OutboxMpStorageProperties;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties;
+import top.egon.cola.component.outbox.autoconfigure.TransactionalOutboxProperties.DispatchMode;
+import top.egon.cola.component.outbox.delivery.DeliveryResult;
+import top.egon.cola.component.outbox.persistence.OutboxSchemaMetadataValidator;
+import top.egon.cola.component.outbox.persistence.OutboxTechnicalContextExecutor;
+import top.egon.cola.component.outbox.persistence.converter.OutboxMessageConverter;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueMemberConverter;
+import top.egon.cola.component.outbox.persistence.converter.OutboxQueueLeaseConverter;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO;
+import top.egon.cola.component.outbox.persistence.repository.OutboxMessageRepository;
+import top.egon.cola.component.outbox.statemachine.OutboxLifecycleService;
+import top.egon.cola.component.outbox.store.MybatisPlusOutboxStore;
+import top.egon.cola.component.outbox.store.OutboxClaimCommand;
+import top.egon.cola.component.outbox.store.OutboxFinishCommand;
+import top.egon.cola.component.outbox.store.OutboxQueueCoordinationCommand;
+import top.egon.cola.component.outbox.store.OutboxQueueKey;
+import top.egon.cola.component.outbox.store.OutboxQueueLease;
+import top.egon.cola.component.outbox.store.OutboxRecord;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -21,6 +43,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -101,6 +125,8 @@ abstract class PostgresqlOutboxTestSupport {
         properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].username", username);
         properties.put("egon.cola.component.mybatis-plus.sharding.data-sources[0].password", password);
         properties.put("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[0]", "egon_cola_outbox_message");
+        properties.put("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[1]", "egon_cola_outbox_queue_member");
+        properties.put("egon.cola.component.mybatis-plus.tenant-id.ignored-tables[2]", "egon_cola_outbox_queue_lease");
         properties.put("egon.cola.component.transactional-outbox.enabled", "true");
         properties.put("egon.cola.component.transactional-outbox.node-id", "outbox-test");
         properties.put("egon.cola.component.transactional-outbox.annotation.enabled", "false");
@@ -154,6 +180,39 @@ abstract class PostgresqlOutboxTestSupport {
 
     static OutboxStore outboxStore() {
         return context.getBean(OutboxStore.class);
+    }
+
+    static MybatisPlusOutboxStore safeMpOutboxStore(DispatchMode mode) {
+        TransactionalOutboxProperties properties = new TransactionalOutboxProperties();
+        properties.getDispatch().setMode(mode).setMaxClaimBatch(1);
+        MybatisPlusOutboxStore store = new MybatisPlusOutboxStore(
+                context.getBean(OutboxMessageRepository.class),
+                context.getBean(OutboxMessageConverter.class),
+                context.getBean(OutboxTechnicalContextExecutor.class),
+                context.getBean(OutboxLifecycleService.class),
+                context.getBean("outboxWorkerTransactionTemplate", TransactionTemplate.class),
+                context.getBean(OutboxSchemaMetadataValidator.class),
+                context.getBean("egonColaMybatisPlusClock", Clock.class),
+                context.getBean("outboxMpStorageProperties", OutboxMpStorageProperties.class));
+        store.configureSafeDispatch(properties, objectMapper, attempt -> Duration.ofSeconds(1),
+                context.getBean(OutboxQueueMemberDAO.class), context.getBean(OutboxQueueLeaseDAO.class),
+                Mappers.getMapper(OutboxQueueMemberConverter.class), Mappers.getMapper(OutboxQueueLeaseConverter.class));
+        return store;
+    }
+
+    static OutboxQueueCoordinationCommand coordinateCommand(String instance, Set<String> acquire) {
+        return OutboxQueueCoordinationCommand.builder().shardSlot(0).instanceId(instance)
+                .channels(Set.of("test")).acquire(acquire).build();
+    }
+
+    static OutboxClaimCommand safeClaim(String token, OutboxQueueLease lease) {
+        return OutboxClaimCommand.builder().queueKey(new OutboxQueueKey(0, "test")).limit(1)
+                .claimToken(token).queueLease(lease).leaseDuration(Duration.ofSeconds(60)).dueQuota(1).build();
+    }
+
+    static OutboxFinishCommand safeFinish(OutboxRecord row, DeliveryResult result) {
+        return OutboxFinishCommand.builder().shardSlot(row.shardSlot()).id(row.id()).messageId(row.messageId())
+                .attemptCount(row.attemptCount()).claimToken(row.lockedBy()).deliveryResult(result).build();
     }
 
     static NewOutboxRecord newRecord(String messageId) {

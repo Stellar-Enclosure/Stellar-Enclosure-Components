@@ -155,4 +155,22 @@ public interface OutboxMessageDAO extends EgonColaMapper<OutboxMessagePO> {
             @Param("et") @Valid @NotNull(groups = EgonColaModelValidationGroups.Restore.class) OutboxMessagePO entity) {
         throw new UnsupportedOperationException("OUTBOX_RESTORE_UNSUPPORTED");
     }
+
+    List<OutboxMessagePO> selectSafeDue(@Param("channel") @NotBlank String channel,
+                                       @Param("limit") @Min(1) @Max(10_000) int limit);
+
+    List<OutboxMessagePO> selectSafeExpired(@Param("channel") @NotBlank String channel,
+                                           @Param("limit") @Min(1) @Max(10_000) int limit);
+
+    OutboxMessagePO selectSafeRow(@Param("id") @Positive long id);
+
+    int commitSafeClaim(@Param("id") @Positive long id, @Param("version") @Min(0) long version,
+                        @Param("source") @NotNull OutboxStatus source,
+                        @Param("owner") @NotBlank @Size(max = 128) String owner,
+                        @Param("leaseMillis") @Positive long leaseMillis);
+
+    int completeSafeExhausted(@Param("id") @Positive long id, @Param("version") @Min(0) long version,
+                              @Param("source") @NotNull OutboxStatus source,
+                              @Param("code") @NotBlank @Size(max = 64) String code,
+                              @Param("message") @NotBlank @Size(max = 2000) String message);
 }

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO">
+
+    <resultMap id="lease" type="top.egon.cola.component.outbox.persistence.po.OutboxQueueLeasePO">
+        <result column="id" property="id"/>
+        <result column="shard_slot" property="shardSlot"/>
+        <result column="tenant_id" property="tenantId"/>
+        <result column="create_user_id" property="createUserId"/>
+        <result column="create_time" property="createTime"/>
+        <result column="update_user_id" property="updateUserId"/>
+        <result column="update_time" property="updateTime"/>
+        <result column="deleted_at" property="deletedAt"/>
+        <result column="version" property="version"/>
+        <result column="channel" property="channel"/>
+        <result column="owner_instance_id" property="ownerInstanceId"/>
+        <result column="epoch" property="epoch"/>
+        <result column="expires_at" property="expiresAt"/>
+    </resultMap>
+
+    <select id="lockQueue" resultMap="lease" flushCache="true" useCache="false">
+        SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, channel, owner_instance_id, epoch, expires_at FROM egon_outbox.egon_cola_outbox_queue_lease
+        WHERE shard_slot = #{slot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL FOR SHARE
+    </select>
+
+    <select id="current" resultType="java.lang.Boolean" flushCache="true" useCache="false">
+        SELECT expires_at > clock_timestamp() FROM egon_outbox.egon_cola_outbox_queue_lease
+        WHERE shard_slot = #{slot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND owner_instance_id = #{instance} AND epoch = #{epoch} FOR SHARE
+    </select>
+
+    <select id="active" resultMap="lease" flushCache="true" useCache="false">
+        SELECT id, shard_slot, tenant_id, create_user_id, create_time, update_user_id, update_time, deleted_at, version, channel, owner_instance_id, epoch, expires_at FROM egon_outbox.egon_cola_outbox_queue_lease
+        WHERE shard_slot = #{slot} AND tenant_id = 0 AND deleted_at IS NULL
+          AND expires_at > clock_timestamp() ORDER BY channel LIMIT #{limit} FOR KEY SHARE
+    </select>
+
+    <update id="acquireExpired">
+        UPDATE egon_outbox.egon_cola_outbox_queue_lease
+        SET owner_instance_id = #{instance}, epoch = epoch + 1,
+            expires_at = clock_timestamp() + (#{leaseMillis} * interval '1 millisecond'),
+            update_time = clock_timestamp(), version = version + 1
+        WHERE shard_slot = #{slot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND expires_at &lt;= clock_timestamp() AND epoch &lt; 9223372036854775807
+    </update>
+
+    <insert id="register">
+        INSERT INTO egon_outbox.egon_cola_outbox_queue_lease
+            (id, shard_slot, channel, owner_instance_id, epoch, expires_at,
+             tenant_id, create_user_id, create_time, update_user_id, update_time)
+        VALUES (#{id}, #{slot}, #{channel}, #{instance}, 1,
+            clock_timestamp() + (#{leaseMillis} * interval '1 millisecond'),
+            0, 'system:outbox', clock_timestamp(), 'system:outbox', clock_timestamp())
+        ON CONFLICT (shard_slot, channel) DO NOTHING
+    </insert>
+
+    <update id="renew">
+        UPDATE egon_outbox.egon_cola_outbox_queue_lease
+        SET expires_at = clock_timestamp() + (#{leaseMillis} * interval '1 millisecond'),
+            update_time = clock_timestamp(), version = version + 1
+        WHERE shard_slot = #{slot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND owner_instance_id = #{instance} AND epoch = #{epoch} AND expires_at > clock_timestamp()
+    </update>
+
+    <update id="release">
+        UPDATE egon_outbox.egon_cola_outbox_queue_lease
+        SET expires_at = clock_timestamp(), update_time = clock_timestamp(), version = version + 1
+        WHERE shard_slot = #{slot} AND channel = #{channel} AND tenant_id = 0 AND deleted_at IS NULL
+          AND owner_instance_id = #{instance} AND epoch = #{epoch} AND expires_at > clock_timestamp()
+    </update>
+</mapper>

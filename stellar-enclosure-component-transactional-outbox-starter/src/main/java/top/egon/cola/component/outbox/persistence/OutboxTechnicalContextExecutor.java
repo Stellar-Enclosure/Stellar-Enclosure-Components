@@ -10,6 +10,8 @@ import org.springframework.validation.annotation.Validated;
 import top.egon.cola.component.common.mybatis.autoconfigure.EgonColaMybatisPlusProperties;
 import top.egon.cola.component.common.mybatis.extension.EgonColaTechnicalTenantScope;
 import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO;
 
 import java.util.function.Supplier;
 
@@ -27,14 +29,22 @@ public class OutboxTechnicalContextExecutor {
     private final EgonColaMybatisPlusProperties properties;
 
     public <T> T execute(@NotNull Supplier<T> action) {
-        return executeWithUser(action, TECHNICAL_USER_ID);
+        return executeWithUser(OutboxMessageDAO.class, action, TECHNICAL_USER_ID);
     }
 
     public <T> T executeMigration(@NotNull Supplier<T> action) {
-        return executeWithUser(action, MIGRATION_USER_ID);
+        return executeWithUser(OutboxMessageDAO.class, action, MIGRATION_USER_ID);
     }
 
-    private <T> T executeWithUser(Supplier<T> action, String userId) {
+    public <T> T executeMember(@NotNull Supplier<T> action) {
+        return executeWithUser(OutboxQueueMemberDAO.class, action, TECHNICAL_USER_ID);
+    }
+
+    public <T> T executeLease(@NotNull Supplier<T> action) {
+        return executeWithUser(OutboxQueueLeaseDAO.class, action, TECHNICAL_USER_ID);
+    }
+
+    private <T> T executeWithUser(Class<?> mapper, Supplier<T> action, String userId) {
         if (action == null) {
             throw new IllegalArgumentException("OUTBOX_TECHNICAL_ACTION_REQUIRED");
         }
@@ -49,7 +59,7 @@ public class OutboxTechnicalContextExecutor {
         try {
             MDC.put(tenantMdcKey, TECHNICAL_TENANT_ID);
             MDC.put(userIdMdcKey, userId);
-            return EgonColaTechnicalTenantScope.execute(OutboxMessageDAO.class, action);
+            return EgonColaTechnicalTenantScope.execute(mapper, action);
         } finally {
             restore(userIdMdcKey, previousUserId);
             restore(tenantMdcKey, previousTenantId);

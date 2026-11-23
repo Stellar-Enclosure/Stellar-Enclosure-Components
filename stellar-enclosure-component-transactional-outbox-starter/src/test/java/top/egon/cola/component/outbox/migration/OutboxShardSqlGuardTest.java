@@ -4,6 +4,8 @@ import org.apache.ibatis.builder.xml.XMLMapperBuilder;
 import org.apache.ibatis.session.Configuration;
 import org.junit.jupiter.api.Test;
 import top.egon.cola.component.outbox.persistence.dao.OutboxMessageDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueMemberDAO;
+import top.egon.cola.component.outbox.persistence.dao.OutboxQueueLeaseDAO;
 import top.egon.cola.component.outbox.persistence.po.OutboxMessagePO;
 import top.egon.cola.component.outbox.persistence.OutboxShardContext;
 
@@ -30,14 +32,71 @@ class OutboxShardSqlGuardTest {
                 "idempotencyKey", "key", "limit", 10);
         for (var method : OutboxMessageDAO.class.getDeclaredMethods()) {
             if (method.isDefault()) { continue; }
-            String sql = configuration.getMappedStatement(OutboxMessageDAO.class.getName() + '.' + method.getName())
-                    .getBoundSql(parameters).getSql();
-            OutboxShardContext.withSlot(0, () -> {
+            OutboxShardContext.withSlot(7, () -> {
+                var bound = configuration.getMappedStatement(OutboxMessageDAO.class.getName() + '.' + method.getName())
+                        .getBoundSql(parameters);
+                String sql = bound.getSql();
+                bound.getParameterMappings().stream()
+                        .map(org.apache.ibatis.mapping.ParameterMapping::getProperty)
+                        .filter(property -> property.equals("_outboxSlot") || property.equals("outboxShardSlot"))
+                        .forEach(property -> {
+                            org.assertj.core.api.Assertions.assertThat(bound.hasAdditionalParameter(property))
+                                    .as("%s must bind the shard context parameter %s", method.getName(), property).isTrue();
+                            org.assertj.core.api.Assertions.assertThat(bound.getAdditionalParameter(property))
+                                    .as("%s.%s", method.getName(), property).isEqualTo(7);
+                        });
                 assertThatCode(() -> OutboxShardSqlGuard.validate(sql)).as("%s: %s", method.getName(), sql)
                         .doesNotThrowAnyException();
                 return null;
             });
         }
+    }
+
+    @Test
+    void everyCoordinationMapperXmlStatementIsShardBoundAndRequiresItsContext() throws Exception {
+        for (Class<?> mapper : List.of(OutboxQueueMemberDAO.class, OutboxQueueLeaseDAO.class)) {
+            Configuration configuration = new Configuration();
+            configuration.addMapper(mapper);
+            String path = "mapper/outbox/" + mapper.getSimpleName().replace("DAO", "Mapper.xml");
+            try (InputStream input = getClass().getClassLoader().getResourceAsStream(path)) {
+                org.assertj.core.api.Assertions.assertThat(input).as("%s", path).isNotNull();
+                new XMLMapperBuilder(input, configuration, path, configuration.getSqlFragments()).parse();
+            }
+            for (var method : mapper.getDeclaredMethods()) {
+                if (method.isDefault()) continue;
+                Map<String, Object> parameters = new java.util.LinkedHashMap<>();
+                for (var parameter : method.getParameters()) {
+                    var name = parameter.getAnnotation(org.apache.ibatis.annotations.Param.class);
+                    if (name == null) throw new AssertionError("Mapper parameters must have @Param: " + method);
+                    parameters.put(name.value(), renderParameter(parameter.getType(), name.value()));
+                }
+                OutboxShardContext.withSlot(7, () -> {
+                    String sql = configuration.getMappedStatement(mapper.getName()+'.'+method.getName())
+                            .getBoundSql(parameters).getSql();
+                    assertThatCode(() -> OutboxShardSqlGuard.validate(sql)).as("%s.%s: %s", mapper.getSimpleName(), method.getName(), sql)
+                            .doesNotThrowAnyException();
+                    return null;
+                });
+                // Render while bound, then validate exactly the same SQL with no context.
+                String sql = OutboxShardContext.withSlot(7, () -> configuration.getMappedStatement(
+                        mapper.getName()+'.'+method.getName()).getBoundSql(parameters).getSql());
+                assertThatThrownBy(() -> OutboxShardSqlGuard.validate(sql)).as("%s.%s", mapper.getSimpleName(), method.getName())
+                        .hasMessageContaining("OUTBOX_SHARD_SQL_INVALID");
+            }
+        }
+    }
+
+    private static Object renderParameter(Class<?> type, String name) throws Exception {
+        if (type == String.class) return name.toLowerCase(java.util.Locale.ROOT).contains("capabilit") ? "[\"test\"]" : "test";
+        if (type == int.class || type == Integer.class) return 1;
+        if (type == long.class || type == Long.class) return 1L;
+        if (type == boolean.class || type == Boolean.class) return false;
+        if (type == java.time.Instant.class) return java.time.Instant.parse("2026-11-23T00:00:00Z");
+        if (type == java.time.OffsetDateTime.class) return java.time.OffsetDateTime.parse("2026-11-23T00:00:00Z");
+        if (type == java.time.Duration.class) return java.time.Duration.ofSeconds(60);
+        if (java.util.Collection.class.isAssignableFrom(type)) return name.toLowerCase(java.util.Locale.ROOT).contains("id") ? List.of(1L) : List.of("test");
+        if (type.isEnum()) return type.getEnumConstants()[0];
+        return type.getDeclaredConstructor().newInstance();
     }
 
     @Test

@@ -256,4 +256,23 @@ public class OutboxMessageRepository extends EgonColaRepository<OutboxMessageDAO
         }
         return affectedRows;
     }
+
+    public List<OutboxMessagePO> safeCandidates(@NotBlank String channel, boolean expired, @Positive int limit) {
+        return expired ? getBaseMapper().selectSafeExpired(channel, limit)
+                : getBaseMapper().selectSafeDue(channel, limit);
+    }
+
+    public OutboxMessagePO safeRow(@Positive long id) {
+        return getBaseMapper().selectSafeRow(id);
+    }
+
+    public int safeClaim(@NotNull OutboxMessagePO row, @NotBlank String token, @Positive long leaseMillis) {
+        return requireAtMostOne("commitSafeClaim", getBaseMapper().commitSafeClaim(
+                row.getId(), row.getVersion(), row.getStatus(), token, leaseMillis));
+    }
+
+    public int safeExhausted(@NotNull OutboxMessagePO row, @NotBlank String code, @NotBlank String detail) {
+        return requireAtMostOne("completeSafeExhausted", getBaseMapper().completeSafeExhausted(
+                row.getId(), row.getVersion(), row.getStatus(), code, detail));
+    }
 }
