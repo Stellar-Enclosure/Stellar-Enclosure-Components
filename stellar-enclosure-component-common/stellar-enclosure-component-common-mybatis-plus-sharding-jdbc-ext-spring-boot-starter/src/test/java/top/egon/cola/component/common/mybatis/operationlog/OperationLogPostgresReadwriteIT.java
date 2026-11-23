@@ -301,8 +301,8 @@ class OperationLogPostgresReadwriteIT {
                                  var actor = MDC.putCloseable("userId", "test-authority")) {
                                 assertThatThrownBy(() -> sourceTransaction.executeWithoutResult(status -> repo.accept(event)))
                                         .hasMessage("OPERATION_LOG_SOURCE_TRANSACTION_ACTIVE");
-                                repo.accept(event);
-                                repo.accept(event);
+                                assertThat(repo.acceptAndConfirm(event)).isTrue();
+                                assertThat(repo.acceptAndConfirm(event)).isFalse();
                                 assertThatThrownBy(() -> repo.accept(event.toBuilder()
                                         .occurredAt(now.plus(33, ChronoUnit.DAYS)).build()))
                                         .isInstanceOf(OperationLogRepository.PermanentRejectionException.class);

@@ -79,6 +79,11 @@ public class OperationLogRepository {
 
     /** A separately committed acceptance can be ACKed only after this method returns. */
     public void accept(@Valid OperationLogEvent event) {
+        acceptAndConfirm(event);
+    }
+
+    /** Returns only after commit, distinguishing a newly accepted fact from its durable duplicate. */
+    public boolean acceptAndConfirm(@Valid OperationLogEvent event) {
         Objects.requireNonNull(receipts, "OPERATION_LOG_ISOLATED_TARGET_REQUIRED");
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("OPERATION_LOG_SOURCE_TRANSACTION_ACTIVE");
@@ -89,14 +94,14 @@ public class OperationLogRepository {
             throw new PermanentRejectionException("OPERATION_LOG_EVENT_EXPIRED");
         }
         String digest = fingerprint(event);
-        transaction.executeWithoutResult(status -> {
+        return Objects.requireNonNull(transaction.execute(status -> {
             OperationLogReceiptPO key = OperationLogReceiptPO.builder()
                     .id(event.getEventId()).tenantId(event.getTenantId())
                     .occurredAt(event.getOccurredAt()).payloadSha256(digest).build();
             int inserted = receipts.insertIfAbsent(key);
             if (inserted == 1) {
                 insertFact(event);
-                return;
+                return true;
             }
             OperationLogReceiptDAO.ReceiptConfirmation existing = inserted == 0 ? receipts.confirm(event.getTenantId(), event.getEventId()) : null;
             if (existing == null) {
@@ -107,7 +112,8 @@ public class OperationLogRepository {
                 throw new PermanentRejectionException("OPERATION_LOG_RECEIPT_CONFLICT");
             }
             log.debug("Operation log duplicate confirmed for event {}", event.getEventId());
-        });
+            return false;
+        }), "OPERATION_LOG_ACCEPTANCE_CONFIRMATION_REQUIRED");
     }
 
     public List<PageRow> page(@Valid WindowQuery query) {
